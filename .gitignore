@@ -1,0 +1,9 @@
+# Local secrets
+xbx_apiKey.md
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
