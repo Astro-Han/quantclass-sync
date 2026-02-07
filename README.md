@@ -1,137 +1,141 @@
-# QuantClass 同步脚本使用说明
+# QuantClass 同步脚本说明（官方命令兼容 + 本地安全增强）
 
-本文档面向零代码基础用户，目标是：你能安全地运行脚本、看懂输出、快速定位问题。
+脚本路径：`/Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py`  
+目标：命令更简单，同时兼容官方高频命令：`init / one_data / all_data / full_data_link / full_data`。
 
-## 1. 脚本位置
-
-- `/Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py`
-
-## 2. 你需要知道的三个模式
-
-- `network` 模式（默认）：联网从 QuantClass 拉取最新数据。
-- `cache-only` 模式：不联网，只使用本地缓存目录补跑。
-- `dry-run` 演练模式：只计算结果，不写入数据文件。
-
-## 3. 最常用命令
-
-### 3.1 正常日更（默认联网）
+## 1. 先安装依赖
 
 ```bash
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py \
-  --products stock-trading-data-pro stock-main-index-data stock-fin-data-xbx \
-  --data-root /Users/yuhan/workspace/quant/data/xbx_data \
-  --work-dir /Users/yuhan/workspace/quant/data/.cache/quantclass
+python3 -m pip install typer pydantic rich apscheduler requests
 ```
 
-### 3.2 离线补跑（使用本地缓存）
+可选解压依赖（按需）：
 
 ```bash
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py \
-  --products stock-trading-data-pro stock-main-index-data stock-fin-data-xbx \
-  --cache-only \
-  --data-root /Users/yuhan/workspace/quant/data/xbx_data \
-  --work-dir /Users/yuhan/workspace/quant/data/.cache/quantclass
+python3 -m pip install py7zr rarfile
 ```
 
-### 3.3 安全演练（不写数据）
+## 2. 命令总览
+
+### 2.1 初始化状态（不下载）
 
 ```bash
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py \
-  --products stock-trading-data-pro stock-main-index-data stock-fin-data-xbx \
-  --dry-run \
-  --data-root /Users/yuhan/workspace/quant/data/xbx_data \
-  --work-dir /Users/yuhan/workspace/quant/data/.cache/quantclass
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py init
 ```
 
-## 4. 日志格式与级别
-
-### 4.1 日志格式（新增）
-
-- `text`（默认）：兼容你现在的终端输出格式，最适合人工查看。
-- `json`：结构化日志（每行都是 JSON），最适合后续做检索、统计、告警。
-
-常用命令：
+### 2.2 更新单产品（增量）
 
 ```bash
-# 默认文本日志（兼容旧命令）
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py one_data stock-trading-data
 ```
+
+指定日期（可选）：
 
 ```bash
-# JSON 结构化日志（推荐接入可观测性系统时使用）
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py --log-format json
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py one_data stock-trading-data --date-time 2026-02-06
 ```
 
-`json` 模式下会包含固定英文机器字段（如 `event`、`level`、`run_id`），
-同时 `message` 使用中文，并带 `lang=zh-CN` 字段，兼顾“机器可读 + 人类易读”。
+### 2.3 批量更新
 
-### 4.2 日志级别（简化为 3 级）
-
-- `ERROR`：只有错误。
-- `INFO`：默认，显示关键进度和结果。
-- `DEBUG`：最详细，用于排查问题。
-
-常用开关：
+默认本地存量模式（只更新本地已有合法产品）：
 
 ```bash
-# 详细日志
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py --verbose
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py all_data
 ```
+
+按 catalog 全量模式：
 
 ```bash
-# 安静模式（仅错误和摘要）
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py --quiet
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py all_data --mode catalog
 ```
 
-## 5. 凭证优先级（固定规则）
-
-脚本会按下面顺序找 `api_key` 和 `hid`：
-
-1. 命令行参数：`--api-key --hid`
-2. 环境变量：`QUANTCLASS_API_KEY QUANTCLASS_HID`
-3. 本地文件：`--secrets-file`（默认 `xbx_data/xbx_apiKey.md`）
-
-你可以只维护 `xbx_data/xbx_apiKey.md`，脚本会自动兜底读取。
-
-## 6. 报告输出（同一份报告，两种输出）
-
-- `--report-file`：写到 JSON 文件（适合留档）
-- `--report-json`：终端直接打印 JSON（适合临时查看）
-
-示例：
+显式指定产品（可重复传参）：
 
 ```bash
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py \
-  --products stock-main-index-data \
-  --cache-only \
-  --report-file /Users/yuhan/workspace/quant/data/.cache/quantclass/last_run_report.json \
-  --report-json
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py all_data --products stock-trading-data --products stock-main-index-data
 ```
 
-## 7. 如何看最终输出
+### 2.4 拉取全量下载链接
 
-每个产品会输出一行：
+```bash
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py full_data_link stock-trading-data stock-trading-data
+```
 
-- `created`：新建文件数
-- `updated`：更新文件数
-- `unchanged`：无变化文件数
-- `skipped`：跳过文件数
-- `rows_added`：新增行数（按主键去重后）
-- `elapsed`：该产品耗时
+### 2.5 全量恢复（先备份再覆盖）
 
-最后 `SUMMARY` 是全局汇总。
+```bash
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py full_data stock-trading-data
+```
 
-## 8. 常见问题
+## 3. 全局参数（所有子命令可用）
 
-### 8.1 报错 DNS 解析失败
+1. `--data-root`：数据根目录（默认 `/Users/yuhan/workspace/quant/data/xbx_data`）
+2. `--api-key`：QuantClass API Key
+3. `--hid`：QuantClass HID
+4. `--secrets-file`：本地密钥文件路径（默认 `xbx_apiKey.md`）
+5. `--dry-run`：演练模式（不写盘）
+6. `--report-file`：运行报告 JSON 输出路径
+7. `--stop-on-error`：批量更新时遇错即停
+8. `--verbose`：输出调试日志
 
-说明当前机器无法解析域名（网络或 DNS 问题）。  
-可先用 `--cache-only` 运行，等网络恢复后再用默认模式。
+## 4. 数据与状态文件
 
-### 8.2 为什么重复跑不会无限增加 rows
+1. 业务数据目录：`/Users/yuhan/workspace/quant/data/xbx_data/<product>/...`
+2. 状态数据库：`/Users/yuhan/workspace/quant/data/xbx_data/code/data/FuelBinStat.db`
+3. 状态导出：`/Users/yuhan/workspace/quant/data/xbx_data/code/data/products-status.json`
+4. 运行报告：`/Users/yuhan/workspace/quant/data/.cache/quantclass/run_report_*.json`
+5. 全量压缩缓存：`/Users/yuhan/workspace/quant/data/.cache/quantclass/zip/`
+6. 全量备份目录：`/Users/yuhan/workspace/quant/data/.cache/quantclass/full_backup/<run_id>/`
 
-脚本按主键去重（幂等），同一条数据重复导入不会重复写入。
+## 5. 落库策略（默认安全优先）
 
-### 8.3 为什么要保留旧命令兼容
+1. `merge_known`：命中已知规则，执行增量合并（只合并变化行）。
+2. `unknown_header_merge`：未知产品但“同名目标文件且表头一致”，执行轻量合并（整行去重）。
+3. `mirror_unknown`：其他未知情况，镜像写入（按原路径复制，不做字段推断）。
 
-为了降低迁移风险：你以前能跑的命令仍然能跑，新功能都是可选参数。
+## 6. 事件码与 reason_code
+
+事件码：
+- `CMD_START`
+- `CMD_DONE`
+- `DISCOVER_DONE`
+- `PRODUCT_PLAN`
+- `DOWNLOAD_OK`
+- `EXTRACT_OK`
+- `SYNC_OK`
+- `SYNC_FAIL`
+- `RUN_SUMMARY`
+
+`reason_code`：
+- `ok`
+- `unknown_local_product`
+- `no_local_products`
+- `network_error`
+- `extract_error`
+- `merge_error`
+- `mirror_fallback`
+- `unknown_header_merge`
+- `full_data_link_missing`
+- `full_data_expired`
+
+## 7. 面向零基础的阅读顺序
+
+1. 先看 `@app.command("all_data")`：理解“怎么挑产品”
+2. 再看 `process_product()`：理解“单产品下载 -> 解压 -> 落库”
+3. 再看 `sync_known_product()` 和 `sync_unknown_product()`：理解“已知规则 vs 未知规则”
+4. 最后看 `cmd_full_data()`：理解“先备份后覆盖”的全量恢复
+
+## 8. 中文规范（强制）
+
+1. 新增注释、错误提示、日志说明统一中文。
+2. 首次出现术语要带括注解释。
+3. 面向用户的错误信息采用三段式：
+- 出了什么问题
+- 可能原因
+- 下一步建议
+
+## 9. 参考
+
+1. QuantClass API 页面：[https://www.quantclass.cn/data/api](https://www.quantclass.cn/data/api)
+2. 产品清单：`/Users/yuhan/workspace/quant/data/scripts/catalog.txt`
+3. 主脚本：`/Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py`
