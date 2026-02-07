@@ -16,6 +16,7 @@ import traceback
 import zipfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import unquote, urlparse
@@ -25,7 +26,7 @@ import requests
 try:
     import typer
     from apscheduler.schedulers.background import BackgroundScheduler
-    from pydantic import BaseModel, ConfigDict, Field
+    from pydantic import BaseModel, ConfigDict, Field, field_validator
     from rich.console import Console
 except ModuleNotFoundError as exc:  # pragma: no cover - 环境缺依赖时给出中文提示
     print("缺少运行依赖；请先执行 `python3 -m pip install -r requirements.txt` 再运行脚本。", file=sys.stderr)
@@ -306,8 +307,24 @@ class ProductStatus(BaseModel):
     add_time: Optional[str] = None
     is_listed: int = 1
     full_data_download_url: Optional[str] = None
-    full_data_download_expires: Optional[str | int | float] = None
+    full_data_download_expires: Optional[str] = None
     ts: Optional[str] = None
+
+    @field_validator("full_data_download_expires", mode="before")
+    @classmethod
+    def _normalize_full_data_expires(cls, value: object) -> Optional[str]:
+        """
+        统一过期字段为字符串。
+
+        说明：
+        - 历史状态库里可能存在 int/float（例如 0、时间戳），这里做兼容归一。
+        - 0 视为“无有效过期时间”。
+        """
+
+        if value in (None, "", 0, "0"):
+            return None
+        text = str(value).strip()
+        return text or None
 
     def to_json_record(self) -> Dict[str, object]:
         """导出 products-status.json 单产品记录（camelCase 字段）。"""
@@ -808,6 +825,56 @@ def safe_extract_tar(path: Path, save_path: Path) -> None:
             _ensure_within(save_path, target)
         tf.extractall(save_path)
 
+
+def _normalize_member_name(name: str) -> str:
+    """把压缩包成员名统一成 POSIX 风格，避免反斜杠绕过路径检查。"""
+
+    return name.replace("\\", "/")
+
+
+def safe_extract_rar(path: Path, save_path: Path) -> None:
+    """
+    安全解压 rar。
+
+    先逐成员检查路径，再执行解压，避免路径越界写入。
+    """
+
+    if rarfile is None:
+        raise RuntimeError("当前环境未安装 rarfile，无法解压 .rar 文件。")
+
+    with rarfile.RarFile(path) as rf:
+        members = rf.infolist()
+        for member in members:
+            member_name = _normalize_member_name(getattr(member, "filename", ""))
+            if not member_name:
+                continue
+            _ensure_within(save_path, save_path / member_name)
+        for member in members:
+            rf.extract(member, path=save_path)
+
+
+def safe_extract_7z(path: Path, save_path: Path) -> None:
+    """
+    安全解压 7z。
+
+    先读取成员名做路径检查，再执行解压。
+    """
+
+    if py7zr is None:
+        raise RuntimeError("当前环境未安装 py7zr，无法解压 .7z 文件。")
+
+    with py7zr.SevenZipFile(path, "r") as sf:
+        member_names = sf.getnames()
+
+    for member_name in member_names:
+        normalized = _normalize_member_name(member_name)
+        if not normalized:
+            continue
+        _ensure_within(save_path, save_path / normalized)
+
+    with py7zr.SevenZipFile(path, "r") as sf:
+        sf.extractall(path=save_path)
+
 def extract_archive(path: Path, save_path: Path) -> None:
     """
     处理下载文件到可遍历目录。
@@ -833,17 +900,11 @@ def extract_archive(path: Path, save_path: Path) -> None:
         return
 
     if lower_name.endswith(".rar"):
-        if rarfile is None:
-            raise RuntimeError("当前环境未安装 rarfile，无法解压 .rar 文件。")
-        with rarfile.RarFile(path) as rf:
-            rf.extractall(save_path)
+        safe_extract_rar(path, save_path)
         return
 
     if lower_name.endswith(".7z"):
-        if py7zr is None:
-            raise RuntimeError("当前环境未安装 py7zr，无法解压 .7z 文件。")
-        with py7zr.SevenZipFile(path, "r") as sf:
-            sf.extractall(path=save_path)
+        safe_extract_7z(path, save_path)
         return
 
     if zipfile.is_zipfile(path):
@@ -1908,7 +1969,7 @@ def _execute_plans(
             elapsed = time.time() - t_product_start
             total.merge(stats)
             _append_success_result(report, plan, product, actual_time, stats, source_path, reason_code, elapsed)
-            if conn is not None:
+            if conn is not None and not command_ctx.dry_run:
                 old_status = load_product_status(conn, product)
                 status = old_status or ProductStatus(name=product, display_name=product)
                 status.last_update_time = utc_now_iso()
@@ -2136,6 +2197,7 @@ app = typer.Typer(
     help="QuantClass 数据同步脚本（官方命令兼容 + 本地安全增强）",
     no_args_is_help=True,
     add_completion=False,
+    pretty_exceptions_enable=False,
 )
 
 
@@ -2146,7 +2208,7 @@ def global_options(
     api_key: str = typer.Option("", "--api-key", help="QuantClass API Key。"),
     hid: str = typer.Option("", "--hid", help="QuantClass HID。"),
     secrets_file: Path = typer.Option(DEFAULT_SECRETS_FILE, "--secrets-file", help="本地密钥文件路径。"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="演练模式（不写盘）。"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="演练模式（不写业务数据和状态文件）。"),
     report_file: Optional[Path] = typer.Option(None, "--report-file", help="报告输出路径（JSON）。"),
     stop_on_error: bool = typer.Option(False, "--stop-on-error", help="遇错即停。"),
     verbose: bool = typer.Option(False, "--verbose", help="显示调试日志。"),
@@ -2188,7 +2250,58 @@ def _ctx(ctx: typer.Context) -> CommandContext:
     return value
 
 
+def _extract_command_context(args: tuple, kwargs: dict) -> Optional[CommandContext]:
+    """从命令参数中提取 CommandContext（用于异常时决定是否打印调试堆栈）。"""
+
+    raw_ctx = kwargs.get("ctx") or (args[0] if args else None)
+    if isinstance(raw_ctx, typer.Context):
+        obj = raw_ctx.obj
+        if isinstance(obj, CommandContext):
+            return obj
+    return None
+
+
+def _handle_command_exception(command_name: str, exc: Exception, reason_code: str, args: tuple, kwargs: dict) -> None:
+    """统一命令级异常输出，避免把冗长 traceback 直接暴露给普通用户。"""
+
+    log_error(
+        f"{command_name} 执行失败；可能原因：{exc}；建议：检查参数、网络和密钥后重试。",
+        event="CMD_DONE",
+        reason_code=reason_code,
+    )
+    command_ctx = _extract_command_context(args, kwargs)
+    if command_ctx and command_ctx.verbose:
+        log_debug(traceback.format_exc(), event="DEBUG")
+
+
+def command_guard(command_name: str):
+    """
+    命令级异常兜底装饰器。
+
+    目的：把未处理异常转换为清晰中文报错 + 非零退出码。
+    """
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except typer.Exit:
+                raise
+            except ProductSyncError as exc:
+                _handle_command_exception(command_name, exc, exc.reason_code, args, kwargs)
+                raise typer.Exit(code=1)
+            except Exception as exc:
+                _handle_command_exception(command_name, exc, REASON_MERGE_ERROR, args, kwargs)
+                raise typer.Exit(code=1)
+
+        return wrapper
+
+    return decorator
+
+
 @app.command("init")
+@command_guard("init")
 def cmd_init(ctx: typer.Context) -> None:
     """
     初始化产品状态快照。
@@ -2203,6 +2316,17 @@ def cmd_init(ctx: typer.Context) -> None:
     catalog = load_catalog_or_raise(command_ctx.catalog_file)
     discovered = discover_local_products(command_ctx.data_root, catalog)
     local_set = {x.name for x in discovered}
+
+    if command_ctx.dry_run:
+        elapsed = time.time() - t0
+        log_info(
+            "dry-run：init 仅完成状态扫描预演，未写入状态库与状态 JSON。",
+            event="CMD_DONE",
+            products=len(catalog),
+            discovered_local=len(local_set),
+            elapsed=round(elapsed, 2),
+        )
+        return
 
     conn = connect_status_db(command_ctx.data_root)
     try:
@@ -2224,6 +2348,7 @@ def cmd_init(ctx: typer.Context) -> None:
 
 
 @app.command("one_data")
+@command_guard("one_data")
 def cmd_one_data(
     ctx: typer.Context,
     product: str = typer.Argument(..., help="产品英文名（可带 -daily）。"),
@@ -2238,7 +2363,9 @@ def cmd_one_data(
     report.planned_total = len(plan)
 
     log_info("开始执行 one_data。", event="CMD_START", product=product)
-    conn = connect_status_db(command_ctx.data_root)
+    conn: Optional[sqlite3.Connection] = None
+    if not command_ctx.dry_run:
+        conn = connect_status_db(command_ctx.data_root)
     try:
         total, has_error, t_run_start = _execute_plans(
             plans=plan,
@@ -2247,9 +2374,11 @@ def cmd_one_data(
             requested_date_time=date_time.strip(),
             conn=conn,
         )
-        export_status_json(conn, status_json_path(command_ctx.data_root))
+        if conn is not None:
+            export_status_json(conn, status_json_path(command_ctx.data_root))
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
     exit_code = _finalize_and_write_report(report, total, has_error, t_run_start, report_path)
     log_info("one_data 执行完成。", event="CMD_DONE", exit_code=exit_code)
     if exit_code != 0:
@@ -2257,6 +2386,7 @@ def cmd_one_data(
 
 
 @app.command("all_data")
+@command_guard("all_data")
 def cmd_all_data(
     ctx: typer.Context,
     mode: str = typer.Option("local", "--mode", help="local=本地存量更新；catalog=全量轮询。"),
@@ -2307,12 +2437,16 @@ def cmd_all_data(
         log_error("执行清单为空，任务结束。", event="RUN_SUMMARY")
         raise typer.Exit(code=1)
 
-    conn = connect_status_db(command_ctx.data_root)
+    conn: Optional[sqlite3.Connection] = None
+    if not command_ctx.dry_run:
+        conn = connect_status_db(command_ctx.data_root)
     try:
         total, has_error, t_run_start = _execute_plans(plans, command_ctx, report, requested_date_time="", conn=conn)
-        export_status_json(conn, status_json_path(command_ctx.data_root))
+        if conn is not None:
+            export_status_json(conn, status_json_path(command_ctx.data_root))
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
     exit_code = _finalize_and_write_report(report, total, has_error, t_run_start, report_path)
     log_info("all_data 执行完成。", event="CMD_DONE", exit_code=exit_code)
@@ -2321,6 +2455,7 @@ def cmd_all_data(
 
 
 @app.command("full_data_link")
+@command_guard("full_data_link")
 def cmd_full_data_link(
     ctx: typer.Context,
     product: str = typer.Argument(..., help="产品英文名。"),
@@ -2342,24 +2477,33 @@ def cmd_full_data_link(
         headers=headers,
     )
 
-    conn = connect_status_db(command_ctx.data_root)
-    try:
-        old = load_product_status(conn, product)
-        status = old or ProductStatus(name=product, display_name=product)
-        status.full_data = full_data_name
-        status.full_data_download_url = url
-        status.full_data_download_expires = expires
-        status.last_update_time = utc_now_iso()
-        upsert_product_status(conn, status)
-        export_status_json(conn, status_json_path(command_ctx.data_root))
-    finally:
-        conn.close()
+    if command_ctx.dry_run:
+        log_info(
+            "dry-run：已获取全量链接，但未写入状态库与状态 JSON。",
+            event="CMD_DONE",
+            product=product,
+            has_expires=bool(expires),
+        )
+    else:
+        conn = connect_status_db(command_ctx.data_root)
+        try:
+            old = load_product_status(conn, product)
+            status = old or ProductStatus(name=product, display_name=product)
+            status.full_data = full_data_name
+            status.full_data_download_url = url
+            status.full_data_download_expires = expires
+            status.last_update_time = utc_now_iso()
+            upsert_product_status(conn, status)
+            export_status_json(conn, status_json_path(command_ctx.data_root))
+        finally:
+            conn.close()
 
     elapsed = time.time() - t0
     log_info("full_data_link 执行完成。", event="CMD_DONE", product=product, elapsed=round(elapsed, 2))
 
 
 @app.command("full_data")
+@command_guard("full_data")
 def cmd_full_data(
     ctx: typer.Context,
     product: str = typer.Argument(..., help="产品英文名。"),
@@ -2442,10 +2586,11 @@ def cmd_full_data(
             dry_run=command_ctx.dry_run,
         )
 
-        status.last_update_time = utc_now_iso()
-        status.data_time = status.data_time or utc_now_iso()
-        upsert_product_status(conn, status)
-        export_status_json(conn, status_json_path(command_ctx.data_root))
+        if not command_ctx.dry_run:
+            status.last_update_time = utc_now_iso()
+            status.data_time = status.data_time or utc_now_iso()
+            upsert_product_status(conn, status)
+            export_status_json(conn, status_json_path(command_ctx.data_root))
     finally:
         conn.close()
 

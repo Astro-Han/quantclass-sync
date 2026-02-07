@@ -6,13 +6,13 @@
 ## 1. 先安装依赖
 
 ```bash
-python3 -m pip install typer pydantic rich apscheduler requests
+python3 -m pip install -r /Users/yuhan/workspace/quant/data/scripts/requirements.txt
 ```
 
 可选解压依赖（按需）：
 
 ```bash
-python3 -m pip install py7zr rarfile
+python3 -m pip install -r /Users/yuhan/workspace/quant/data/scripts/requirements-archive.txt
 ```
 
 ## 2. 命令总览
@@ -73,7 +73,7 @@ python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py full_
 2. `--api-key`：QuantClass API Key
 3. `--hid`：QuantClass HID
 4. `--secrets-file`：本地密钥文件路径（默认 `xbx_apiKey.md`）
-5. `--dry-run`：演练模式（不写盘）
+5. `--dry-run`：演练模式（不写业务数据、不写状态库、不写状态 JSON）
 6. `--report-file`：运行报告 JSON 输出路径
 7. `--stop-on-error`：批量更新时遇错即停
 8. `--verbose`：输出调试日志
