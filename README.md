@@ -3,10 +3,9 @@
 脚本路径：`/Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py`
 当前版本：`v0.4.0`（发布日期：`2026-02-08`）
 
-这个工具用来做 3 件事：
+这个工具用来做 2 件事：
 1. 日常批量更新本地数据（最常用）
 2. 单产品更新（快速定位问题）
-3. 单产品全量恢复（数据异常时兜底）
 
 如果你只记一条：**先 `--dry-run` 演练，再正式执行。**
 
@@ -152,24 +151,13 @@ python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py --ver
 python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py --verbose all_data --mode local --force
 ```
 
-### 3.6 查询单产品全量下载链接
+### 3.6 说明：工具目标已简化为“只做更新”
 
-【会写入】影响范围：
-- `/Users/yuhan/workspace/quant/data/xbx_data/code/data/FuelBinStat.db`
-- `/Users/yuhan/workspace/quant/data/xbx_data/code/data/products-status.json`
-- 运行报告
-
-```bash
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py full_data_link stock-trading-data stock-trading-data
-```
-
-### 3.7 全量恢复单产品（兜底操作）
-
-【高风险】影响范围：会覆盖目标产品目录内容（先备份后覆盖）
-
-```bash
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py --verbose full_data stock-trading-data
-```
+`full_data_link` / `full_data` 已移除。  
+当前版本只保留：
+1. `init`
+2. `one_data`
+3. `all_data`
 
 ---
 
@@ -249,8 +237,6 @@ python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py --ver
 4. `network_error`：网络/权限/接口问题
 5. `extract_error`：解压失败
 6. `merge_error`：合并失败
-7. `full_data_link_missing`：全量链接缺失
-8. `full_data_expired`：全量链接过期
 
 ---
 
