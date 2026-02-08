@@ -296,6 +296,20 @@ sed -n '1,220p' "$report"
 - 主脚本：`/Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py`
 - 依赖清单：`/Users/yuhan/workspace/quant/data/scripts/requirements.txt`
 
+`catalog.txt` 规范（已简化）：
+1. 每行一个产品英文名（`product_id`）
+2. 允许空行和 `#` 注释行
+3. 不再建议使用“中文名 + 英文名 + 日期”的多列写法
+
+示例：
+
+```text
+# 每行一个产品英文名
+stock-trading-data
+stock-main-index-data
+stock-trading-data-pro
+```
+
 如果要新增产品规则或调整合并策略，建议先 `--dry-run` 验证，再做正式更新。
 
 ---

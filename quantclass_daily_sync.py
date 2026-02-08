@@ -559,9 +559,9 @@ def load_products_from_catalog(path: Path) -> List[str]:
     """
     从 catalog.txt 读取产品列表。
 
-    兼容两种写法：
-    1) 每行一个产品英文名
-    2) 三列格式（产品中文名 / 产品英文名 / 日期）
+    当前规范：
+    1) 每行一个产品英文名（product_id）
+    2) 允许空行和 # 注释行
     """
 
     if not path.exists():
@@ -569,19 +569,16 @@ def load_products_from_catalog(path: Path) -> List[str]:
 
     products: List[str] = []
     text = path.read_text(encoding="utf-8-sig", errors="ignore")
-    for line in text.splitlines():
+    for lineno, line in enumerate(text.splitlines(), start=1):
         s = line.strip()
         if not s or s.startswith("#"):
             continue
-        if is_product_identifier(s):
-            products.append(normalize_product_name(s.lower()))
-            continue
-
-        for token in re.split(r"[\t,| ]+", s):
-            t = token.strip()
-            if is_product_identifier(t):
-                products.append(normalize_product_name(t.lower()))
-                break
+        if not is_product_identifier(s):
+            raise RuntimeError(
+                f"产品清单格式错误：{path}:{lineno} -> `{s}`；"
+                "请使用“每行一个产品英文名”的写法。"
+            )
+        products.append(normalize_product_name(s.lower()))
 
     seen = set()
     result: List[str] = []
@@ -590,7 +587,7 @@ def load_products_from_catalog(path: Path) -> List[str]:
             seen.add(item)
             result.append(item)
     if not result:
-        raise RuntimeError(f"产品清单为空或格式无法识别: {path}")
+        raise RuntimeError(f"产品清单为空：{path}；请至少配置一个产品英文名。")
     return result
 
 def _dir_has_data_files(path: Path) -> bool:
