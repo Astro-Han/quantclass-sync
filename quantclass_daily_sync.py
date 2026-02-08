@@ -49,12 +49,26 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DATA_ROOT = BASE_DIR.parent / "xbx_data"
 DEFAULT_WORK_DIR = BASE_DIR.parent / ".cache" / "quantclass"
 DEFAULT_SECRETS_FILE = BASE_DIR / "xbx_apiKey.md"
+DEFAULT_USER_CONFIG_FILE = BASE_DIR / "user_config.json"
+DEFAULT_USER_SECRETS_FILE = BASE_DIR / "user_secrets.env"
 DEFAULT_CATALOG_FILE = BASE_DIR / "catalog.txt"
 DEFAULT_PROGRESS_EVERY = 500
-DEFAULT_STATUS_DB = DEFAULT_DATA_ROOT / "code" / "data" / "FuelBinStat.db"
-DEFAULT_STATUS_JSON = DEFAULT_DATA_ROOT / "code" / "data" / "products-status.json"
+SYNC_META_DIRNAME = ".quantclass_sync"
+DEFAULT_METADATA_ROOT = DEFAULT_DATA_ROOT / SYNC_META_DIRNAME
+DEFAULT_STATUS_DB = DEFAULT_METADATA_ROOT / "status" / "FuelBinStat.db"
+DEFAULT_STATUS_JSON = DEFAULT_METADATA_ROOT / "status" / "products-status.json"
 DEFAULT_REPORT_RETENTION_DAYS = 365
 TIMESTAMP_FILE_NAME = "timestamp.txt"
+PRODUCT_MODE_LOCAL_SCAN = "local_scan"
+PRODUCT_MODE_EXPLICIT_LIST = "explicit_list"
+PRODUCT_MODES = {PRODUCT_MODE_LOCAL_SCAN, PRODUCT_MODE_EXPLICIT_LIST}
+
+LEGACY_STATUS_DB_REL = Path("code") / "data" / "FuelBinStat.db"
+LEGACY_STATUS_JSON_REL = Path("code") / "data" / "products-status.json"
+LEGACY_REPORT_DIR_REL = Path("code") / "data" / "log" / "quantclass"
+META_STATUS_DB_REL = Path(SYNC_META_DIRNAME) / "status" / "FuelBinStat.db"
+META_STATUS_JSON_REL = Path(SYNC_META_DIRNAME) / "status" / "products-status.json"
+META_REPORT_DIR_REL = Path(SYNC_META_DIRNAME) / "log" / "quantclass"
 
 # ========================= 新手阅读路线图（先看这里） =========================
 # 这份脚本分成 4 层。第一次读代码，建议按这个顺序：
@@ -284,14 +298,58 @@ class RunReport:
     summary: SyncStats = field(default_factory=SyncStats)
 
 
+@dataclass(frozen=True)
+class RuntimePaths:
+    """单次运行使用的状态与日志路径集合。"""
+
+    metadata_root: Path
+    status_db: Path
+    status_json: Path
+    report_dir: Path
+    source: str  # metadata / legacy
+
+
+class UserConfig(BaseModel):
+    """用户配置模型（setup 写入，update 读取）。"""
+
+    data_root: Path
+    product_mode: str = PRODUCT_MODE_LOCAL_SCAN
+    default_products: List[str] = Field(default_factory=list)
+    secrets_file: Path = DEFAULT_USER_SECRETS_FILE
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+
+    @field_validator("product_mode", mode="before")
+    @classmethod
+    def _normalize_product_mode(cls, value: object) -> str:
+        mode = str(value or PRODUCT_MODE_LOCAL_SCAN).strip().lower()
+        if mode not in PRODUCT_MODES:
+            raise ValueError("product_mode 仅支持 local_scan 或 explicit_list")
+        return mode
+
+    @field_validator("default_products", mode="before")
+    @classmethod
+    def _normalize_default_products(cls, value: object) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return split_products([value])
+        if isinstance(value, list):
+            return split_products([str(x) for x in value])
+        raise ValueError("default_products 必须是字符串或字符串列表")
+
+
 class CommandContext(BaseModel):
     """命令上下文（把运行参数统一收口，避免各函数参数漂移）。"""
 
     run_id: str
     data_root: Path
+    data_root_from_cli: bool = False
     api_key: str = ""
     hid: str = ""
     secrets_file: Path = DEFAULT_SECRETS_FILE
+    secrets_file_from_cli: bool = False
+    config_file: Path = DEFAULT_USER_CONFIG_FILE
     dry_run: bool = False
     report_file: Optional[Path] = None
     stop_on_error: bool = False
@@ -517,6 +575,66 @@ def split_products(raw_products: Sequence[str]) -> List[str]:
             seen.add(item)
             result.append(item)
     return result
+
+
+def _write_text_atomic(path: Path, content: str, encoding: str = "utf-8") -> None:
+    """
+    原子写入文本文件。
+
+    原子写入（要么完整写成功、要么不改变旧文件）可以避免配置/密钥写半截。
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.parent / f".{path.name}.tmp-{os.getpid()}-{time.time_ns()}"
+    tmp_path.write_text(content, encoding=encoding)
+    os.replace(tmp_path, path)
+
+
+def save_user_config_atomic(path: Path, config: UserConfig) -> None:
+    """保存用户配置（原子写入）。"""
+
+    payload = config.model_dump(mode="json")
+    _write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+
+
+def load_user_config_or_raise(path: Path) -> UserConfig:
+    """读取用户配置，失败时给出可操作提示。"""
+
+    if not path.exists():
+        raise RuntimeError(f"未找到用户配置文件：{path}；请先执行 setup。")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"用户配置文件读取失败：{path}；请检查 JSON 格式或重新执行 setup。原始错误：{exc}") from exc
+
+    try:
+        config = UserConfig(**raw)
+    except Exception as exc:
+        raise RuntimeError(f"用户配置内容无效：{path}；请重新执行 setup。原始错误：{exc}") from exc
+    return config
+
+
+def save_user_secrets_atomic(path: Path, api_key: str, hid: str) -> None:
+    """保存用户密钥文件（原子写入）。"""
+
+    body = f"QUANTCLASS_API_KEY={api_key.strip()}\nQUANTCLASS_HID={hid.strip()}\n"
+    _write_text_atomic(path, body)
+    try:
+        os.chmod(path, 0o600)
+    except Exception:
+        # 非关键路径（部分系统无 chmod 权限），失败不阻断主流程。
+        pass
+
+
+def load_user_secrets_or_raise(path: Path) -> Tuple[str, str]:
+    """读取用户密钥并校验完整性。"""
+
+    api_key, hid = load_secrets_from_file(path)
+    if not api_key:
+        raise RuntimeError(f"密钥文件缺少 API Key：{path}；请重新执行 setup。")
+    if not hid:
+        raise RuntimeError(f"密钥文件缺少 HID：{path}；请重新执行 setup。")
+    return api_key, hid
 
 def is_product_identifier(raw: str) -> bool:
     """
@@ -1745,22 +1863,63 @@ def build_scheduler_placeholder(config: SchedulerConfig) -> BackgroundScheduler:
     return scheduler
 
 
+def resolve_runtime_paths(data_root: Path) -> RuntimePaths:
+    """
+    解析运行期状态/日志路径。
+
+    规则：
+    - 默认使用新路径：<data_root>/.quantclass_sync/*
+    - 若检测到旧路径已有状态数据，且新路径尚无状态数据，则回退旧路径读取（避免迁移期分裂）
+    """
+
+    data_root = data_root.resolve()
+    metadata_root = data_root / SYNC_META_DIRNAME
+
+    new_status_db = data_root / META_STATUS_DB_REL
+    new_status_json = data_root / META_STATUS_JSON_REL
+    new_report_dir = data_root / META_REPORT_DIR_REL
+    new_has_state = new_status_db.exists() or new_status_json.exists()
+
+    legacy_status_db = data_root / LEGACY_STATUS_DB_REL
+    legacy_status_json = data_root / LEGACY_STATUS_JSON_REL
+    legacy_report_dir = data_root / LEGACY_REPORT_DIR_REL
+    legacy_has_state = legacy_status_db.exists() or legacy_status_json.exists()
+
+    # 迁移保护：旧路径有状态且新路径还没初始化时，优先读旧路径，避免同一批数据写到两套状态库。
+    if legacy_has_state and not new_has_state:
+        return RuntimePaths(
+            metadata_root=metadata_root,
+            status_db=legacy_status_db,
+            status_json=legacy_status_json,
+            report_dir=legacy_report_dir,
+            source="legacy",
+        )
+
+    return RuntimePaths(
+        metadata_root=metadata_root,
+        status_db=new_status_db,
+        status_json=new_status_json,
+        report_dir=new_report_dir,
+        source="metadata",
+    )
+
+
 def status_db_path(data_root: Path) -> Path:
     """返回状态数据库路径。"""
 
-    return data_root / "code" / "data" / "FuelBinStat.db"
+    return resolve_runtime_paths(data_root).status_db
 
 
 def status_json_path(data_root: Path) -> Path:
     """返回 products-status.json 路径。"""
 
-    return data_root / "code" / "data" / "products-status.json"
+    return resolve_runtime_paths(data_root).status_json
 
 
 def report_dir_path(data_root: Path) -> Path:
     """返回运行报告目录。"""
 
-    return data_root / "code" / "data" / "log" / "quantclass"
+    return resolve_runtime_paths(data_root).report_dir
 
 
 def normalize_data_date(raw: str) -> Optional[str]:
@@ -2231,6 +2390,7 @@ def _execute_plans(
 
     for plan in plans:
         t_product_start = time.time()
+        debug_trace = ""
         # A. 判断这个产品本次应不应该跑（门控命中会直接 continue）。
         requested_date_for_plan, skipped_by_gate = _resolve_requested_date_for_plan(
             plan=plan,
@@ -2267,18 +2427,20 @@ def _execute_plans(
             # 可预期业务错误：带有明确 reason_code。
             reason_code = exc.reason_code
             message = str(exc)
+            debug_trace = traceback.format_exc()
         except Exception as exc:
             # 兜底未知异常：统一归并为 merge_error，避免丢失错误。
             reason_code = REASON_MERGE_ERROR
             message = str(exc)
+            debug_trace = traceback.format_exc()
 
         # D. 失败路径：写报告 + 打日志 + 按 stop-on-error 决定是否中断。
         has_error = True
         elapsed = time.time() - t_product_start
         _append_error_result(report, plan, reason_code, requested_date_for_plan, elapsed, message)
         log_error(f"[{plan.name}] 处理失败: {message}", event="SYNC_FAIL", reason_code=reason_code)
-        if command_ctx.verbose:
-            log_debug(traceback.format_exc(), event="DEBUG")
+        if command_ctx.verbose and debug_trace:
+            log_debug(debug_trace, event="DEBUG")
         if command_ctx.stop_on_error:
             log_error("已开启 stop-on-error，任务提前停止。", event="RUN_SUMMARY")
             break
@@ -2329,7 +2491,7 @@ def _new_report(run_id: str, mode: str) -> RunReport:
 
 # CLI（命令行接口）根对象：所有子命令都挂在 app 上。
 app = typer.Typer(
-    help="QuantClass 数据同步脚本（官方命令兼容 + 本地安全增强）",
+    help="QuantClass 数据同步工具（推荐 setup + update，兼容旧命令）",
     no_args_is_help=True,
     add_completion=False,
     pretty_exceptions_enable=False,
@@ -2339,10 +2501,11 @@ app = typer.Typer(
 @app.callback()
 def global_options(
     ctx: typer.Context,
-    data_root: Path = typer.Option(DEFAULT_DATA_ROOT, "--data-root", help="数据根目录。"),
+    data_root: Optional[Path] = typer.Option(None, "--data-root", help="数据根目录（兼容命令可用）。"),
     api_key: str = typer.Option("", "--api-key", help="QuantClass API Key（高级参数）。", hidden=True),
     hid: str = typer.Option("", "--hid", help="QuantClass HID（高级参数）。", hidden=True),
-    secrets_file: Path = typer.Option(DEFAULT_SECRETS_FILE, "--secrets-file", help="本地密钥文件路径。"),
+    secrets_file: Optional[Path] = typer.Option(None, "--secrets-file", help="本地密钥文件路径（兼容命令可用）。"),
+    config_file: Path = typer.Option(DEFAULT_USER_CONFIG_FILE, "--config-file", help="用户配置文件路径（setup/update）。"),
     dry_run: bool = typer.Option(False, "--dry-run", help="演练模式（不写业务数据和状态文件）。"),
     report_file: Optional[Path] = typer.Option(
         None, "--report-file", help="报告输出路径（JSON，高级参数）。", hidden=True
@@ -2365,17 +2528,30 @@ def global_options(
     LOGGER = ConsoleLogger(level="DEBUG" if verbose else "INFO", run_id=run_id)
     PROGRESS_EVERY = max(1, DEFAULT_PROGRESS_EVERY)
 
-    data_root = data_root.resolve()
-    if not data_root.exists():
-        raise typer.BadParameter(f"data-root 不存在：{data_root}")
+    resolved_data_root = data_root.resolve() if data_root else DEFAULT_DATA_ROOT.resolve()
+    resolved_secrets_file = secrets_file.resolve() if secrets_file else DEFAULT_SECRETS_FILE.resolve()
+    resolved_config_file = config_file.resolve()
+    runtime_paths = resolve_runtime_paths(resolved_data_root)
+    log_debug(
+        "运行路径已解析。",
+        event="PATHS",
+        data_root=str(resolved_data_root),
+        status_db=str(runtime_paths.status_db),
+        status_json=str(runtime_paths.status_json),
+        report_dir=str(runtime_paths.report_dir),
+        source=runtime_paths.source,
+    )
 
     # CommandContext 是“本次运行共享配置”，后续命令都从这里读取参数。
     command_ctx = CommandContext(
         run_id=run_id,
-        data_root=data_root,
+        data_root=resolved_data_root,
+        data_root_from_cli=data_root is not None,
         api_key=api_key,
         hid=hid,
-        secrets_file=secrets_file.resolve(),
+        secrets_file=resolved_secrets_file,
+        secrets_file_from_cli=secrets_file is not None,
+        config_file=resolved_config_file,
         dry_run=dry_run,
         report_file=report_file.resolve() if report_file else None,
         stop_on_error=stop_on_error,
@@ -2475,16 +2651,328 @@ def command_guard(command_name: str):
     return decorator
 
 
+def ensure_data_root_ready(data_root: Path, create_if_missing: bool = False) -> Path:
+    """校验 data_root；需要时可自动创建目录。"""
+
+    data_root = data_root.expanduser().resolve()
+    if data_root.exists():
+        if not data_root.is_dir():
+            raise RuntimeError(f"data_root 不是目录：{data_root}")
+        return data_root
+    if create_if_missing:
+        data_root.mkdir(parents=True, exist_ok=True)
+        return data_root
+    raise RuntimeError(f"data_root 不存在：{data_root}")
+
+
+def _build_command_ctx_with_overrides(base_ctx: CommandContext, data_root: Path, secrets_file: Path) -> CommandContext:
+    """基于基础上下文生成覆盖后的运行上下文。"""
+
+    data_root = data_root.expanduser().resolve()
+    secrets_file = secrets_file.expanduser().resolve()
+    runtime_paths = resolve_runtime_paths(data_root)
+    log_debug(
+        "已应用运行配置。",
+        event="PATHS",
+        data_root=str(data_root),
+        status_db=str(runtime_paths.status_db),
+        status_json=str(runtime_paths.status_json),
+        report_dir=str(runtime_paths.report_dir),
+        source=runtime_paths.source,
+    )
+    return base_ctx.model_copy(
+        update={
+            "data_root": data_root,
+            "secrets_file": secrets_file,
+        }
+    )
+
+
+def run_update_with_settings(
+    command_ctx: CommandContext,
+    mode: str = "local",
+    products: Optional[Sequence[str]] = None,
+    force_update: bool = False,
+    command_name: str = "all_data",
+    fallback_products: Optional[Sequence[str]] = None,
+) -> int:
+    """
+    通用批量更新执行器（update/all_data 共用）。
+
+    fallback_products 用于“本地扫描为空”时的回退清单。
+    """
+
+    ensure_data_root_ready(command_ctx.data_root, create_if_missing=False)
+
+    mode = (mode or "local").strip().lower()
+    if mode not in RUN_MODES:
+        raise typer.BadParameter("mode 仅支持 local 或 catalog")
+
+    product_args = list(products or [])
+    fallback_args = list(fallback_products or [])
+
+    report = _new_report(command_ctx.run_id, mode="network")
+    report_path = resolve_report_path(command_ctx, command_name)
+    catalog_products = load_catalog_or_raise(command_ctx.catalog_file)
+    catalog_set = {normalize_product_name(x) for x in catalog_products}
+
+    log_info("开始扫描本地产品目录。", event="DISCOVER_START", data_root=str(command_ctx.data_root), mode=mode)
+    discovered = discover_local_products(data_root=command_ctx.data_root, catalog_products=catalog_products)
+    report.discovered_total = len(discovered)
+    log_info("本地产品扫描完成。", event="DISCOVER_DONE", discovered_total=report.discovered_total)
+
+    planned_products, unknown_local, invalid_explicit = resolve_products_by_mode(
+        mode=mode,
+        raw_products=product_args,
+        catalog_products=catalog_products,
+        discovered_local=discovered,
+    )
+    _record_discovery_skips(report, unknown_local, invalid_explicit)
+
+    # update 模式：本地扫描为空时，可回退到默认产品清单。
+    # 这样新用户即使 data_root 里暂时没有目录，也能按 setup 配置完成首轮更新。
+    if mode == "local" and not planned_products and not product_args and fallback_args:
+        fallback = split_products(fallback_args)
+        fallback_valid = [x for x in fallback if x in catalog_set]
+        fallback_invalid = [x for x in fallback if x not in catalog_set]
+        if fallback_invalid:
+            _record_discovery_skips(report, unknown_local=[], invalid_explicit=fallback_invalid)
+        if fallback_valid:
+            planned_products = fallback_valid
+            log_info(
+                "本地扫描为空，已回退到默认产品清单。",
+                event="PLAN",
+                fallback_total=len(fallback_valid),
+            )
+
+    if mode == "local" and not planned_products and not product_args:
+        report.failed_total = 1
+        report.ended_at = utc_now_iso()
+        report.duration_seconds = 0.0
+        write_run_report(report_path, report)
+        log_error(
+            "未发现可更新产品；可先执行 setup 配置默认产品清单。",
+            event="RUN_SUMMARY",
+            reason_code=REASON_NO_LOCAL_PRODUCTS,
+        )
+        return 1
+
+    plans = build_product_plan(planned_products)
+    report.planned_total = len(plans)
+    if not plans:
+        report.ended_at = utc_now_iso()
+        report.duration_seconds = 0.0
+        write_run_report(report_path, report)
+        log_error("执行清单为空，任务结束。", event="RUN_SUMMARY")
+        return 1
+
+    conn: Optional[sqlite3.Connection] = None
+    if not command_ctx.dry_run:
+        conn = connect_status_db(command_ctx.data_root)
+    try:
+        total, has_error, t_run_start = _execute_plans(
+            plans,
+            command_ctx,
+            report,
+            requested_date_time="",
+            conn=conn,
+            force_update=force_update,
+        )
+        if conn is not None:
+            export_status_json(conn, status_json_path(command_ctx.data_root))
+    finally:
+        if conn is not None:
+            conn.close()
+
+    return _finalize_and_write_report(report, total, has_error, t_run_start, report_path)
+
+
+@app.command("setup")
+@command_guard("setup")
+def cmd_setup(
+    ctx: typer.Context,
+    non_interactive: bool = typer.Option(False, "--non-interactive", help="非交互模式（需显式传参数）。"),
+    skip_check: bool = typer.Option(False, "--skip-check", help="跳过连通性检查。"),
+    data_root: str = typer.Option("", "--data-root", help="数据根目录。"),
+    api_key: str = typer.Option("", "--api-key", help="用户 API Key。"),
+    hid: str = typer.Option("", "--hid", help="用户 HID。"),
+    product_mode: str = typer.Option(PRODUCT_MODE_LOCAL_SCAN, "--product-mode", help="local_scan 或 explicit_list。"),
+    products: List[str] = typer.Option([], "--products", help="默认产品列表（可重复传参，也支持逗号分隔）。"),
+) -> None:
+    """
+    初始化用户配置（首次运行推荐）。
+
+    结果：
+    1) 写入 user_config.json
+    2) 写入 user_secrets.env
+    3) 可选执行连通性检查
+    """
+
+    base_ctx = _ctx(ctx)
+    existing_config: Optional[UserConfig] = None
+    if base_ctx.config_file.exists():
+        try:
+            existing_config = load_user_config_or_raise(base_ctx.config_file)
+        except Exception:
+            # 旧配置损坏时允许重建，不阻断 setup。
+            existing_config = None
+
+    if non_interactive:
+        raw_data_root = data_root.strip() or (str(existing_config.data_root) if existing_config else "")
+        raw_api_key = api_key.strip() or os.environ.get("QUANTCLASS_API_KEY", "").strip()
+        raw_hid = hid.strip() or os.environ.get("QUANTCLASS_HID", "").strip()
+        mode = (product_mode or PRODUCT_MODE_LOCAL_SCAN).strip().lower()
+        default_products = split_products(products)
+    else:
+        default_root = data_root.strip() or (str(existing_config.data_root) if existing_config else str(base_ctx.data_root))
+        raw_data_root = typer.prompt("请输入数据目录(data_root)", default=default_root).strip()
+
+        default_api_key = api_key.strip() or os.environ.get("QUANTCLASS_API_KEY", "").strip()
+        default_hid = hid.strip() or os.environ.get("QUANTCLASS_HID", "").strip()
+        raw_api_key = typer.prompt("请输入 API Key", default=default_api_key, hide_input=True).strip()
+        raw_hid = typer.prompt("请输入 HID", default=default_hid, hide_input=True).strip()
+
+        default_mode = (product_mode or (existing_config.product_mode if existing_config else PRODUCT_MODE_LOCAL_SCAN)).strip()
+        mode = typer.prompt("产品策略（local_scan / explicit_list）", default=default_mode).strip().lower()
+
+        default_products_seed = ",".join(products) if products else ",".join(existing_config.default_products if existing_config else [])
+        products_line = typer.prompt("默认产品列表（逗号分隔，可留空）", default=default_products_seed).strip()
+        default_products = split_products([products_line]) if products_line else []
+
+    if not raw_data_root:
+        raise RuntimeError("setup 缺少 data_root；请提供数据目录。")
+    data_root_path = ensure_data_root_ready(Path(raw_data_root), create_if_missing=True)
+    setup_ctx = _build_command_ctx_with_overrides(base_ctx, data_root=data_root_path, secrets_file=base_ctx.secrets_file)
+    ctx.obj = setup_ctx
+
+    if mode not in PRODUCT_MODES:
+        raise RuntimeError("product_mode 仅支持 local_scan 或 explicit_list。")
+    if mode == PRODUCT_MODE_EXPLICIT_LIST and not default_products:
+        raise RuntimeError("product_mode=explicit_list 时必须提供至少一个默认产品。")
+
+    catalog = load_catalog_or_raise(base_ctx.catalog_file)
+    catalog_set = {normalize_product_name(x) for x in catalog}
+    invalid_defaults = [x for x in default_products if x not in catalog_set]
+    if invalid_defaults:
+        raise RuntimeError(f"默认产品不在 catalog 中：{', '.join(invalid_defaults)}")
+
+    if not raw_api_key:
+        raise RuntimeError("setup 缺少 API Key。")
+    if not raw_hid:
+        raise RuntimeError("setup 缺少 HID。")
+
+    if base_ctx.secrets_file_from_cli:
+        secrets_path = base_ctx.secrets_file
+    elif existing_config is not None:
+        secrets_path = existing_config.secrets_file.resolve()
+    else:
+        secrets_path = DEFAULT_USER_SECRETS_FILE.resolve()
+
+    save_user_secrets_atomic(secrets_path, api_key=raw_api_key, hid=raw_hid)
+
+    now = utc_now_iso()
+    user_config = UserConfig(
+        data_root=data_root_path,
+        product_mode=mode,
+        default_products=default_products,
+        secrets_file=secrets_path,
+        created_at=existing_config.created_at if existing_config else now,
+        updated_at=now,
+    )
+    save_user_config_atomic(base_ctx.config_file, user_config)
+
+    if not skip_check:
+        probe_product = default_products[0] if default_products else (catalog[0] if catalog else "stock-trading-data")
+        headers = {
+            "user-agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/100.0.4896.127 Safari/537.36"
+            ),
+            "content-type": "application/json",
+            "api-key": raw_api_key,
+        }
+        try:
+            get_latest_time(api_base=setup_ctx.api_base.rstrip("/"), product=probe_product, hid=raw_hid, headers=headers)
+        except Exception as exc:
+            raise RuntimeError(f"连通性检查失败；请检查 API Key/HID 或网络。原始错误：{exc}") from exc
+        log_info("连通性检查通过。", event="SETUP", probe_product=probe_product)
+
+    log_info(
+        "setup 完成。下一步建议先执行 update --dry-run。",
+        event="SETUP",
+        config_file=str(base_ctx.config_file),
+        secrets_file=str(secrets_path),
+    )
+
+
+@app.command("update")
+@command_guard("update")
+def cmd_update(
+    ctx: typer.Context,
+    dry_run: bool = typer.Option(False, "--dry-run", help="演练模式（不写业务数据和状态文件）。"),
+    verbose: bool = typer.Option(False, "--verbose", help="显示调试日志。"),
+    products: List[str] = typer.Option([], "--products", help="临时覆盖默认产品清单。"),
+    force_update: bool = typer.Option(False, "--force", help="强制更新：跳过 timestamp 门控。"),
+) -> None:
+    """
+    一键更新入口（日常只需这个命令）。
+    """
+
+    base_ctx = _ctx(ctx)
+    user_config = load_user_config_or_raise(base_ctx.config_file)
+
+    data_root = base_ctx.data_root if base_ctx.data_root_from_cli else user_config.data_root.resolve()
+    secrets_file = base_ctx.secrets_file if base_ctx.secrets_file_from_cli else user_config.secrets_file.resolve()
+    if verbose and LOGGER.level != "DEBUG":
+        LOGGER.level = "DEBUG"
+    run_ctx = _build_command_ctx_with_overrides(base_ctx, data_root=data_root, secrets_file=secrets_file)
+    run_ctx = run_ctx.model_copy(update={"dry_run": base_ctx.dry_run or dry_run, "verbose": base_ctx.verbose or verbose})
+    ctx.obj = run_ctx
+    ensure_data_root_ready(run_ctx.data_root, create_if_missing=False)
+    load_user_secrets_or_raise(run_ctx.secrets_file)
+
+    # update 产品优先级：
+    # 1) 命令行 --products 临时覆盖
+    # 2) explicit_list 使用配置里的 default_products
+    # 3) local_scan 先扫本地，扫不到再走 fallback default_products
+    explicit_products = split_products(products)
+    fallback_products: List[str] = []
+    selected_products: List[str] = explicit_products
+    if not explicit_products:
+        if user_config.product_mode == PRODUCT_MODE_EXPLICIT_LIST:
+            if not user_config.default_products:
+                raise RuntimeError("配置了 explicit_list，但 default_products 为空；请重新执行 setup。")
+            selected_products = user_config.default_products
+        else:
+            fallback_products = user_config.default_products
+
+    exit_code = run_update_with_settings(
+        command_ctx=run_ctx,
+        mode="local",
+        products=selected_products,
+        force_update=force_update,
+        command_name="update",
+        fallback_products=fallback_products,
+    )
+    log_info("update 执行完成。", event="CMD_DONE", exit_code=exit_code)
+    if exit_code != 0:
+        raise typer.Exit(code=exit_code)
+
+
 @app.command("init")
 @command_guard("init")
 def cmd_init(ctx: typer.Context) -> None:
     """
-    初始化产品状态快照。
+    初始化产品状态快照（兼容命令）。
 
     这一步只更新状态文件，不下载数据。
     """
 
     command_ctx = _ctx(ctx)
+    command_ctx = _build_command_ctx_with_overrides(command_ctx, command_ctx.data_root, command_ctx.secrets_file)
+    ctx.obj = command_ctx
+    ensure_data_root_ready(command_ctx.data_root, create_if_missing=True)
     t0 = time.time()
     log_info("开始执行 init。", event="CMD_START")
 
@@ -2531,12 +3019,15 @@ def cmd_one_data(
     force_update: bool = typer.Option(False, "--force", help="强制更新：跳过 timestamp 门控。"),
 ) -> None:
     """
-    更新单个产品。
+    更新单个产品（兼容命令）。
 
     适合场景：排障、验证单个产品、减少批量更新的等待时间。
     """
 
     command_ctx = _ctx(ctx)
+    command_ctx = _build_command_ctx_with_overrides(command_ctx, command_ctx.data_root, command_ctx.secrets_file)
+    ctx.obj = command_ctx
+    ensure_data_root_ready(command_ctx.data_root, create_if_missing=False)
     # one_data 的最小执行单元就是一个 ProductPlan。
     report = _new_report(command_ctx.run_id, mode="network")
     report_path = resolve_report_path(command_ctx, "one_data")
@@ -2577,77 +3068,22 @@ def cmd_all_data(
     force_update: bool = typer.Option(False, "--force", help="强制更新：跳过 timestamp 门控。"),
 ) -> None:
     """
-    批量更新产品。
+    批量更新产品（兼容命令）。
 
     mode=local：按本地已有产品更新（日常推荐）。
     mode=catalog：按 catalog 清单轮询（补齐或巡检时使用）。
     """
 
     command_ctx = _ctx(ctx)
-    mode = (mode or "local").strip().lower()
-    if mode not in RUN_MODES:
-        raise typer.BadParameter("mode 仅支持 local 或 catalog")
-
-    report = _new_report(command_ctx.run_id, mode="network")
-    report_path = resolve_report_path(command_ctx, "all_data")
-    catalog_products = load_catalog_or_raise(command_ctx.catalog_file)
-
-    log_info("开始扫描本地产品目录。", event="DISCOVER_START", data_root=str(command_ctx.data_root), mode=mode)
-    discovered = discover_local_products(data_root=command_ctx.data_root, catalog_products=catalog_products)
-    report.discovered_total = len(discovered)
-    log_info("本地产品扫描完成。", event="DISCOVER_DONE", discovered_total=report.discovered_total)
-
-    # 第 1 段：先把“本次到底要跑哪些产品”算出来。
-    planned_products, unknown_local, invalid_explicit = resolve_products_by_mode(
+    command_ctx = _build_command_ctx_with_overrides(command_ctx, command_ctx.data_root, command_ctx.secrets_file)
+    ctx.obj = command_ctx
+    exit_code = run_update_with_settings(
+        command_ctx=command_ctx,
         mode=mode,
-        raw_products=products,
-        catalog_products=catalog_products,
-        discovered_local=discovered,
+        products=products,
+        force_update=force_update,
+        command_name="all_data",
     )
-    _record_discovery_skips(report, unknown_local, invalid_explicit)
-
-    if mode == "local" and not planned_products and not products:
-        report.failed_total = 1
-        report.ended_at = utc_now_iso()
-        report.duration_seconds = 0.0
-        write_run_report(report_path, report)
-        log_error(
-            "未发现可更新的本地合法产品；可能原因：data_root 下没有命中 catalog 的目录；建议：先准备本地产品目录。",
-            event="RUN_SUMMARY",
-            reason_code=REASON_NO_LOCAL_PRODUCTS,
-        )
-        raise typer.Exit(code=1)
-
-    # 第 2 段：把产品名转换为执行计划（每个产品对应一个 ProductPlan）。
-    plans = build_product_plan(planned_products)
-    report.planned_total = len(plans)
-    if not plans:
-        report.ended_at = utc_now_iso()
-        report.duration_seconds = 0.0
-        write_run_report(report_path, report)
-        log_error("执行清单为空，任务结束。", event="RUN_SUMMARY")
-        raise typer.Exit(code=1)
-
-    conn: Optional[sqlite3.Connection] = None
-    if not command_ctx.dry_run:
-        conn = connect_status_db(command_ctx.data_root)
-    try:
-        # 第 3 段：执行计划（核心编排函数）。
-        total, has_error, t_run_start = _execute_plans(
-            plans,
-            command_ctx,
-            report,
-            requested_date_time="",
-            conn=conn,
-            force_update=force_update,
-        )
-        if conn is not None:
-            export_status_json(conn, status_json_path(command_ctx.data_root))
-    finally:
-        if conn is not None:
-            conn.close()
-
-    exit_code = _finalize_and_write_report(report, total, has_error, t_run_start, report_path)
     log_info("all_data 执行完成。", event="CMD_DONE", exit_code=exit_code)
     if exit_code != 0:
         raise typer.Exit(code=exit_code)
