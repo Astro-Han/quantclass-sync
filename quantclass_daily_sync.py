@@ -590,6 +590,44 @@ def _write_text_atomic(path: Path, content: str, encoding: str = "utf-8") -> Non
     os.replace(tmp_path, path)
 
 
+@dataclass(frozen=True)
+class TextFileSnapshot:
+    """文本文件快照（用于 setup 失败回滚）。"""
+
+    exists: bool
+    content: str = ""
+    mode: Optional[int] = None
+
+
+def snapshot_text_file(path: Path) -> TextFileSnapshot:
+    """保存文件当前状态。"""
+
+    if not path.exists():
+        return TextFileSnapshot(exists=False)
+    mode: Optional[int] = None
+    try:
+        mode = path.stat().st_mode & 0o777
+    except Exception:
+        mode = None
+    content = path.read_text(encoding="utf-8", errors="ignore")
+    return TextFileSnapshot(exists=True, content=content, mode=mode)
+
+
+def restore_text_file_snapshot(path: Path, snapshot: TextFileSnapshot) -> None:
+    """恢复文件到快照状态。"""
+
+    if snapshot.exists:
+        _write_text_atomic(path, snapshot.content)
+        if snapshot.mode is not None:
+            try:
+                os.chmod(path, snapshot.mode)
+            except Exception:
+                pass
+        return
+    if path.exists():
+        path.unlink()
+
+
 def save_user_config_atomic(path: Path, config: UserConfig) -> None:
     """保存用户配置（原子写入）。"""
 
@@ -624,6 +662,38 @@ def save_user_secrets_atomic(path: Path, api_key: str, hid: str) -> None:
     except Exception:
         # 非关键路径（部分系统无 chmod 权限），失败不阻断主流程。
         pass
+
+
+def save_setup_artifacts_atomic(
+    config_path: Path,
+    config: UserConfig,
+    secrets_path: Path,
+    api_key: str,
+    hid: str,
+) -> None:
+    """
+    setup 双文件写入（带回滚）。
+
+    任一文件写失败时，把配置和密钥都恢复到写入前状态，避免“半成功”。
+    """
+
+    # 先拍快照：后续任何写入失败时，都可以恢复“调用 setup 前”的文件状态。
+    config_snapshot = snapshot_text_file(config_path)
+    secrets_snapshot = snapshot_text_file(secrets_path)
+    try:
+        save_user_secrets_atomic(secrets_path, api_key=api_key, hid=hid)
+        save_user_config_atomic(config_path, config)
+    except Exception as exc:
+        rollback_errors: List[str] = []
+        for path, snapshot in ((secrets_path, secrets_snapshot), (config_path, config_snapshot)):
+            try:
+                restore_text_file_snapshot(path, snapshot)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"{path}: {rollback_exc}")
+        if rollback_errors:
+            detail = "；".join(rollback_errors)
+            raise RuntimeError(f"setup 文件写入失败且回滚不完整：{detail}") from exc
+        raise
 
 
 def load_user_secrets_or_raise(path: Path) -> Tuple[str, str]:
@@ -826,7 +896,7 @@ def load_secrets_from_file(path: Path) -> Tuple[str, str]:
 
 def resolve_credentials(cli_api_key: str, cli_hid: str, secrets_file: Path) -> Tuple[str, str]:
     """
-    凭证优先级（高 -> 低）：
+    凭证优先级（高 -> 低，兼容命令）：
     1) 命令行参数
     2) 环境变量
     3) 本地 secrets 文件
@@ -845,6 +915,32 @@ def resolve_credentials(cli_api_key: str, cli_hid: str, secrets_file: Path) -> T
         hid = file_hid
 
     return api_key, hid
+
+
+def resolve_credentials_for_update(cli_api_key: str, cli_hid: str, secrets_file: Path) -> Tuple[str, str, str]:
+    """
+    update 专用凭证优先级（高 -> 低）：
+    1) 命令行参数
+    2) setup 写入的 secrets 文件
+    3) 环境变量
+    """
+
+    cli_api = cli_api_key.strip()
+    cli_hid_value = cli_hid.strip()
+    file_api, file_hid = load_secrets_from_file(secrets_file)
+    env_api = os.environ.get("QUANTCLASS_API_KEY", "").strip()
+    env_hid = os.environ.get("QUANTCLASS_HID", "").strip()
+
+    api_key = cli_api or file_api or env_api
+    hid = cli_hid_value or file_hid or env_hid
+
+    api_source = "cli" if cli_api else ("setup_secrets" if file_api else ("env" if env_api else "missing"))
+    hid_source = "cli" if cli_hid_value else ("setup_secrets" if file_hid else ("env" if env_hid else "missing"))
+    if api_source == hid_source:
+        credential_source = api_source
+    else:
+        credential_source = f"mixed(api={api_source},hid={hid_source})"
+    return api_key, hid, credential_source
 
 def request_data(method: str, url: str, headers: Dict[str, str], **kwargs) -> requests.Response:
     """
@@ -2688,6 +2784,42 @@ def _build_command_ctx_with_overrides(base_ctx: CommandContext, data_root: Path,
     )
 
 
+def _resolve_command_paths(
+    base_ctx: CommandContext,
+    require_user_config: bool = False,
+) -> Tuple[Path, Path, Optional[UserConfig], str, str]:
+    """
+    统一解析 data_root / secrets_file 来源。
+
+    优先级：
+    1) 命令行显式参数
+    2) user_config.json
+    3) 代码默认值
+    """
+
+    user_config: Optional[UserConfig] = None
+    if base_ctx.config_file.exists():
+        # 只要配置文件存在，就强制校验其可读性，避免损坏配置被静默忽略。
+        user_config = load_user_config_or_raise(base_ctx.config_file)
+    elif require_user_config:
+        raise RuntimeError(f"未找到用户配置文件：{base_ctx.config_file}；请先执行 setup。")
+
+    data_root_source = "cli" if base_ctx.data_root_from_cli else "default"
+    secrets_source = "cli" if base_ctx.secrets_file_from_cli else "default"
+    data_root = base_ctx.data_root
+    secrets_file = base_ctx.secrets_file
+
+    if user_config is not None:
+        if not base_ctx.data_root_from_cli:
+            data_root = user_config.data_root.resolve()
+            data_root_source = "config"
+        if not base_ctx.secrets_file_from_cli:
+            secrets_file = user_config.secrets_file.resolve()
+            secrets_source = "config"
+
+    return data_root.resolve(), secrets_file.resolve(), user_config, data_root_source, secrets_source
+
+
 def run_update_with_settings(
     command_ctx: CommandContext,
     mode: str = "local",
@@ -2868,19 +3000,8 @@ def cmd_setup(
     else:
         secrets_path = DEFAULT_USER_SECRETS_FILE.resolve()
 
-    save_user_secrets_atomic(secrets_path, api_key=raw_api_key, hid=raw_hid)
-
-    now = utc_now_iso()
-    user_config = UserConfig(
-        data_root=data_root_path,
-        product_mode=mode,
-        default_products=default_products,
-        secrets_file=secrets_path,
-        created_at=existing_config.created_at if existing_config else now,
-        updated_at=now,
-    )
-    save_user_config_atomic(base_ctx.config_file, user_config)
-
+    # 默认先做连通性检查，再写文件：
+    # 这样检查失败时不会留下“新配置写了一半”的状态。
     if not skip_check:
         probe_product = default_products[0] if default_products else (catalog[0] if catalog else "stock-trading-data")
         headers = {
@@ -2897,6 +3018,24 @@ def cmd_setup(
         except Exception as exc:
             raise RuntimeError(f"连通性检查失败；请检查 API Key/HID 或网络。原始错误：{exc}") from exc
         log_info("连通性检查通过。", event="SETUP", probe_product=probe_product)
+
+    # 真正落盘时用“配置+密钥”一体化写入，任一步失败都会回滚。
+    now = utc_now_iso()
+    user_config = UserConfig(
+        data_root=data_root_path,
+        product_mode=mode,
+        default_products=default_products,
+        secrets_file=secrets_path,
+        created_at=existing_config.created_at if existing_config else now,
+        updated_at=now,
+    )
+    save_setup_artifacts_atomic(
+        config_path=base_ctx.config_file,
+        config=user_config,
+        secrets_path=secrets_path,
+        api_key=raw_api_key,
+        hid=raw_hid,
+    )
 
     log_info(
         "setup 完成。下一步建议先执行 update --dry-run。",
@@ -2920,17 +3059,41 @@ def cmd_update(
     """
 
     base_ctx = _ctx(ctx)
-    user_config = load_user_config_or_raise(base_ctx.config_file)
+    data_root, secrets_file, user_config, data_root_source, secrets_source = _resolve_command_paths(
+        base_ctx,
+        require_user_config=True,
+    )
+    if user_config is None:
+        raise RuntimeError(f"未找到用户配置文件：{base_ctx.config_file}；请先执行 setup。")
 
-    data_root = base_ctx.data_root if base_ctx.data_root_from_cli else user_config.data_root.resolve()
-    secrets_file = base_ctx.secrets_file if base_ctx.secrets_file_from_cli else user_config.secrets_file.resolve()
     if verbose and LOGGER.level != "DEBUG":
         LOGGER.level = "DEBUG"
     run_ctx = _build_command_ctx_with_overrides(base_ctx, data_root=data_root, secrets_file=secrets_file)
-    run_ctx = run_ctx.model_copy(update={"dry_run": base_ctx.dry_run or dry_run, "verbose": base_ctx.verbose or verbose})
+    # update 明确固定优先级：CLI > setup secrets > ENV，
+    # 解析后写回 run_ctx，避免后续流程再次按“旧优先级”重算。
+    api_key, hid, credential_source = resolve_credentials_for_update(
+        cli_api_key=run_ctx.api_key,
+        cli_hid=run_ctx.hid,
+        secrets_file=run_ctx.secrets_file.resolve(),
+    )
+    run_ctx = run_ctx.model_copy(
+        update={
+            "dry_run": base_ctx.dry_run or dry_run,
+            "verbose": base_ctx.verbose or verbose,
+            "api_key": api_key,
+            "hid": hid,
+        }
+    )
     ctx.obj = run_ctx
     ensure_data_root_ready(run_ctx.data_root, create_if_missing=False)
     load_user_secrets_or_raise(run_ctx.secrets_file)
+    log_debug(
+        "update 运行来源已解析。",
+        event="SETUP",
+        data_root_source=data_root_source,
+        secrets_source=secrets_source,
+        credential_source=credential_source,
+    )
 
     # update 产品优先级：
     # 1) 命令行 --products 临时覆盖
@@ -2970,8 +3133,15 @@ def cmd_init(ctx: typer.Context) -> None:
     """
 
     command_ctx = _ctx(ctx)
-    command_ctx = _build_command_ctx_with_overrides(command_ctx, command_ctx.data_root, command_ctx.secrets_file)
+    data_root, secrets_file, _user_config, data_root_source, secrets_source = _resolve_command_paths(command_ctx)
+    command_ctx = _build_command_ctx_with_overrides(command_ctx, data_root, secrets_file)
     ctx.obj = command_ctx
+    log_debug(
+        "init 运行来源已解析。",
+        event="PATHS",
+        data_root_source=data_root_source,
+        secrets_source=secrets_source,
+    )
     ensure_data_root_ready(command_ctx.data_root, create_if_missing=True)
     t0 = time.time()
     log_info("开始执行 init。", event="CMD_START")
@@ -3025,8 +3195,15 @@ def cmd_one_data(
     """
 
     command_ctx = _ctx(ctx)
-    command_ctx = _build_command_ctx_with_overrides(command_ctx, command_ctx.data_root, command_ctx.secrets_file)
+    data_root, secrets_file, _user_config, data_root_source, secrets_source = _resolve_command_paths(command_ctx)
+    command_ctx = _build_command_ctx_with_overrides(command_ctx, data_root, secrets_file)
     ctx.obj = command_ctx
+    log_debug(
+        "one_data 运行来源已解析。",
+        event="PATHS",
+        data_root_source=data_root_source,
+        secrets_source=secrets_source,
+    )
     ensure_data_root_ready(command_ctx.data_root, create_if_missing=False)
     # one_data 的最小执行单元就是一个 ProductPlan。
     report = _new_report(command_ctx.run_id, mode="network")
@@ -3075,8 +3252,15 @@ def cmd_all_data(
     """
 
     command_ctx = _ctx(ctx)
-    command_ctx = _build_command_ctx_with_overrides(command_ctx, command_ctx.data_root, command_ctx.secrets_file)
+    data_root, secrets_file, _user_config, data_root_source, secrets_source = _resolve_command_paths(command_ctx)
+    command_ctx = _build_command_ctx_with_overrides(command_ctx, data_root, secrets_file)
     ctx.obj = command_ctx
+    log_debug(
+        "all_data 运行来源已解析。",
+        event="PATHS",
+        data_root_source=data_root_source,
+        secrets_source=secrets_source,
+    )
     exit_code = run_update_with_settings(
         command_ctx=command_ctx,
         mode=mode,

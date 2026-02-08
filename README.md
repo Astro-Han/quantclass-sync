@@ -70,6 +70,10 @@ python3 quantclass_daily_sync.py update --verbose
 python3 quantclass_daily_sync.py setup
 ```
 
+默认行为说明（重要）：
+1. `setup` 会先做连通性检查（可用 `--skip-check` 跳过）。
+2. 连通性检查失败时，不会保存 `user_config.json` 和 `user_secrets.env`。
+
 可选：非交互模式（自动化场景）
 
 ```bash
@@ -87,6 +91,11 @@ python3 quantclass_daily_sync.py update
 2. `--force`：跳过时间戳门控（门控：先判断是否有新数据再决定是否下载）
 3. `--products`：临时指定产品（可重复传参或逗号分隔）
 4. `--verbose`：显示调试日志
+
+凭证优先级（高 -> 低）：
+1. 命令行参数（`--api-key/--hid`）
+2. `setup` 写入的 `user_secrets.env`
+3. 环境变量（`QUANTCLASS_API_KEY/QUANTCLASS_HID`）
 
 示例：只更新两个产品
 
@@ -128,6 +137,8 @@ python3 quantclass_daily_sync.py update --products stock-trading-data --products
 1. `init`
 2. `one_data`
 3. `all_data`
+
+兼容命令在未显式传 `--data-root/--secrets-file` 时，也会自动读取 `user_config.json`。
 
 示例：
 
@@ -175,4 +186,3 @@ sed -n '1,220p' "$report"
 1. 不要把 `user_secrets.env` 提交到 Git。
 2. 不要把 API Key/HID 发到群聊或工单截图。
 3. 生产更新建议先跑一次 `update --dry-run`。
-
