@@ -2513,10 +2513,11 @@ def _extract_command_context(args: tuple, kwargs: dict) -> Optional[CommandConte
     """从命令参数中提取 CommandContext（用于异常时决定是否打印调试堆栈）。"""
 
     raw_ctx = kwargs.get("ctx") or (args[0] if args else None)
-    if isinstance(raw_ctx, typer.Context):
-        obj = raw_ctx.obj
-        if isinstance(obj, CommandContext):
-            return obj
+    if raw_ctx is None:
+        return None
+    obj = getattr(raw_ctx, "obj", None)
+    if isinstance(obj, CommandContext):
+        return obj
     return None
 
 
@@ -2555,17 +2556,18 @@ def command_guard(command_name: str):
                 raise typer.Exit(code=1)
             finally:
                 command_ctx = _extract_command_context(args, kwargs)
-                if command_ctx is not None:
-                    try:
-                        cleanup_work_cache_aggressive(command_ctx.work_dir)
-                        log_debug("工作缓存已清理。", event="CACHE_CLEANUP", work_dir=str(command_ctx.work_dir))
-                    except Exception as exc:
-                        log_debug(f"工作缓存清理失败（已忽略）: {exc}", event="CACHE_CLEANUP")
+                work_dir = command_ctx.work_dir if command_ctx is not None else DEFAULT_WORK_DIR.resolve()
+                data_root = command_ctx.data_root if command_ctx is not None else DEFAULT_DATA_ROOT.resolve()
+                try:
+                    cleanup_work_cache_aggressive(work_dir)
+                    log_debug("工作缓存已清理。", event="CACHE_CLEANUP", work_dir=str(work_dir))
+                except Exception as exc:
+                    log_debug(f"工作缓存清理失败（已忽略）: {exc}", event="CACHE_CLEANUP")
 
-                    try:
-                        cleanup_report_logs(report_dir_path(command_ctx.data_root), retention_days=DEFAULT_REPORT_RETENTION_DAYS)
-                    except Exception as exc:
-                        log_debug(f"报告日志清理失败（已忽略）: {exc}", event="CACHE_CLEANUP")
+                try:
+                    cleanup_report_logs(report_dir_path(data_root), retention_days=DEFAULT_REPORT_RETENTION_DAYS)
+                except Exception as exc:
+                    log_debug(f"报告日志清理失败（已忽略）: {exc}", event="CACHE_CLEANUP")
 
         return wrapper
 
