@@ -2464,12 +2464,14 @@ app = typer.Typer(
 def global_options(
     ctx: typer.Context,
     data_root: Path = typer.Option(DEFAULT_DATA_ROOT, "--data-root", help="数据根目录。"),
-    api_key: str = typer.Option("", "--api-key", help="QuantClass API Key。"),
-    hid: str = typer.Option("", "--hid", help="QuantClass HID。"),
+    api_key: str = typer.Option("", "--api-key", help="QuantClass API Key（高级参数）。", hidden=True),
+    hid: str = typer.Option("", "--hid", help="QuantClass HID（高级参数）。", hidden=True),
     secrets_file: Path = typer.Option(DEFAULT_SECRETS_FILE, "--secrets-file", help="本地密钥文件路径。"),
     dry_run: bool = typer.Option(False, "--dry-run", help="演练模式（不写业务数据和状态文件）。"),
-    report_file: Optional[Path] = typer.Option(None, "--report-file", help="报告输出路径（JSON）。"),
-    stop_on_error: bool = typer.Option(False, "--stop-on-error", help="遇错即停。"),
+    report_file: Optional[Path] = typer.Option(
+        None, "--report-file", help="报告输出路径（JSON，高级参数）。", hidden=True
+    ),
+    stop_on_error: bool = typer.Option(False, "--stop-on-error", help="遇错即停（高级参数）。", hidden=True),
     verbose: bool = typer.Option(False, "--verbose", help="显示调试日志。"),
 ) -> None:
     """全局参数（所有子命令共享）。"""

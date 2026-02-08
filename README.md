@@ -1,190 +1,328 @@
-# QuantClass 数据同步工具说明（零基础友好版）
+# QuantClass 数据同步工具（零基础可用）
 
-脚本路径：`/Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py`  
-当前目标：用尽量少的命令，完成日常更新、单产品更新、全量恢复。
+脚本路径：`/Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py`
 
-## 1. 你最关心的核心功能
+这个工具用来做 3 件事：
+1. 日常批量更新本地数据（最常用）
+2. 单产品更新（快速定位问题）
+3. 单产品全量恢复（数据异常时兜底）
 
-1. 一键批量更新你本地已有的数据产品：`all_data --mode local`
-2. 只更新一个产品：`one_data <product>`
-3. 全量恢复单产品（先备份后覆盖）：`full_data <product>`
-4. 演练模式（dry-run）：走完整流程但不写业务数据和状态文件
-5. 自动落库策略：已知产品增量合并，未知产品安全镜像或轻量合并
+如果你只记一条：**先 `--dry-run` 演练，再正式执行。**
 
-## 2. 当前开发进度（截至 2026-02-08）
+---
 
-已完成：
-1. 命令体系切换为子命令（`init/one_data/all_data/full_data_link/full_data`）
-2. 本地状态管理（`FuelBinStat.db` + `products-status.json`）
-3. 本地存量驱动更新（`all_data --mode local`）
-4. 已知产品规则合并 + 未知产品轻量合并/镜像兜底
-5. 全量恢复“先备份再覆盖”
-6. 安全解压（含 `.zip/.tar/.rar/.7z` 路径越界防护）
-7. `dry-run` 安全语义修复（不写业务数据、不写状态库、不写状态 JSON）
-8. 中文日志、结构化 JSON 报告、统一错误码
+## 1. 这个项目解决什么问题
 
-当前版本适合：
-1. 日常增量更新
-2. 已有产品的稳定维护
-3. 出现数据异常时的单产品全量恢复
+你本地有很多数据产品目录（例如 `stock-trading-data`、`stock-main-index-data`）。
+手动逐个更新非常耗时，也容易漏更新。
 
-## 3. 三步上手（第一次使用）
+本脚本会自动完成：
+1. 识别要更新的产品
+2. 拉取最新日期并下载
+3. 解压和合并到本地目录
+4. 写入运行报告，方便复盘
 
-### 第一步：安装依赖
+---
+
+## 2. 新手先看：5 分钟上手
+
+### 第一步：安装依赖（只需一次）
+
+【会写入】影响范围：当前 Python 环境（安装依赖包）
 
 ```bash
 python3 -m pip install -r /Users/yuhan/workspace/quant/data/scripts/requirements.txt
 ```
 
-可选解压依赖（只在你需要处理 `.7z/.rar` 时安装）：
+【会写入】影响范围：当前 Python 环境（仅处理 `.7z/.rar` 时需要）
 
 ```bash
 python3 -m pip install -r /Users/yuhan/workspace/quant/data/scripts/requirements-archive.txt
 ```
 
-### 第二步：准备凭证
+### 第二步：准备凭证（API Key + HID）
 
-支持三种方式：
-1. 命令行传入 `--api-key` 和 `--hid`
-2. 环境变量
-3. 本地文件 `xbx_apiKey.md`（默认路径：`/Users/yuhan/workspace/quant/data/scripts/xbx_apiKey.md`）
+脚本支持 3 种来源，优先级从高到低：
+1. 命令行参数 `--api-key`、`--hid`
+2. 环境变量 `QUANTCLASS_API_KEY`、`QUANTCLASS_HID`
+3. 本地文件 `xbx_apiKey.md`
 
-### 第三步：先演练，再正式执行
+推荐你使用本地文件（最简单、最不容易输错）：
+- 默认文件：`/Users/yuhan/workspace/quant/data/scripts/xbx_apiKey.md`
+- 文件内容示例（把值替换成你自己的）：
 
-演练（推荐先跑）：
-
-```bash
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py --dry-run all_data --mode local
+```text
+xbx_api_key=YOUR_API_KEY
+xbx_id=YOUR_HID
 ```
 
-正式执行：
+### 第三步：初始化状态（第一次建议执行）
 
-```bash
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py all_data --mode local
-```
-
-## 4. 常用命令（按用户视角）
-
-### 4.1 初始化状态（不下载）
+【会写入】影响范围：
+- `/Users/yuhan/workspace/quant/data/xbx_data/code/data/FuelBinStat.db`
+- `/Users/yuhan/workspace/quant/data/xbx_data/code/data/products-status.json`
 
 ```bash
 python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py init
 ```
 
-### 4.2 更新单产品
+### 第四步：先演练（不写业务数据）
+
+【会写入】影响范围：
+- 会写运行报告
+- 不写业务数据目录
+- 不写状态库和状态 JSON
 
 ```bash
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py one_data stock-trading-data
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py --dry-run --verbose all_data --mode local
 ```
 
-默认会先读取本地 `timestamp.txt` 并对比 API `latest`；
-若本地已是最新会自动跳过。可用 `--force` 强制更新：
+### 第五步：正式执行日常更新
+
+【会写入】影响范围：
+- `/Users/yuhan/workspace/quant/data/xbx_data/<product>/...`
+- 状态文件与运行报告
 
 ```bash
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py one_data stock-trading-data --force
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py --verbose all_data --mode local
 ```
 
-指定日期：
+---
+
+## 3. 命令速查（复制即可）
+
+> 注意：`--verbose`、`--dry-run`、`--secrets-file` 这些是**全局参数**，要放在子命令前面。
+>
+> 正确：`... quantclass_daily_sync.py --verbose all_data --mode local`
+>
+> 错误：`... quantclass_daily_sync.py all_data --mode local --verbose`
+
+### 3.0 参数简化说明（本次改动）
+
+现在默认只展示核心全局参数（更适合零基础）：
+1. `--data-root`
+2. `--secrets-file`
+3. `--dry-run`
+4. `--verbose`
+
+以下高级参数仍可用，但默认隐藏（兼容保留）：
+1. `--api-key`
+2. `--hid`
+3. `--report-file`
+4. `--stop-on-error`
+
+### 3.1 更新单个产品
+
+【会写入】影响范围：对应产品目录、状态文件、运行报告
 
 ```bash
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py one_data stock-trading-data --date-time 2026-02-06
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py --verbose one_data stock-trading-data
 ```
 
-### 4.3 批量更新
+### 3.2 单产品按指定日期更新
 
-默认本地存量模式（推荐）：
+【会写入】影响范围：对应产品目录、状态文件、运行报告
 
 ```bash
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py all_data --mode local
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py --verbose one_data stock-trading-data --date-time 2026-02-06
 ```
 
-若你需要忽略时间戳门控、强制全量执行本次计划：
+### 3.3 批量更新本地已有产品（推荐日常命令）
+
+【会写入】影响范围：本地已有产品目录、状态文件、运行报告
 
 ```bash
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py all_data --mode local --force
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py --verbose all_data --mode local
 ```
 
-catalog 全量轮询模式：
+### 3.4 指定产品批量更新
+
+【会写入】影响范围：指定产品目录、状态文件、运行报告
 
 ```bash
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py all_data --mode catalog
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py --verbose all_data --mode local --products stock-trading-data --products stock-main-index-data
 ```
 
-只跑指定产品：
+### 3.5 忽略时间戳门控，强制更新
+
+【会写入】影响范围：目标产品目录、状态文件、运行报告
 
 ```bash
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py all_data --products stock-trading-data --products stock-main-index-data
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py --verbose all_data --mode local --force
 ```
 
-### 4.4 全量链路（单产品）
+### 3.6 查询单产品全量下载链接
 
-先拿全量下载链接：
+【会写入】影响范围：
+- `/Users/yuhan/workspace/quant/data/xbx_data/code/data/FuelBinStat.db`
+- `/Users/yuhan/workspace/quant/data/xbx_data/code/data/products-status.json`
+- 运行报告
 
 ```bash
 python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py full_data_link stock-trading-data stock-trading-data
 ```
 
-再执行全量恢复：
+### 3.7 全量恢复单产品（兜底操作）
+
+【高风险】影响范围：会覆盖目标产品目录内容（先备份后覆盖）
 
 ```bash
-python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py full_data stock-trading-data
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py --verbose full_data stock-trading-data
 ```
 
-## 5. 运行参数（全子命令可用）
+---
 
-1. `--data-root`：数据根目录（默认 `/Users/yuhan/workspace/quant/data/xbx_data`）
-2. `--api-key`：QuantClass API Key
-3. `--hid`：QuantClass HID
-4. `--secrets-file`：本地密钥文件路径
-5. `--dry-run`：演练模式（不写业务数据、不写状态库、不写状态 JSON）
-6. `--report-file`：运行报告输出路径（JSON）
-7. `--stop-on-error`：批量任务遇错即停
-8. `--verbose`：输出调试日志
+## 4. 这版新增的关键策略（你最关心）
 
-仅 `one_data/all_data` 子命令支持：
-1. `--force`：强制更新（跳过 timestamp 门控）
+### 4.1 `timestamp.txt` 门控（默认开启）
 
-## 6. 数据目录与状态文件
+门控（先判断要不要更新）规则：
 
-1. 业务数据目录：`/Users/yuhan/workspace/quant/data/xbx_data/<product>/...`
-2. 状态数据库：`/Users/yuhan/workspace/quant/data/xbx_data/code/data/FuelBinStat.db`
-3. 状态导出文件：`/Users/yuhan/workspace/quant/data/xbx_data/code/data/products-status.json`
-4. 运行报告目录：`/Users/yuhan/workspace/quant/data/xbx_data/code/data/log/quantclass/`
-5. 工作缓存目录：`/Users/yuhan/workspace/quant/data/.cache/quantclass/`（命令结束后自动激进清理）
+| 场景 | 行为 |
+|---|---|
+| `--force` | 一定更新 |
+| `one_data --date-time ...` | 按你指定日期更新 |
+| 本地日期 `>=` API latest | 跳过（`reason_code=up_to_date`） |
+| 本地 `timestamp.txt` 缺失/格式坏/解析失败 | 回退为更新（防止漏更） |
 
-## 7. 落库策略（默认安全优先）
+`timestamp.txt` 格式：
 
-1. `merge_known`：命中已知规则，做增量合并
-2. `unknown_header_merge`：未知产品但“同名目标文件且表头一致”，做轻量合并
-3. `mirror_unknown`：其余未知情况走镜像写入
+```text
+数据日期,本地写入时间
+```
 
-## 8. 报告口径（你怎么看结果）
+例如：
 
-报告文件中每个产品都有：
-1. `status`：`ok/error/skipped`
-2. `strategy`：`merge_known/unknown_header_merge/mirror_unknown/skip`
-3. `reason_code`：失败或分流原因
+```text
+2026-02-07,2026-02-08 15:09:34
+```
+
+### 4.2 `.cache` 激进清理（默认开启）
+
+- 工作缓存目录：`/Users/yuhan/workspace/quant/data/.cache/quantclass/`
+- 每次命令结束（成功或失败）都会自动清理缓存，防止长期膨胀。
+- 运行日志不放在 `.cache`，而是放在：`/Users/yuhan/workspace/quant/data/xbx_data/code/data/log/quantclass/`
+- 日志默认保留 365 天，超过自动清理。
+
+---
+
+## 5. 目录与文件说明
+
+### 5.1 业务数据
+
+- `/Users/yuhan/workspace/quant/data/xbx_data/<product>/...`
+
+### 5.2 状态文件
+
+- SQLite 状态库：`/Users/yuhan/workspace/quant/data/xbx_data/code/data/FuelBinStat.db`
+- 状态 JSON：`/Users/yuhan/workspace/quant/data/xbx_data/code/data/products-status.json`
+
+### 5.3 运行日志（重点看这里）
+
+- 目录：`/Users/yuhan/workspace/quant/data/xbx_data/code/data/log/quantclass/`
+- 文件名示例：`run_report_20260208-150649_all_data.json`
+
+### 5.4 产品时间戳
+
+- 文件：`/Users/yuhan/workspace/quant/data/xbx_data/<product>/timestamp.txt`
+- 用途：门控判断“本地是否已最新”。
+
+---
+
+## 6. 如何判断这次执行是否成功
+
+看运行报告里的 3 个字段：
+1. `success_total`
+2. `failed_total`
+3. `skipped_total`
+
+看单产品结果里的 3 个字段：
+1. `status`：`ok / error / skipped`
+2. `reason_code`：为什么成功、失败或跳过
+3. `mode`：这次走的是 `network` 更新还是 `gate` 门控跳过
 
 常见 `reason_code`：
-1. `ok`：执行成功
-2. `unknown_local_product`：本地目录不在 catalog 中，已跳过
-3. `invalid_explicit_product`：显式指定的产品不在 catalog 中，已跳过
-4. `up_to_date`：本地 timestamp 与 API latest 比对后判定“已最新”，跳过更新
-5. `network_error`：网络或权限问题
-6. `extract_error`：解压失败
-7. `merge_error`：合并阶段失败
-8. `full_data_link_missing`：缺少全量链接
-9. `full_data_expired`：全量链接过期
+1. `ok`：成功
+2. `up_to_date`：已是最新，跳过
+3. `unknown_local_product`：本地目录不在产品清单中
+4. `network_error`：网络/权限/接口问题
+5. `extract_error`：解压失败
+6. `merge_error`：合并失败
+7. `full_data_link_missing`：全量链接缺失
+8. `full_data_expired`：全量链接过期
 
-## 9. 零基础排障建议
+---
 
-1. 看起来“卡住”时，先等 1-3 分钟，很多时候在做大文件合并
-2. 先用 `--dry-run` 验证流程，再跑正式更新
-3. 单产品异常时，优先用 `one_data <product>` 缩小范围
-4. 数据明显异常时，先 `full_data_link` 再 `full_data`
+## 7. 常见问题（零基础高频）
 
-## 10. 参考
+### Q1：为什么报 `No such option: --verbose`？
 
-1. QuantClass API 页面：[https://www.quantclass.cn/data/api](https://www.quantclass.cn/data/api)
-2. 产品清单：`/Users/yuhan/workspace/quant/data/scripts/catalog.txt`
-3. 主脚本：`/Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py`
+因为 `--verbose` 是全局参数，必须写在子命令前。
+
+【只读】影响范围：仅打印帮助，不写数据
+
+```bash
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py --verbose all_data --help
+```
+
+### Q2：为什么“看起来没新数据”却更新了？
+
+最常见 3 个原因：
+1. 本地 `timestamp.txt` 缺失（首次门控前常见）
+2. `timestamp.txt` 格式异常（第一列不是日期）
+3. 你用了 `--force`
+
+### Q3：如何快速排查某个产品？
+
+先单产品跑，范围最小，日志最清晰。
+
+【会写入】影响范围：该产品目录、状态文件、运行报告
+
+```bash
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py --verbose one_data stock-trading-data
+```
+
+### Q4：怎么查看“最新一份”运行报告？
+
+【只读】影响范围：仅读取日志文件
+
+```bash
+report=$(ls -t /Users/yuhan/workspace/quant/data/xbx_data/code/data/log/quantclass/run_report_* | head -n 1)
+echo "$report"
+sed -n '1,220p' "$report"
+```
+
+---
+
+## 8. 安全与隐私
+
+1. 不要把 API Key / HID 提交到 Git。
+2. 不要在公开截图里暴露凭证。
+3. 推荐优先使用本地 `xbx_apiKey.md` 或环境变量管理凭证。
+4. 生产环境优先使用最小命令范围（先 `one_data` 再 `all_data`）。
+
+---
+
+## 9. 维护与扩展
+
+- 产品清单：`/Users/yuhan/workspace/quant/data/scripts/catalog.txt`
+- 主脚本：`/Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py`
+- 依赖清单：`/Users/yuhan/workspace/quant/data/scripts/requirements.txt`
+
+如果要新增产品规则或调整合并策略，建议先 `--dry-run` 验证，再做正式更新。
+
+---
+
+## 10. README 结构依据（联网检索）
+
+本 README 的结构与写法参考了以下最佳实践：
+1. GitHub 官方关于 README 的建议（说明项目做什么、为什么有用、如何开始、到哪里求助、谁维护）。
+2. GitHub 官方 Markdown 规范（清晰标题、代码块、链接、列表，提升可扫描性）。
+3. Open Source Guides 对 README 的问题清单（What/Why/Getting Started/Help）。
+4. Plain Language（平实语言）原则（短句、主动语态、术语首次解释）。
+
+参考链接：
+- [GitHub Docs: About the repository README file](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-readmes)
+- [GitHub Docs: Basic writing and formatting syntax](https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax)
+- [Open Source Guides: Starting an Open Source Project (Writing a README)](https://opensource.guide/starting-a-project/#writing-a-readme)
+- [PlainLanguage.gov](https://www.plainlanguage.gov/)
