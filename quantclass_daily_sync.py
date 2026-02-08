@@ -2588,13 +2588,13 @@ def _new_report(run_id: str, mode: str) -> RunReport:
 # CLI（命令行接口）根对象：所有子命令都挂在 app 上。
 app = typer.Typer(
     help="QuantClass 数据同步工具（推荐 setup + update，兼容旧命令）",
-    no_args_is_help=True,
+    no_args_is_help=False,
     add_completion=False,
     pretty_exceptions_enable=False,
 )
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def global_options(
     ctx: typer.Context,
     data_root: Optional[Path] = typer.Option(None, "--data-root", help="数据根目录（兼容命令可用）。"),
@@ -2659,6 +2659,23 @@ def global_options(
     )
     ctx.obj = command_ctx
     build_scheduler_placeholder(SchedulerConfig())
+
+    # 无子命令时做“首次引导”：
+    # - 首次（无配置）：自动进入 setup
+    # - 非首次（已有配置）：显示帮助
+    if ctx.invoked_subcommand is None:
+        if not resolved_config_file.exists():
+            if not sys.stdin.isatty():
+                log_error(
+                    f"未检测到配置文件：{resolved_config_file}；请先执行 setup（交互）或 setup --non-interactive。",
+                    event="SETUP",
+                )
+                raise typer.Exit(code=1)
+            log_info("未检测到用户配置，自动进入 setup。", event="SETUP", config_file=str(resolved_config_file))
+            ctx.invoke(cmd_setup)
+            raise typer.Exit(code=0)
+        typer.echo(ctx.get_help())
+        raise typer.Exit(code=0)
 
 
 def _ctx(ctx: typer.Context) -> CommandContext:
