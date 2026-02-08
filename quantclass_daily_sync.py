@@ -26,7 +26,7 @@ import requests
 try:
     import typer
     from apscheduler.schedulers.background import BackgroundScheduler
-    from pydantic import BaseModel, ConfigDict, Field, field_validator
+    from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
     from rich.console import Console
 except ModuleNotFoundError as exc:  # pragma: no cover - 环境缺依赖时给出中文提示
     print("缺少运行依赖；请先执行 `python3 -m pip install -r requirements.txt` 再运行脚本。", file=sys.stderr)
@@ -326,6 +326,36 @@ class ProductStatus(BaseModel):
             return None
         text = str(value).strip()
         return text or None
+
+    @field_validator("is_auto_update", "can_auto_update", "is_listed", mode="before")
+    @classmethod
+    def _normalize_int_flags(cls, value: object, info: ValidationInfo) -> int:
+        """
+        统一整型标志位，兼容历史状态库里的 NULL/空串/字符串数字。
+        """
+
+        defaults = {
+            "is_auto_update": 0,
+            "can_auto_update": 1,
+            "is_listed": 1,
+        }
+        default_value = defaults.get(info.field_name, 0)
+        if value in (None, ""):
+            return default_value
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+
+        text = str(value).strip()
+        if not text:
+            return default_value
+        try:
+            return int(text)
+        except Exception:
+            return default_value
 
     def to_json_record(self) -> Dict[str, object]:
         """导出 products-status.json 单产品记录（camelCase 字段）。"""
