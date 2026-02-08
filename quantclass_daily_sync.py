@@ -58,6 +58,29 @@ DEFAULT_FULL_BACKUP_DIR = DEFAULT_WORK_DIR / "full_backup"
 DEFAULT_REPORT_RETENTION_DAYS = 365
 TIMESTAMP_FILE_NAME = "timestamp.txt"
 
+# ========================= 新手阅读路线图（先看这里） =========================
+# 这份脚本分成 4 层。第一次读代码，建议按这个顺序：
+#
+# 1) 命令入口层（Typer 命令行框架）：
+#    - global_options / cmd_init / cmd_one_data / cmd_all_data / cmd_full_data*
+#    - 你在终端输入命令，最先进入这一层。
+#
+# 2) 编排层（把“要做什么”串起来）：
+#    - _execute_plans / process_product / sync_from_extract
+#    - 这一层决定每个产品要不要更新、怎么更新、失败怎么记报告。
+#
+# 3) 文件同步层（真正处理 CSV/TS 文件）：
+#    - sync_known_product / sync_unknown_product / merge_payload / sync_csv_file
+#    - 这一层做“合并、去重、镜像复制”。
+#
+# 4) 基础能力层（通用工具）：
+#    - 凭证读取、HTTP 请求、解压、安全检查、状态库读写、报告输出。
+#
+# 术语提示：
+# - 门控（先判断是否需要更新）：先比对本地与 API 的最新日期，再决定是否下载。
+# - 编排（把多个步骤组织成流程）：把“拉取 -> 解压 -> 合并 -> 记录”串成稳定管道。
+# ============================================================================
+
 # 已知数据产品（这些产品允许做增量合并）
 TRADING_PRODUCTS = {"stock-trading-data-pro", "stock-trading-data"}
 INDEX_PRODUCTS = {"stock-main-index-data"}
@@ -1426,10 +1449,12 @@ def sync_known_product(product: str, extract_path: Path, data_root: Path, dry_ru
     files = sorted(iter_candidate_files(extract_path))
     total_files = len(files)
     for idx, src in enumerate(files, start=1):
+        # 统一做路径归一化（把 daily 后缀等差异映射到稳定产品名）。
         src_rel_path = src.relative_to(extract_path)
         normalized_rel_path = normalize_source_relpath(src_rel_path, product)
 
         if product in AGGREGATE_SPLIT_COLS and is_daily_aggregate_file(normalized_rel_path):
+            # 聚合日文件（一个文件含多标的）先拆分，再逐个同步。
             agg = sync_daily_aggregate_file(src=src, product=product, data_root=data_root, dry_run=dry_run)
             stats.merge(agg)
             continue
@@ -1444,16 +1469,19 @@ def sync_known_product(product: str, extract_path: Path, data_root: Path, dry_ru
         target = data_root / rel_path
 
         if src.suffix.lower() == ".ts":
+            # .ts 文件按“镜像复制”处理，不做 CSV 结构化合并。
             result = sync_raw_file(src=src, target=target, dry_run=dry_run)
             apply_file_result(stats, result=result)
             reason_code = REASON_MIRROR_FALLBACK
         else:
             rule = infer_rule(rel_path)
             if rule is None:
+                # 没命中规则时降级镜像，保持可用性优先。
                 result = sync_raw_file(src=src, target=target, dry_run=dry_run)
                 apply_file_result(stats, result=result)
                 reason_code = REASON_MIRROR_FALLBACK
             else:
+                # 命中规则时做增量合并（可减少重复写入）。
                 result, added_rows = sync_csv_file(src=src, target=target, rule=rule, dry_run=dry_run)
                 apply_file_result(stats, result=result, added_rows=added_rows)
 
@@ -1562,6 +1590,7 @@ def sync_from_extract(
     - mirror_unknown：未知规则产品做镜像写入
     """
 
+    # 这里是策略分发器（根据 plan.strategy 选择具体同步实现）。
     if plan.strategy == STRATEGY_MIRROR_UNKNOWN:
         return sync_unknown_product(
             product=plan.name,
@@ -1607,6 +1636,7 @@ def process_product(
 
     log_info(f"[{product}] 开始处理，策略={plan.strategy}", event="PRODUCT_PLAN")
 
+    # 第 1 步：确定本次要下载的业务日期（用户指定日期优先，否则取 latest）。
     actual_time = _resolve_actual_time(
         product=product,
         date_time=date_time,
@@ -1614,6 +1644,7 @@ def process_product(
         hid=hid,
         headers=headers,
     )
+    # 第 2 步：下载文件并准备解压目录。
     download_path, extract_path = _download_and_prepare_extract(
         product=product,
         actual_time=actual_time,
@@ -1622,9 +1653,10 @@ def process_product(
         headers=headers,
         work_dir=work_dir,
     )
+    # 第 3 步：解压下载文件（支持 zip/tar/rar/7z）。
     _extract_product_archive(product=product, download_path=download_path, extract_path=extract_path)
 
-    # 4) 落库
+    # 第 4 步：把 extract 目录中的数据同步到 data_root（这是“真正写业务数据”的阶段）。
     try:
         stats, reason_code = sync_from_extract(plan=plan, extract_path=extract_path, data_root=data_root, dry_run=dry_run)
     except Exception as exc:
@@ -2133,20 +2165,24 @@ def _resolve_requested_date_for_plan(
     - skipped_by_gate: 是否已经被门控判定为“跳过”
     """
 
+    # 用户手动指定了日期，就以用户输入为准，不再做 latest/timestamp 判断。
     requested_date_for_plan = requested_date_time.strip()
     if force_update or requested_date_for_plan:
         return requested_date_for_plan, False
 
     product_name = normalize_product_name(plan.name)
     try:
+        # 1) 读取 API 最新日期（latest）
         api_latest_raw = get_latest_time(
             api_base=command_ctx.api_base.rstrip("/"),
             product=product_name,
             hid=hid,
             headers=headers,
         )
+        # 2) 读取本地 timestamp 第一列日期
         api_latest_date = normalize_data_date(api_latest_raw)
         local_date = read_local_timestamp_date(command_ctx.data_root, product_name)
+        # 3) 如果本地已经不落后，则直接跳过，不进入下载链路
         if should_skip_by_timestamp(local_date, api_latest_date):
             elapsed = time.time() - t_product_start
             _append_gate_skip_result(
@@ -2167,6 +2203,7 @@ def _resolve_requested_date_for_plan(
             )
             return api_latest_raw, True
 
+        # 本地落后：继续执行更新
         log_info(
             f"[{product_name}] timestamp 门控通过，执行更新。",
             event="PRODUCT_PLAN",
@@ -2176,6 +2213,7 @@ def _resolve_requested_date_for_plan(
         )
         return api_latest_raw, False
     except Exception as exc:
+        # 门控异常时采用 fail-open（失败放行）策略，避免“该更新却被误跳过”。
         log_info(
             f"[{plan.name}] timestamp 门控异常，回退执行更新。",
             event="PRODUCT_PLAN",
@@ -2212,7 +2250,14 @@ def _execute_plans(
     conn: Optional[sqlite3.Connection] = None,
     force_update: bool = False,
 ) -> Tuple[SyncStats, bool, float]:
-    """执行产品计划并返回汇总统计。"""
+    """
+    执行产品计划并返回汇总统计。
+
+    整体流程（单次运行）：
+    1) 先构建请求头与凭证（API Key/HID）
+    2) 逐个产品执行“门控判断 -> 下载解压 -> 同步落库 -> 记录结果”
+    3) 累加统计并在必要时中断（stop-on-error）
+    """
 
     headers, hid = build_headers_or_raise(command_ctx)
     total = SyncStats()
@@ -2221,6 +2266,7 @@ def _execute_plans(
 
     for plan in plans:
         t_product_start = time.time()
+        # A. 判断这个产品本次应不应该跑（门控命中会直接 continue）。
         requested_date_for_plan, skipped_by_gate = _resolve_requested_date_for_plan(
             plan=plan,
             command_ctx=command_ctx,
@@ -2235,6 +2281,7 @@ def _execute_plans(
             continue
 
         try:
+            # B. 真正执行单产品同步（网络 + 解压 + 文件同步）。
             product, actual_time, stats, source_path, reason_code = process_product(
                 plan=plan,
                 date_time=requested_date_for_plan or None,
@@ -2248,15 +2295,19 @@ def _execute_plans(
             elapsed = time.time() - t_product_start
             total.merge(stats)
             _append_success_result(report, plan, product, actual_time, stats, source_path, reason_code, elapsed)
+            # C. 成功后统一回写状态库与 timestamp（dry-run 下不会写）。
             _upsert_product_status_after_success(conn=conn, command_ctx=command_ctx, product=product, actual_time=actual_time)
             continue
         except ProductSyncError as exc:
+            # 可预期业务错误：带有明确 reason_code。
             reason_code = exc.reason_code
             message = str(exc)
         except Exception as exc:
+            # 兜底未知异常：统一归并为 merge_error，避免丢失错误。
             reason_code = REASON_MERGE_ERROR
             message = str(exc)
 
+        # D. 失败路径：写报告 + 打日志 + 按 stop-on-error 决定是否中断。
         has_error = True
         elapsed = time.time() - t_product_start
         _append_error_result(report, plan, reason_code, requested_date_for_plan, elapsed, message)
@@ -2517,6 +2568,7 @@ def _new_report(run_id: str, mode: str) -> RunReport:
     return RunReport(schema_version="3.0", run_id=run_id, started_at=utc_now_iso(), mode=mode)
 
 
+# CLI（命令行接口）根对象：所有子命令都挂在 app 上。
 app = typer.Typer(
     help="QuantClass 数据同步脚本（官方命令兼容 + 本地安全增强）",
     no_args_is_help=True,
@@ -2539,7 +2591,15 @@ def global_options(
     stop_on_error: bool = typer.Option(False, "--stop-on-error", help="遇错即停（高级参数）。", hidden=True),
     verbose: bool = typer.Option(False, "--verbose", help="显示调试日志。"),
 ) -> None:
-    """全局参数（所有子命令共享）。"""
+    """
+    全局参数（所有子命令共享）。
+
+    这是 Typer 的回调（callback：每次执行任意子命令前都会先调用）。
+    这里完成三件事：
+    1) 初始化日志器（带 run_id，方便按次排障）
+    2) 校验关键路径参数
+    3) 把运行上下文写入 ctx.obj，供后续子命令复用
+    """
 
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     global LOGGER, PROGRESS_EVERY
@@ -2550,6 +2610,7 @@ def global_options(
     if not data_root.exists():
         raise typer.BadParameter(f"data-root 不存在：{data_root}")
 
+    # CommandContext 是“本次运行共享配置”，后续命令都从这里读取参数。
     command_ctx = CommandContext(
         run_id=run_id,
         data_root=data_root,
@@ -2602,7 +2663,11 @@ def _handle_command_exception(command_name: str, exc: Exception, reason_code: st
 
 
 def _cleanup_after_command(command_ctx: Optional[CommandContext]) -> None:
-    """命令结束后统一执行缓存清理（失败不影响主流程）。"""
+    """
+    命令结束后统一执行缓存清理（失败不影响主流程）。
+
+    设计目的：就算命令中途报错，也尽量保证缓存不会持续膨胀。
+    """
 
     work_dir = command_ctx.work_dir if command_ctx is not None else DEFAULT_WORK_DIR.resolve()
     data_root = command_ctx.data_root if command_ctx is not None else DEFAULT_DATA_ROOT.resolve()
@@ -2629,16 +2694,21 @@ def command_guard(command_name: str):
         @wraps(func)
         def wrapper(*args, **kwargs):
             try:
+                # 正常执行子命令主逻辑。
                 return func(*args, **kwargs)
             except typer.Exit:
+                # 业务层主动退出（例如参数校验失败）直接向上抛。
                 raise
             except ProductSyncError as exc:
+                # 业务可识别错误：保留 reason_code，方便报告聚合。
                 _handle_command_exception(command_name, exc, exc.reason_code, args, kwargs)
                 raise typer.Exit(code=1)
             except Exception as exc:
+                # 兜底未知错误：统一映射为 merge_error，避免漏报。
                 _handle_command_exception(command_name, exc, REASON_MERGE_ERROR, args, kwargs)
                 raise typer.Exit(code=1)
             finally:
+                # 无论成功/失败，都会执行清理（finally 总会执行）。
                 _cleanup_after_command(_extract_command_context(args, kwargs))
 
         return wrapper
@@ -2701,9 +2771,14 @@ def cmd_one_data(
     date_time: str = typer.Option("", "--date-time", help="指定下载日期（可选）。"),
     force_update: bool = typer.Option(False, "--force", help="强制更新：跳过 timestamp 门控。"),
 ) -> None:
-    """更新单个产品。"""
+    """
+    更新单个产品。
+
+    适合场景：排障、验证单个产品、减少批量更新的等待时间。
+    """
 
     command_ctx = _ctx(ctx)
+    # one_data 的最小执行单元就是一个 ProductPlan。
     report = _new_report(command_ctx.run_id, mode="network")
     report_path = resolve_report_path(command_ctx, "one_data")
     plan = build_product_plan([normalize_product_name(product)])
@@ -2714,6 +2789,7 @@ def cmd_one_data(
     if not command_ctx.dry_run:
         conn = connect_status_db(command_ctx.data_root)
     try:
+        # 实际执行（含门控、下载、解压、落库、结果记录）。
         total, has_error, t_run_start = _execute_plans(
             plans=plan,
             command_ctx=command_ctx,
@@ -2741,7 +2817,12 @@ def cmd_all_data(
     products: List[str] = typer.Option([], "--products", help="显式产品（可重复传参，也支持逗号分隔）。"),
     force_update: bool = typer.Option(False, "--force", help="强制更新：跳过 timestamp 门控。"),
 ) -> None:
-    """批量更新产品。"""
+    """
+    批量更新产品。
+
+    mode=local：按本地已有产品更新（日常推荐）。
+    mode=catalog：按 catalog 清单轮询（补齐或巡检时使用）。
+    """
 
     command_ctx = _ctx(ctx)
     mode = (mode or "local").strip().lower()
@@ -2757,6 +2838,7 @@ def cmd_all_data(
     report.discovered_total = len(discovered)
     log_info("本地产品扫描完成。", event="DISCOVER_DONE", discovered_total=report.discovered_total)
 
+    # 第 1 段：先把“本次到底要跑哪些产品”算出来。
     planned_products, unknown_local, invalid_explicit = resolve_products_by_mode(
         mode=mode,
         raw_products=products,
@@ -2777,6 +2859,7 @@ def cmd_all_data(
         )
         raise typer.Exit(code=1)
 
+    # 第 2 段：把产品名转换为执行计划（每个产品对应一个 ProductPlan）。
     plans = build_product_plan(planned_products)
     report.planned_total = len(plans)
     if not plans:
@@ -2790,6 +2873,7 @@ def cmd_all_data(
     if not command_ctx.dry_run:
         conn = connect_status_db(command_ctx.data_root)
     try:
+        # 第 3 段：执行计划（核心编排函数）。
         total, has_error, t_run_start = _execute_plans(
             plans,
             command_ctx,
@@ -2817,13 +2901,20 @@ def cmd_full_data_link(
     product: str = typer.Argument(..., help="产品英文名。"),
     full_data_name: str = typer.Argument(..., help="全量数据名称。"),
 ) -> None:
-    """拉取并缓存全量下载链接。"""
+    """
+    拉取并缓存全量下载链接。
+
+    给零基础同学的理解方式：
+    - 这一步主要是“拿链接并存起来”，不是直接改业务数据。
+    - 真正覆盖业务数据的是下一步 full_data。
+    """
 
     command_ctx = _ctx(ctx)
     t0 = time.time()
     product = normalize_product_name(product)
     log_info("开始执行 full_data_link。", event="CMD_START", product=product, full_data_name=full_data_name)
 
+    # 第 1 步：请求可用的全量下载链接（可能包含过期时间）。
     headers, hid = build_headers_or_raise(command_ctx)
     url, expires = resolve_full_data_link(
         api_base=command_ctx.api_base,
@@ -2841,6 +2932,7 @@ def cmd_full_data_link(
             has_expires=bool(expires),
         )
     else:
+        # 第 2 步：把链接写入状态库，供 full_data 读取。
         conn = connect_status_db(command_ctx.data_root)
         try:
             old = load_product_status(conn, product)
@@ -2878,6 +2970,7 @@ def cmd_full_data(
     conn: Optional[sqlite3.Connection] = None
     try:
         try:
+            # 第 1 步：先从状态库读取全量链接（full_data_link 阶段写入）。
             conn = connect_status_db(command_ctx.data_root, read_only=command_ctx.dry_run)
         except RuntimeError as exc:
             raise ProductSyncError(
@@ -2907,6 +3000,7 @@ def cmd_full_data(
                 reason_code=REASON_FULL_DATA_EXPIRED,
             )
 
+        # 第 2 步：下载全量压缩包到 zip 缓存目录。
         zip_cache_dir = DEFAULT_ZIP_CACHE_DIR
         zip_name = Path(unquote(urlparse(status.full_data_download_url).path)).name or f"{product}.zip"
         zip_path = zip_cache_dir / zip_name
@@ -2919,6 +3013,7 @@ def cmd_full_data(
         else:
             log_info("dry-run：跳过全量压缩包下载。", event="DOWNLOAD_OK", file=str(zip_path))
 
+        # 第 3 步：解压并定位产品目录（兼容不同压缩包目录结构）。
         extract_root = command_ctx.work_dir / "full_extract" / product / command_ctx.run_id
         if not command_ctx.dry_run:
             if extract_root.exists():
@@ -2939,6 +3034,7 @@ def cmd_full_data(
             # dry-run 不下载不解压，只保留流程与日志口径。
             source_dir = extract_root
 
+        # 第 4 步：执行“先备份后覆盖”的原子替换（原子：要么全成，要么回滚）。
         backup_dir, target_dir = _replace_product_dir_with_backup(
             product=product,
             source_dir=source_dir,
@@ -2963,6 +3059,7 @@ def cmd_full_data(
                 dry_run=False,
             )
 
+        # 第 5 步：成功后回写状态库。
         if not command_ctx.dry_run:
             status.last_update_time = utc_now_iso()
             status.data_time = status.data_time or utc_now_iso()
