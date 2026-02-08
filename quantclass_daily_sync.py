@@ -2673,7 +2673,17 @@ def global_options(
                 raise typer.Exit(code=1)
             log_info("未检测到用户配置，自动进入 setup。", event="SETUP", config_file=str(resolved_config_file))
             # 这里显式传 ctx，避免自动引导时丢失 setup 所需上下文参数。
-            ctx.invoke(cmd_setup, ctx=ctx)
+            ctx.invoke(
+                cmd_setup,
+                ctx=ctx,
+                non_interactive=False,
+                skip_check=False,
+                data_root="",
+                api_key="",
+                hid="",
+                product_mode=PRODUCT_MODE_LOCAL_SCAN,
+                products=[],
+            )
             raise typer.Exit(code=0)
         typer.echo(ctx.get_help())
         raise typer.Exit(code=0)
