@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import unquote, urlparse
 
 import requests
 
@@ -313,13 +314,12 @@ class CommandResult(BaseModel):
 
 
 class ProductStatus(BaseModel):
-    """产品状态模型（官方字段兼容，数据库为单一真源）。"""
+    """产品状态模型（仅保留更新链路所需字段）。"""
 
     model_config = ConfigDict(extra="ignore")
 
     name: str
     display_name: Optional[str] = None
-    full_data: Optional[str] = None
     last_update_time: Optional[str] = None
     next_update_time: Optional[str] = None
     data_time: Optional[str] = None
@@ -328,25 +328,7 @@ class ProductStatus(BaseModel):
     can_auto_update: int = 1
     add_time: Optional[str] = None
     is_listed: int = 1
-    full_data_download_url: Optional[str] = None
-    full_data_download_expires: Optional[str] = None
     ts: Optional[str] = None
-
-    @field_validator("full_data_download_expires", mode="before")
-    @classmethod
-    def _normalize_full_data_expires(cls, value: object) -> Optional[str]:
-        """
-        统一过期字段为字符串。
-
-        说明：
-        - 历史状态库里可能存在 int/float（例如 0、时间戳），这里做兼容归一。
-        - 0 视为“无有效过期时间”。
-        """
-
-        if value in (None, "", 0, "0"):
-            return None
-        text = str(value).strip()
-        return text or None
 
     @field_validator("is_auto_update", "can_auto_update", "is_listed", mode="before")
     @classmethod
@@ -384,7 +366,6 @@ class ProductStatus(BaseModel):
         return {
             "name": self.name,
             "displayName": self.display_name,
-            "fullData": self.full_data,
             "lastUpdateTime": self.last_update_time,
             "nextUpdateTime": self.next_update_time,
             "dataTime": self.data_time,
@@ -393,8 +374,6 @@ class ProductStatus(BaseModel):
             "canAutoUpdate": self.can_auto_update,
             "addTime": self.add_time,
             "isListed": self.is_listed,
-            "fullDataDownloadUrl": self.full_data_download_url,
-            "fullDataDownloadExpires": self.full_data_download_expires,
             "ts": self.ts or "",
         }
 
@@ -1876,7 +1855,6 @@ def ensure_status_table(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS product_status (
             name TEXT PRIMARY KEY,
             display_name TEXT,
-            full_data TEXT,
             last_update_time TEXT,
             next_update_time TEXT,
             data_time TEXT,
@@ -1885,8 +1863,6 @@ def ensure_status_table(conn: sqlite3.Connection) -> None:
             can_auto_update INTEGER DEFAULT 1,
             add_time TEXT,
             is_listed INTEGER DEFAULT 1,
-            full_data_download_url TEXT,
-            full_data_download_expires TEXT,
             ts TEXT
         )
         """
@@ -1933,17 +1909,16 @@ def upsert_product_status(conn: sqlite3.Connection, status: ProductStatus) -> No
     conn.execute(
         """
         INSERT INTO product_status (
-            name, display_name, full_data, last_update_time, next_update_time,
+            name, display_name, last_update_time, next_update_time,
             data_time, data_content_time, is_auto_update, can_auto_update,
-            add_time, is_listed, full_data_download_url, full_data_download_expires, ts
+            add_time, is_listed, ts
         ) VALUES (
-            :name, :display_name, :full_data, :last_update_time, :next_update_time,
+            :name, :display_name, :last_update_time, :next_update_time,
             :data_time, :data_content_time, :is_auto_update, :can_auto_update,
-            :add_time, :is_listed, :full_data_download_url, :full_data_download_expires, :ts
+            :add_time, :is_listed, :ts
         )
         ON CONFLICT(name) DO UPDATE SET
             display_name=excluded.display_name,
-            full_data=excluded.full_data,
             last_update_time=excluded.last_update_time,
             next_update_time=excluded.next_update_time,
             data_time=excluded.data_time,
@@ -1952,8 +1927,6 @@ def upsert_product_status(conn: sqlite3.Connection, status: ProductStatus) -> No
             can_auto_update=excluded.can_auto_update,
             add_time=COALESCE(product_status.add_time, excluded.add_time),
             is_listed=excluded.is_listed,
-            full_data_download_url=excluded.full_data_download_url,
-            full_data_download_expires=excluded.full_data_download_expires,
             ts=excluded.ts
         """,
         payload,
