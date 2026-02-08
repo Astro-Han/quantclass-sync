@@ -53,7 +53,6 @@ DEFAULT_CATALOG_FILE = BASE_DIR / "catalog.txt"
 DEFAULT_PROGRESS_EVERY = 500
 DEFAULT_STATUS_DB = DEFAULT_DATA_ROOT / "code" / "data" / "FuelBinStat.db"
 DEFAULT_STATUS_JSON = DEFAULT_DATA_ROOT / "code" / "data" / "products-status.json"
-DEFAULT_REPORT_DIR = DEFAULT_DATA_ROOT / "code" / "data" / "log" / "quantclass"
 DEFAULT_ZIP_CACHE_DIR = DEFAULT_WORK_DIR / "zip"
 DEFAULT_FULL_BACKUP_DIR = DEFAULT_WORK_DIR / "full_backup"
 DEFAULT_REPORT_RETENTION_DAYS = 365
@@ -2083,6 +2082,128 @@ def build_headers_or_raise(ctx: CommandContext) -> Tuple[Dict[str, str], str]:
     }, hid
 
 
+def _append_gate_skip_result(
+    report: RunReport,
+    plan: ProductPlan,
+    product_name: str,
+    api_latest_raw: str,
+    api_latest_date: Optional[str],
+    local_date: Optional[str],
+    elapsed_seconds: float,
+) -> None:
+    """记录 timestamp 门控命中的跳过结果。"""
+
+    report.products.append(
+        ProductRunResult(
+            product=product_name,
+            status="skipped",
+            strategy=plan.strategy,
+            reason_code=REASON_UP_TO_DATE,
+            date_time=api_latest_date or api_latest_raw,
+            mode="gate",
+            elapsed_seconds=elapsed_seconds,
+            error=f"本地 timestamp 已是最新（local={local_date}, api={api_latest_date}）。",
+        )
+    )
+    _append_run_event(
+        report,
+        product_name,
+        "GATE",
+        "skipped",
+        REASON_UP_TO_DATE,
+        f"local={local_date} api={api_latest_date}",
+    )
+
+
+def _resolve_requested_date_for_plan(
+    plan: ProductPlan,
+    command_ctx: CommandContext,
+    hid: str,
+    headers: Dict[str, str],
+    requested_date_time: str,
+    force_update: bool,
+    report: RunReport,
+    t_product_start: float,
+) -> Tuple[str, bool]:
+    """
+    解析单产品执行时间，并处理 timestamp 门控。
+
+    返回：
+    - requested_date_for_plan: 传给下载流程的日期（空字符串代表继续走 latest）
+    - skipped_by_gate: 是否已经被门控判定为“跳过”
+    """
+
+    requested_date_for_plan = requested_date_time.strip()
+    if force_update or requested_date_for_plan:
+        return requested_date_for_plan, False
+
+    product_name = normalize_product_name(plan.name)
+    try:
+        api_latest_raw = get_latest_time(
+            api_base=command_ctx.api_base.rstrip("/"),
+            product=product_name,
+            hid=hid,
+            headers=headers,
+        )
+        api_latest_date = normalize_data_date(api_latest_raw)
+        local_date = read_local_timestamp_date(command_ctx.data_root, product_name)
+        if should_skip_by_timestamp(local_date, api_latest_date):
+            elapsed = time.time() - t_product_start
+            _append_gate_skip_result(
+                report=report,
+                plan=plan,
+                product_name=product_name,
+                api_latest_raw=api_latest_raw,
+                api_latest_date=api_latest_date,
+                local_date=local_date,
+                elapsed_seconds=elapsed,
+            )
+            log_info(
+                f"[{product_name}] timestamp 门控命中，跳过更新。",
+                event="SYNC_SKIP",
+                local_date=local_date,
+                api_latest_date=api_latest_date,
+                decision="skip",
+            )
+            return api_latest_raw, True
+
+        log_info(
+            f"[{product_name}] timestamp 门控通过，执行更新。",
+            event="PRODUCT_PLAN",
+            local_date=local_date or "",
+            api_latest_date=api_latest_date or "",
+            decision="run",
+        )
+        return api_latest_raw, False
+    except Exception as exc:
+        log_info(
+            f"[{plan.name}] timestamp 门控异常，回退执行更新。",
+            event="PRODUCT_PLAN",
+            decision="fallback_run",
+            error=str(exc),
+        )
+        return requested_date_for_plan, False
+
+
+def _upsert_product_status_after_success(
+    conn: Optional[sqlite3.Connection],
+    command_ctx: CommandContext,
+    product: str,
+    actual_time: str,
+) -> None:
+    """在成功路径统一更新状态库与 timestamp 文件。"""
+
+    if conn is None or command_ctx.dry_run:
+        return
+    old_status = load_product_status(conn, product)
+    status = old_status or ProductStatus(name=product, display_name=product)
+    status.last_update_time = utc_now_iso()
+    status.data_time = actual_time
+    status.data_content_time = actual_time
+    upsert_product_status(conn, status)
+    write_local_timestamp(command_ctx.data_root, product, actual_time)
+
+
 def _execute_plans(
     plans: Sequence[ProductPlan],
     command_ctx: CommandContext,
@@ -2100,67 +2221,18 @@ def _execute_plans(
 
     for plan in plans:
         t_product_start = time.time()
-        requested_date_for_plan = requested_date_time.strip()
-
-        if not force_update and not requested_date_for_plan:
-            try:
-                product_name = normalize_product_name(plan.name)
-                api_latest_raw = get_latest_time(
-                    api_base=command_ctx.api_base.rstrip("/"),
-                    product=product_name,
-                    hid=hid,
-                    headers=headers,
-                )
-                api_latest_date = normalize_data_date(api_latest_raw)
-                local_date = read_local_timestamp_date(command_ctx.data_root, product_name)
-                decision = "run"
-                if should_skip_by_timestamp(local_date, api_latest_date):
-                    decision = "skip"
-                    elapsed = time.time() - t_product_start
-                    report.products.append(
-                        ProductRunResult(
-                            product=product_name,
-                            status="skipped",
-                            strategy=plan.strategy,
-                            reason_code=REASON_UP_TO_DATE,
-                            date_time=api_latest_date or api_latest_raw,
-                            mode="gate",
-                            elapsed_seconds=elapsed,
-                            error=f"本地 timestamp 已是最新（local={local_date}, api={api_latest_date}）。",
-                        )
-                    )
-                    _append_run_event(
-                        report,
-                        product_name,
-                        "GATE",
-                        "skipped",
-                        REASON_UP_TO_DATE,
-                        f"local={local_date} api={api_latest_date}",
-                    )
-                    log_info(
-                        f"[{product_name}] timestamp 门控命中，跳过更新。",
-                        event="SYNC_SKIP",
-                        local_date=local_date,
-                        api_latest_date=api_latest_date,
-                        decision=decision,
-                    )
-                    continue
-
-                log_info(
-                    f"[{product_name}] timestamp 门控通过，执行更新。",
-                    event="PRODUCT_PLAN",
-                    local_date=local_date or "",
-                    api_latest_date=api_latest_date or "",
-                    decision=decision,
-                )
-                requested_date_for_plan = api_latest_raw
-            except Exception as exc:
-                log_info(
-                    f"[{plan.name}] timestamp 门控异常，回退执行更新。",
-                    event="PRODUCT_PLAN",
-                    decision="fallback_run",
-                    error=str(exc),
-                )
+        requested_date_for_plan, skipped_by_gate = _resolve_requested_date_for_plan(
+            plan=plan,
+            command_ctx=command_ctx,
+            hid=hid,
+            headers=headers,
+            requested_date_time=requested_date_time,
+            force_update=force_update,
+            report=report,
+            t_product_start=t_product_start,
+        )
+        if skipped_by_gate:
+            continue
 
         try:
             product, actual_time, stats, source_path, reason_code = process_product(
@@ -2176,14 +2248,7 @@ def _execute_plans(
             elapsed = time.time() - t_product_start
             total.merge(stats)
             _append_success_result(report, plan, product, actual_time, stats, source_path, reason_code, elapsed)
-            if conn is not None and not command_ctx.dry_run:
-                old_status = load_product_status(conn, product)
-                status = old_status or ProductStatus(name=product, display_name=product)
-                status.last_update_time = utc_now_iso()
-                status.data_time = actual_time
-                status.data_content_time = actual_time
-                upsert_product_status(conn, status)
-                write_local_timestamp(command_ctx.data_root, product, actual_time)
+            _upsert_product_status_after_success(conn=conn, command_ctx=command_ctx, product=product, actual_time=actual_time)
             continue
         except ProductSyncError as exc:
             reason_code = exc.reason_code
@@ -2536,6 +2601,23 @@ def _handle_command_exception(command_name: str, exc: Exception, reason_code: st
         log_debug(traceback.format_exc(), event="DEBUG")
 
 
+def _cleanup_after_command(command_ctx: Optional[CommandContext]) -> None:
+    """命令结束后统一执行缓存清理（失败不影响主流程）。"""
+
+    work_dir = command_ctx.work_dir if command_ctx is not None else DEFAULT_WORK_DIR.resolve()
+    data_root = command_ctx.data_root if command_ctx is not None else DEFAULT_DATA_ROOT.resolve()
+    try:
+        cleanup_work_cache_aggressive(work_dir)
+        log_debug("工作缓存已清理。", event="CACHE_CLEANUP", work_dir=str(work_dir))
+    except Exception as exc:
+        log_debug(f"工作缓存清理失败（已忽略）: {exc}", event="CACHE_CLEANUP")
+
+    try:
+        cleanup_report_logs(report_dir_path(data_root), retention_days=DEFAULT_REPORT_RETENTION_DAYS)
+    except Exception as exc:
+        log_debug(f"报告日志清理失败（已忽略）: {exc}", event="CACHE_CLEANUP")
+
+
 def command_guard(command_name: str):
     """
     命令级异常兜底装饰器。
@@ -2557,19 +2639,7 @@ def command_guard(command_name: str):
                 _handle_command_exception(command_name, exc, REASON_MERGE_ERROR, args, kwargs)
                 raise typer.Exit(code=1)
             finally:
-                command_ctx = _extract_command_context(args, kwargs)
-                work_dir = command_ctx.work_dir if command_ctx is not None else DEFAULT_WORK_DIR.resolve()
-                data_root = command_ctx.data_root if command_ctx is not None else DEFAULT_DATA_ROOT.resolve()
-                try:
-                    cleanup_work_cache_aggressive(work_dir)
-                    log_debug("工作缓存已清理。", event="CACHE_CLEANUP", work_dir=str(work_dir))
-                except Exception as exc:
-                    log_debug(f"工作缓存清理失败（已忽略）: {exc}", event="CACHE_CLEANUP")
-
-                try:
-                    cleanup_report_logs(report_dir_path(data_root), retention_days=DEFAULT_REPORT_RETENTION_DAYS)
-                except Exception as exc:
-                    log_debug(f"报告日志清理失败（已忽略）: {exc}", event="CACHE_CLEANUP")
+                _cleanup_after_command(_extract_command_context(args, kwargs))
 
         return wrapper
 
