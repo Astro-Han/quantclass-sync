@@ -2,6 +2,8 @@
 xbx_apiKey.md
 user_secrets.env
 user_config.json
+log/
+release/
 
 # Python cache
 __pycache__/

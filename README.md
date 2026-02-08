@@ -119,10 +119,10 @@ python3 quantclass_daily_sync.py update --products stock-trading-data --products
 
 ### 3.2 状态与日志目录
 
-默认使用新路径（推荐）：
+默认路径：
 1. `<data_root>/.quantclass_sync/status/FuelBinStat.db`
 2. `<data_root>/.quantclass_sync/status/products-status.json`
-3. `<data_root>/.quantclass_sync/log/quantclass/run_report_*.json`
+3. `<script_dir>/log/quantclass/run_report_*.json`
 
 兼容逻辑：
 - 若检测到旧路径已有状态数据，且新路径还没有状态数据，会自动回退旧路径读取，避免迁移期状态分裂。
@@ -177,7 +177,7 @@ python3 quantclass_daily_sync.py setup
 【只读】影响范围：仅读取日志
 
 ```bash
-report=$(ls -t <data_root>/.quantclass_sync/log/quantclass/run_report_* | head -n 1)
+report=$(ls -t <script_dir>/log/quantclass/run_report_* | head -n 1)
 echo "$report"
 sed -n '1,220p' "$report"
 ```

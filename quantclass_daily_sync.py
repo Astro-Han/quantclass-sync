@@ -52,6 +52,7 @@ DEFAULT_SECRETS_FILE = BASE_DIR / "xbx_apiKey.md"
 DEFAULT_USER_CONFIG_FILE = BASE_DIR / "user_config.json"
 DEFAULT_USER_SECRETS_FILE = BASE_DIR / "user_secrets.env"
 DEFAULT_CATALOG_FILE = BASE_DIR / "catalog.txt"
+DEFAULT_REPORT_DIR = BASE_DIR / "log" / "quantclass"
 DEFAULT_PROGRESS_EVERY = 500
 SYNC_META_DIRNAME = ".quantclass_sync"
 DEFAULT_METADATA_ROOT = DEFAULT_DATA_ROOT / SYNC_META_DIRNAME
@@ -1966,19 +1967,19 @@ def resolve_runtime_paths(data_root: Path) -> RuntimePaths:
     规则：
     - 默认使用新路径：<data_root>/.quantclass_sync/*
     - 若检测到旧路径已有状态数据，且新路径尚无状态数据，则回退旧路径读取（避免迁移期分裂）
+    - 运行报告默认写到脚本目录下 log/quantclass（与 data_root 解耦，便于分发复用）
     """
 
     data_root = data_root.resolve()
     metadata_root = data_root / SYNC_META_DIRNAME
+    default_report_dir = DEFAULT_REPORT_DIR.resolve()
 
     new_status_db = data_root / META_STATUS_DB_REL
     new_status_json = data_root / META_STATUS_JSON_REL
-    new_report_dir = data_root / META_REPORT_DIR_REL
     new_has_state = new_status_db.exists() or new_status_json.exists()
 
     legacy_status_db = data_root / LEGACY_STATUS_DB_REL
     legacy_status_json = data_root / LEGACY_STATUS_JSON_REL
-    legacy_report_dir = data_root / LEGACY_REPORT_DIR_REL
     legacy_has_state = legacy_status_db.exists() or legacy_status_json.exists()
 
     # 迁移保护：旧路径有状态且新路径还没初始化时，优先读旧路径，避免同一批数据写到两套状态库。
@@ -1987,7 +1988,7 @@ def resolve_runtime_paths(data_root: Path) -> RuntimePaths:
             metadata_root=metadata_root,
             status_db=legacy_status_db,
             status_json=legacy_status_json,
-            report_dir=legacy_report_dir,
+            report_dir=default_report_dir,
             source="legacy",
         )
 
@@ -1995,7 +1996,7 @@ def resolve_runtime_paths(data_root: Path) -> RuntimePaths:
         metadata_root=metadata_root,
         status_db=new_status_db,
         status_json=new_status_json,
-        report_dir=new_report_dir,
+        report_dir=default_report_dir,
         source="metadata",
     )
 
@@ -2013,7 +2014,7 @@ def status_json_path(data_root: Path) -> Path:
 
 
 def report_dir_path(data_root: Path) -> Path:
-    """返回运行报告目录。"""
+    """返回运行报告目录（默认：脚本目录下 log/quantclass）。"""
 
     return resolve_runtime_paths(data_root).report_dir
 
