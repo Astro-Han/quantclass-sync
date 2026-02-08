@@ -153,11 +153,12 @@ python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py full_
 常见 `reason_code`：
 1. `ok`：执行成功
 2. `unknown_local_product`：本地目录不在 catalog 中，已跳过
-3. `network_error`：网络或权限问题
-4. `extract_error`：解压失败
-5. `merge_error`：合并阶段失败
-6. `full_data_link_missing`：缺少全量链接
-7. `full_data_expired`：全量链接过期
+3. `invalid_explicit_product`：显式指定的产品不在 catalog 中，已跳过
+4. `network_error`：网络或权限问题
+5. `extract_error`：解压失败
+6. `merge_error`：合并阶段失败
+7. `full_data_link_missing`：缺少全量链接
+8. `full_data_expired`：全量链接过期
 
 ## 9. 零基础排障建议
 

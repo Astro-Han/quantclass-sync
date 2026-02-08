@@ -84,6 +84,7 @@ STRATEGY_MIRROR_UNKNOWN = "mirror_unknown"
 
 REASON_OK = "ok"
 REASON_UNKNOWN_LOCAL_PRODUCT = "unknown_local_product"
+REASON_INVALID_EXPLICIT_PRODUCT = "invalid_explicit_product"
 REASON_NO_LOCAL_PRODUCTS = "no_local_products"
 REASON_NETWORK_ERROR = "network_error"
 REASON_EXTRACT_ERROR = "extract_error"
@@ -1914,12 +1915,12 @@ def _record_discovery_skips(report: RunReport, unknown_local: Sequence[str], inv
                 product=product,
                 status="skipped",
                 strategy="skip",
-                reason_code=REASON_UNKNOWN_LOCAL_PRODUCT,
+                reason_code=REASON_INVALID_EXPLICIT_PRODUCT,
                 mode="explicit",
                 error="显式指定产品不在 catalog 清单中，已跳过。",
             )
         )
-        _append_run_event(report, product, "PLAN", "skipped", REASON_UNKNOWN_LOCAL_PRODUCT, "显式产品不在 catalog")
+        _append_run_event(report, product, "PLAN", "skipped", REASON_INVALID_EXPLICIT_PRODUCT, "显式产品不在 catalog")
 
 
 def resolve_report_path(ctx: CommandContext, command: str) -> Path:
@@ -2207,22 +2208,55 @@ def _locate_extracted_product_dir(extract_root: Path, product: str) -> Optional[
 
 
 def _replace_product_dir_with_backup(product: str, source_dir: Path, data_root: Path, run_id: str, dry_run: bool) -> Tuple[Path, Path]:
-    """执行“先备份后覆盖”全量恢复。"""
+    """执行“先备份后覆盖”全量恢复（原子替换 + 失败回滚）。"""
 
     target_dir = data_root / product
     backup_dir = DEFAULT_FULL_BACKUP_DIR / run_id / product
     if dry_run:
         return backup_dir, target_dir
 
+    if not source_dir.exists() or not source_dir.is_dir():
+        raise RuntimeError(f"全量恢复源目录不存在或不可用: {source_dir}")
+
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
     backup_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    # staging/old 放在 target 同级目录，确保 rename 原子性。
+    staging_dir = target_dir.parent / f".{product}.staging.{run_id}"
+    old_dir = target_dir.parent / f".{product}.old.{run_id}"
+    for tmp_dir in (staging_dir, old_dir):
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+
+    shutil.copytree(source_dir, staging_dir)
+
     if target_dir.exists():
         if backup_dir.exists():
             shutil.rmtree(backup_dir)
         shutil.copytree(target_dir, backup_dir)
 
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
-    shutil.copytree(source_dir, target_dir)
+    try:
+        if target_dir.exists():
+            os.replace(target_dir, old_dir)
+        os.replace(staging_dir, target_dir)
+    except Exception as exc:
+        # 回滚顺序：先清理半成品目标，再恢复旧目录。
+        if target_dir.exists() and old_dir.exists():
+            shutil.rmtree(target_dir)
+            os.replace(old_dir, target_dir)
+        elif old_dir.exists() and not target_dir.exists():
+            os.replace(old_dir, target_dir)
+
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+        raise RuntimeError(f"全量恢复替换失败，已尝试回滚: {exc}") from exc
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir)
+
+    if old_dir.exists():
+        shutil.rmtree(old_dir)
+
     return backup_dir, target_dir
 
 
@@ -2627,13 +2661,22 @@ def cmd_full_data(
             run_id=command_ctx.run_id,
             dry_run=command_ctx.dry_run,
         )
-        log_info(
-            "全量恢复完成（先备份后覆盖）。",
-            event="SYNC_OK",
-            backup=str(backup_dir),
-            target=str(target_dir),
-            dry_run=command_ctx.dry_run,
-        )
+        if command_ctx.dry_run:
+            log_info(
+                "dry-run：full_data 仅完成流程演练，未执行备份与覆盖。",
+                event="SYNC_OK",
+                backup=str(backup_dir),
+                target=str(target_dir),
+                dry_run=True,
+            )
+        else:
+            log_info(
+                "全量恢复完成（原子替换，失败可回滚）。",
+                event="SYNC_OK",
+                backup=str(backup_dir),
+                target=str(target_dir),
+                dry_run=False,
+            )
 
         if not command_ctx.dry_run:
             status.last_update_time = utc_now_iso()
