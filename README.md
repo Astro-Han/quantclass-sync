@@ -48,7 +48,7 @@ python3 quantclass_daily_sync.py setup
 - 只写运行报告，不写业务数据
 
 ```bash
-python3 quantclass_daily_sync.py update --dry-run --verbose
+python3 quantclass_daily_sync.py update --dry-run
 ```
 
 【会写入】影响范围：
@@ -57,8 +57,10 @@ python3 quantclass_daily_sync.py update --dry-run --verbose
 - 运行报告
 
 ```bash
-python3 quantclass_daily_sync.py update --verbose
+python3 quantclass_daily_sync.py update
 ```
+
+说明：工具默认开启详细日志（`verbose`），可实时看到进度；如需安静模式可加 `--no-verbose`。
 
 ---
 
@@ -90,7 +92,7 @@ python3 quantclass_daily_sync.py update
 1. `--dry-run`：只演练，不写业务数据
 2. `--force`：跳过时间戳门控（门控：先判断是否有新数据再决定是否下载）
 3. `--products`：临时指定产品（可重复传参或逗号分隔）
-4. `--verbose`：显示调试日志
+4. `--no-verbose`：关闭详细日志（默认已开启）
 
 凭证优先级（高 -> 低）：
 1. 命令行参数（`--api-key/--hid`）

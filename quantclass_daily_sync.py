@@ -2607,7 +2607,7 @@ def global_options(
         None, "--report-file", help="报告输出路径（JSON，高级参数）。", hidden=True
     ),
     stop_on_error: bool = typer.Option(False, "--stop-on-error", help="遇错即停（高级参数）。", hidden=True),
-    verbose: bool = typer.Option(False, "--verbose", help="显示调试日志。"),
+    verbose: bool = typer.Option(True, "--verbose/--no-verbose", help="显示调试日志（默认开启，可用 --no-verbose 关闭）。"),
 ) -> None:
     """
     全局参数（所有子命令共享）。
