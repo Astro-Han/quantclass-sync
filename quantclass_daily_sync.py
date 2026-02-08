@@ -821,8 +821,19 @@ def safe_extract_tar(path: Path, save_path: Path) -> None:
 
     with tarfile.open(path) as tf:
         for member in tf.getmembers():
-            target = save_path / member.name
+            member_name = _normalize_member_name(member.name)
+            target = save_path / member_name
             _ensure_within(save_path, target)
+
+            # tar 里的软链接/硬链接可能指向目标目录外，需额外校验 linkname。
+            if member.issym() or member.islnk():
+                link_name = _normalize_member_name(getattr(member, "linkname", ""))
+                if not link_name:
+                    raise RuntimeError(f"tar 链接目标为空: {member.name}")
+                if link_name.startswith("/") or re.match(r"^[a-zA-Z]:[\\/]", link_name):
+                    raise RuntimeError(f"tar 链接目标为绝对路径，已拒绝: {member.name} -> {link_name}")
+                link_target = save_path / Path(member_name).parent / link_name
+                _ensure_within(save_path, link_target)
         tf.extractall(save_path)
 
 
@@ -1735,10 +1746,18 @@ def ensure_status_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def connect_status_db(data_root: Path) -> sqlite3.Connection:
+def connect_status_db(data_root: Path, read_only: bool = False) -> sqlite3.Connection:
     """连接状态库（sqlite3：Python 内置轻量数据库）。"""
 
     db_path = status_db_path(data_root)
+    if read_only:
+        # dry-run 只能读现有状态，不允许隐式建库建表。
+        if not db_path.exists():
+            raise RuntimeError(f"状态库不存在（只读模式无法初始化）: {db_path}")
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        return conn
+
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -2152,21 +2171,39 @@ def resolve_full_data_link(
     )
 
 
-def _locate_extracted_product_dir(extract_root: Path, product: str) -> Path:
+def _locate_extracted_product_dir(extract_root: Path, product: str) -> Optional[Path]:
     """在解压目录中定位产品目录。"""
 
-    direct = extract_root / product
-    if direct.exists() and direct.is_dir():
-        return direct
+    if not extract_root.exists() or not extract_root.is_dir():
+        return None
 
-    nested = sorted([p for p in extract_root.rglob(product) if p.is_dir()], key=lambda x: len(x.parts))
+    direct = [
+        p
+        for p in extract_root.iterdir()
+        if p.is_dir() and normalize_product_name(p.name) == product and _dir_has_data_files(p)
+    ]
+    if direct:
+        return sorted(direct, key=lambda x: len(x.parts))[0]
+
+    nested = sorted(
+        [
+            p
+            for p in extract_root.rglob("*")
+            if p.is_dir() and normalize_product_name(p.name) == product and _dir_has_data_files(p)
+        ],
+        key=lambda x: len(x.parts),
+    )
     if nested:
         return nested[0]
 
-    children = [p for p in extract_root.iterdir() if p.is_dir()] if extract_root.exists() else []
-    if len(children) == 1:
-        return children[0]
-    return extract_root
+    has_direct_files = any(
+        p.is_file() and p.suffix.lower() in {".csv", ".ts"}
+        for p in extract_root.iterdir()
+    )
+    if has_direct_files:
+        # 兼容“文件直接落在根目录”的全量包形态。
+        return extract_root
+    return None
 
 
 def _replace_product_dir_with_backup(product: str, source_dir: Path, data_root: Path, run_id: str, dry_run: bool) -> Tuple[Path, Path]:
@@ -2519,8 +2556,19 @@ def cmd_full_data(
     t0 = time.time()
     log_info("开始执行 full_data。", event="CMD_START", product=product)
 
-    conn = connect_status_db(command_ctx.data_root)
+    conn: Optional[sqlite3.Connection] = None
     try:
+        try:
+            conn = connect_status_db(command_ctx.data_root, read_only=command_ctx.dry_run)
+        except RuntimeError as exc:
+            raise ProductSyncError(
+                message=(
+                    f"产品 {product} 缺少可读取的状态库；可能原因：尚未执行 full_data_link；"
+                    f"建议：先运行 full_data_link {product} <full_data_name>。原始错误：{exc}"
+                ),
+                reason_code=REASON_FULL_DATA_LINK_MISSING,
+            ) from exc
+
         status = load_product_status(conn, product)
         if status is None or not status.full_data_download_url:
             raise ProductSyncError(
@@ -2541,35 +2589,36 @@ def cmd_full_data(
             )
 
         zip_cache_dir = DEFAULT_ZIP_CACHE_DIR
-        zip_cache_dir.mkdir(parents=True, exist_ok=True)
         zip_name = Path(unquote(urlparse(status.full_data_download_url).path)).name or f"{product}.zip"
         zip_path = zip_cache_dir / zip_name
 
         headers, _ = build_headers_or_raise(command_ctx)
         if not command_ctx.dry_run:
+            zip_cache_dir.mkdir(parents=True, exist_ok=True)
             save_file(status.full_data_download_url, zip_path, headers=headers)
             log_info("全量压缩包下载完成。", event="DOWNLOAD_OK", file=str(zip_path))
         else:
             log_info("dry-run：跳过全量压缩包下载。", event="DOWNLOAD_OK", file=str(zip_path))
 
         extract_root = command_ctx.work_dir / "full_extract" / product / command_ctx.run_id
-        if extract_root.exists() and not command_ctx.dry_run:
-            shutil.rmtree(extract_root)
-        extract_root.mkdir(parents=True, exist_ok=True)
-
         if not command_ctx.dry_run:
+            if extract_root.exists():
+                shutil.rmtree(extract_root)
+            extract_root.mkdir(parents=True, exist_ok=True)
             extract_archive(zip_path, extract_root)
             log_info("全量压缩包解压完成。", event="EXTRACT_OK", path=str(extract_root))
-
-        source_dir = _locate_extracted_product_dir(extract_root, product)
-        if not source_dir.exists() and not command_ctx.dry_run:
-            raise ProductSyncError(
-                message=(
-                    f"产品 {product} 解压后未找到数据目录；可能原因：全量包结构变化；"
-                    "建议：手动检查 zip 内容后重试。"
-                ),
-                reason_code=REASON_EXTRACT_ERROR,
-            )
+            source_dir = _locate_extracted_product_dir(extract_root, product)
+            if source_dir is None:
+                raise ProductSyncError(
+                    message=(
+                        f"产品 {product} 解压后未定位到产品数据目录；可能原因：全量包结构变化；"
+                        "建议：手动检查 zip 内容后重试。"
+                    ),
+                    reason_code=REASON_EXTRACT_ERROR,
+                )
+        else:
+            # dry-run 不下载不解压，只保留流程与日志口径。
+            source_dir = extract_root
 
         backup_dir, target_dir = _replace_product_dir_with_backup(
             product=product,
@@ -2592,7 +2641,8 @@ def cmd_full_data(
             upsert_product_status(conn, status)
             export_status_json(conn, status_json_path(command_ctx.data_root))
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
     elapsed = time.time() - t0
     log_info("full_data 执行完成。", event="CMD_DONE", product=product, elapsed=round(elapsed, 2))
