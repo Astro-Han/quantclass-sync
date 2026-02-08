@@ -37,11 +37,17 @@ python3 -m pip install -r requirements-archive.txt
 python3 quantclass_daily_sync.py setup
 ```
 
-你会被询问 4 项信息：
+你会被询问 3 项信息：
 1. `data_root`（数据目录）
 2. `API Key`
 3. `HID`
-4. 产品策略（自动扫描本地目录 / 固定产品清单）
+
+说明：交互模式默认使用 `local_scan`，且默认产品列表为空。  
+如果你要改成固定产品模式，可后续执行：
+
+```bash
+python3 quantclass_daily_sync.py setup --non-interactive --product-mode explicit_list --products stock-trading-data --products stock-main-index-data
+```
 
 ### 第三步：先演练，再正式更新
 

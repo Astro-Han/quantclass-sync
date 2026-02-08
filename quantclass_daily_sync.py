@@ -2993,12 +2993,12 @@ def cmd_setup(
         raw_api_key = typer.prompt("请输入 API Key", default=default_api_key, hide_input=True).strip()
         raw_hid = typer.prompt("请输入 HID", default=default_hid, hide_input=True).strip()
 
-        default_mode = (product_mode or (existing_config.product_mode if existing_config else PRODUCT_MODE_LOCAL_SCAN)).strip()
-        mode = typer.prompt("产品策略（local_scan / explicit_list）", default=default_mode).strip().lower()
-
-        default_products_seed = ",".join(products) if products else ",".join(existing_config.default_products if existing_config else [])
-        products_line = typer.prompt("默认产品列表（逗号分隔，可留空）", default=default_products_seed).strip()
-        default_products = split_products([products_line]) if products_line else []
+        # 交互模式默认不再询问产品策略：
+        # - product_mode 默认 local_scan
+        # - default_products 默认空
+        # 如需修改，可在 setup 时传 --product-mode/--products 覆盖，或后续重新执行 setup 调整。
+        mode = (product_mode or PRODUCT_MODE_LOCAL_SCAN).strip().lower()
+        default_products = split_products(products)
 
     if not raw_data_root:
         raise RuntimeError("setup 缺少 data_root；请提供数据目录。")
