@@ -1,7 +1,7 @@
 # QuantClass 数据同步工具（零基础可用）
 
 脚本路径：`/Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py`
-当前版本：`v0.4.0`（发布日期：`2026-02-08`）
+当前版本：`v0.5.0`（发布日期：`2026-02-08`）
 
 这个工具用来做 2 件事：
 1. 日常批量更新本地数据（最常用）
