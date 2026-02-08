@@ -34,7 +34,7 @@ python3 -m pip install -r requirements-archive.txt
 - `user_secrets.env`
 
 ```bash
-python3 quantclass_daily_sync.py setup
+python3 quantclass_sync.py setup
 ```
 
 你会被询问 3 项信息：
@@ -46,7 +46,7 @@ python3 quantclass_daily_sync.py setup
 如果你要改成固定产品模式，可后续执行：
 
 ```bash
-python3 quantclass_daily_sync.py setup --non-interactive --product-mode explicit_list --products stock-trading-data --products stock-main-index-data
+python3 quantclass_sync.py setup --non-interactive --product-mode explicit_list --products stock-trading-data --products stock-main-index-data
 ```
 
 ### 第三步：先演练，再正式更新
@@ -55,7 +55,7 @@ python3 quantclass_daily_sync.py setup --non-interactive --product-mode explicit
 - 只写运行报告，不写业务数据
 
 ```bash
-python3 quantclass_daily_sync.py update --dry-run
+python3 quantclass_sync.py update --dry-run
 ```
 
 【会写入】影响范围：
@@ -64,7 +64,7 @@ python3 quantclass_daily_sync.py update --dry-run
 - 运行报告
 
 ```bash
-python3 quantclass_daily_sync.py update
+python3 quantclass_sync.py update
 ```
 
 说明：工具默认开启详细日志（`verbose`），可实时看到进度；如需安静模式可加 `--no-verbose`。
@@ -76,7 +76,7 @@ python3 quantclass_daily_sync.py update
 ### 2.1 setup（首次配置）
 
 ```bash
-python3 quantclass_daily_sync.py setup
+python3 quantclass_sync.py setup
 ```
 
 默认行为说明（重要）：
@@ -86,13 +86,13 @@ python3 quantclass_daily_sync.py setup
 可选：非交互模式（自动化场景）
 
 ```bash
-python3 quantclass_daily_sync.py setup --non-interactive --data-root /your/data/root --api-key YOUR_API_KEY --hid YOUR_HID --product-mode local_scan
+python3 quantclass_sync.py setup --non-interactive --data-root /your/data/root --api-key YOUR_API_KEY --hid YOUR_HID --product-mode local_scan
 ```
 
 ### 2.2 update（日常更新）
 
 ```bash
-python3 quantclass_daily_sync.py update
+python3 quantclass_sync.py update
 ```
 
 常用可选项：
@@ -109,7 +109,7 @@ python3 quantclass_daily_sync.py update
 示例：只更新两个产品
 
 ```bash
-python3 quantclass_daily_sync.py update --products stock-trading-data --products stock-main-index-data --verbose
+python3 quantclass_sync.py update --products stock-trading-data --products stock-main-index-data --verbose
 ```
 
 ---
@@ -152,12 +152,17 @@ python3 quantclass_daily_sync.py update --products stock-trading-data --products
 示例：
 
 ```bash
-python3 quantclass_daily_sync.py init
-python3 quantclass_daily_sync.py one_data stock-trading-data --verbose
-python3 quantclass_daily_sync.py all_data --mode local --verbose
+python3 quantclass_sync.py init
+python3 quantclass_sync.py one_data stock-trading-data --verbose
+python3 quantclass_sync.py all_data --mode local --verbose
 ```
 
 推荐新项目直接用：`setup + update`。
+
+迁移兼容窗口（目录/脚本重命名）：
+1. 旧目录 `.../quant/data/scripts` 当前通过软链接兼容到新目录 `.../quant/data/quantclass-sync`。
+2. 旧脚本名 `quantclass_daily_sync.py` 当前通过兼容入口转发到 `quantclass_sync.py`。
+3. 兼容保留至 `2026-02-11`（本地时间），之后建议移除旧入口，统一使用新目录与新脚本名。
 
 ---
 
@@ -168,7 +173,7 @@ python3 quantclass_daily_sync.py all_data --mode local --verbose
 先执行：
 
 ```bash
-python3 quantclass_daily_sync.py setup
+python3 quantclass_sync.py setup
 ```
 
 ### Q2：为什么没有更新任何数据？
