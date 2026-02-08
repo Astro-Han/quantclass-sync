@@ -77,6 +77,13 @@ python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py init
 python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py one_data stock-trading-data
 ```
 
+默认会先读取本地 `timestamp.txt` 并对比 API `latest`；
+若本地已是最新会自动跳过。可用 `--force` 强制更新：
+
+```bash
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py one_data stock-trading-data --force
+```
+
 指定日期：
 
 ```bash
@@ -89,6 +96,12 @@ python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py one_d
 
 ```bash
 python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py all_data --mode local
+```
+
+若你需要忽略时间戳门控、强制全量执行本次计划：
+
+```bash
+python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py all_data --mode local --force
 ```
 
 catalog 全量轮询模式：
@@ -128,14 +141,16 @@ python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py full_
 7. `--stop-on-error`：批量任务遇错即停
 8. `--verbose`：输出调试日志
 
+仅 `one_data/all_data` 子命令支持：
+1. `--force`：强制更新（跳过 timestamp 门控）
+
 ## 6. 数据目录与状态文件
 
 1. 业务数据目录：`/Users/yuhan/workspace/quant/data/xbx_data/<product>/...`
 2. 状态数据库：`/Users/yuhan/workspace/quant/data/xbx_data/code/data/FuelBinStat.db`
 3. 状态导出文件：`/Users/yuhan/workspace/quant/data/xbx_data/code/data/products-status.json`
-4. 运行报告目录：`/Users/yuhan/workspace/quant/data/.cache/quantclass/`
-5. 全量缓存目录：`/Users/yuhan/workspace/quant/data/.cache/quantclass/zip/`
-6. 全量备份目录：`/Users/yuhan/workspace/quant/data/.cache/quantclass/full_backup/<run_id>/`
+4. 运行报告目录：`/Users/yuhan/workspace/quant/data/xbx_data/code/data/log/quantclass/`
+5. 工作缓存目录：`/Users/yuhan/workspace/quant/data/.cache/quantclass/`（命令结束后自动激进清理）
 
 ## 7. 落库策略（默认安全优先）
 
@@ -154,11 +169,12 @@ python3 /Users/yuhan/workspace/quant/data/scripts/quantclass_daily_sync.py full_
 1. `ok`：执行成功
 2. `unknown_local_product`：本地目录不在 catalog 中，已跳过
 3. `invalid_explicit_product`：显式指定的产品不在 catalog 中，已跳过
-4. `network_error`：网络或权限问题
-5. `extract_error`：解压失败
-6. `merge_error`：合并阶段失败
-7. `full_data_link_missing`：缺少全量链接
-8. `full_data_expired`：全量链接过期
+4. `up_to_date`：本地 timestamp 与 API latest 比对后判定“已最新”，跳过更新
+5. `network_error`：网络或权限问题
+6. `extract_error`：解压失败
+7. `merge_error`：合并阶段失败
+8. `full_data_link_missing`：缺少全量链接
+9. `full_data_expired`：全量链接过期
 
 ## 9. 零基础排障建议
 

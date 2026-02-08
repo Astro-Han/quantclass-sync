@@ -53,8 +53,11 @@ DEFAULT_CATALOG_FILE = BASE_DIR / "catalog.txt"
 DEFAULT_PROGRESS_EVERY = 500
 DEFAULT_STATUS_DB = DEFAULT_DATA_ROOT / "code" / "data" / "FuelBinStat.db"
 DEFAULT_STATUS_JSON = DEFAULT_DATA_ROOT / "code" / "data" / "products-status.json"
+DEFAULT_REPORT_DIR = DEFAULT_DATA_ROOT / "code" / "data" / "log" / "quantclass"
 DEFAULT_ZIP_CACHE_DIR = DEFAULT_WORK_DIR / "zip"
 DEFAULT_FULL_BACKUP_DIR = DEFAULT_WORK_DIR / "full_backup"
+DEFAULT_REPORT_RETENTION_DAYS = 365
+TIMESTAMP_FILE_NAME = "timestamp.txt"
 
 # 已知数据产品（这些产品允许做增量合并）
 TRADING_PRODUCTS = {"stock-trading-data-pro", "stock-trading-data"}
@@ -93,6 +96,7 @@ REASON_MIRROR_FALLBACK = "mirror_fallback"
 REASON_UNKNOWN_HEADER_MERGE = "unknown_header_merge"
 REASON_FULL_DATA_LINK_MISSING = "full_data_link_missing"
 REASON_FULL_DATA_EXPIRED = "full_data_expired"
+REASON_UP_TO_DATE = "up_to_date"
 
 LOG_LEVELS = {
     "ERROR": 0,
@@ -1751,6 +1755,96 @@ def status_json_path(data_root: Path) -> Path:
     return data_root / "code" / "data" / "products-status.json"
 
 
+def report_dir_path(data_root: Path) -> Path:
+    """返回运行报告目录。"""
+
+    return data_root / "code" / "data" / "log" / "quantclass"
+
+
+def normalize_data_date(raw: str) -> Optional[str]:
+    """把输入日期统一归一成 YYYY-MM-DD。"""
+
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return text
+    if re.fullmatch(r"\d{8}", text):
+        return f"{text[0:4]}-{text[4:6]}-{text[6:8]}"
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
+    except Exception:
+        return None
+
+
+def read_local_timestamp_date(data_root: Path, product: str) -> Optional[str]:
+    """读取本地 timestamp.txt 第一列日期。"""
+
+    path = data_root / product / TIMESTAMP_FILE_NAME
+    if not path.exists():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8-sig", errors="ignore").strip()
+    except Exception:
+        return None
+    if not text:
+        return None
+    first = text.split(",", 1)[0].strip()
+    return normalize_data_date(first)
+
+
+def write_local_timestamp(data_root: Path, product: str, data_date: str) -> None:
+    """回写本地 timestamp.txt（格式：数据日期,本地写入时间）。"""
+
+    normalized = normalize_data_date(data_date)
+    if not normalized:
+        return
+    path = data_root / product / TIMESTAMP_FILE_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    local_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    path.write_text(f"{normalized},{local_now}\n", encoding="utf-8")
+
+
+def should_skip_by_timestamp(local_date: Optional[str], api_latest_date: Optional[str]) -> bool:
+    """判断本地是否已是最新版本。"""
+
+    if not local_date or not api_latest_date:
+        return False
+    return local_date >= api_latest_date
+
+
+def cleanup_work_cache_aggressive(work_dir: Path) -> None:
+    """激进清理工作缓存目录。"""
+
+    if not work_dir.exists():
+        return
+    for child in work_dir.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            try:
+                child.unlink()
+            except FileNotFoundError:
+                pass
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+
+def cleanup_report_logs(report_dir: Path, retention_days: int = DEFAULT_REPORT_RETENTION_DAYS) -> None:
+    """清理过期 run_report 日志文件。"""
+
+    if retention_days <= 0:
+        return
+    if not report_dir.exists():
+        return
+    cutoff_ts = time.time() - retention_days * 24 * 3600
+    for path in report_dir.glob("run_report_*.json"):
+        try:
+            if path.stat().st_mtime < cutoff_ts:
+                path.unlink()
+        except FileNotFoundError:
+            continue
+
+
 def ensure_status_table(conn: sqlite3.Connection) -> None:
     """确保状态表存在（product_status）。"""
 
@@ -1958,7 +2052,7 @@ def resolve_report_path(ctx: CommandContext, command: str) -> Path:
 
     if ctx.report_file:
         return ctx.report_file.resolve()
-    return (ctx.work_dir / f"run_report_{ctx.run_id}_{command}.json").resolve()
+    return (report_dir_path(ctx.data_root) / f"run_report_{ctx.run_id}_{command}.json").resolve()
 
 
 def load_catalog_or_raise(catalog_file: Path) -> List[str]:
@@ -1995,6 +2089,7 @@ def _execute_plans(
     report: RunReport,
     requested_date_time: str = "",
     conn: Optional[sqlite3.Connection] = None,
+    force_update: bool = False,
 ) -> Tuple[SyncStats, bool, float]:
     """执行产品计划并返回汇总统计。"""
 
@@ -2005,10 +2100,72 @@ def _execute_plans(
 
     for plan in plans:
         t_product_start = time.time()
+        requested_date_for_plan = requested_date_time.strip()
+
+        if not force_update and not requested_date_for_plan:
+            try:
+                product_name = normalize_product_name(plan.name)
+                api_latest_raw = get_latest_time(
+                    api_base=command_ctx.api_base.rstrip("/"),
+                    product=product_name,
+                    hid=hid,
+                    headers=headers,
+                )
+                api_latest_date = normalize_data_date(api_latest_raw)
+                local_date = read_local_timestamp_date(command_ctx.data_root, product_name)
+                decision = "run"
+                if should_skip_by_timestamp(local_date, api_latest_date):
+                    decision = "skip"
+                    elapsed = time.time() - t_product_start
+                    report.products.append(
+                        ProductRunResult(
+                            product=product_name,
+                            status="skipped",
+                            strategy=plan.strategy,
+                            reason_code=REASON_UP_TO_DATE,
+                            date_time=api_latest_date or api_latest_raw,
+                            mode="gate",
+                            elapsed_seconds=elapsed,
+                            error=f"本地 timestamp 已是最新（local={local_date}, api={api_latest_date}）。",
+                        )
+                    )
+                    _append_run_event(
+                        report,
+                        product_name,
+                        "GATE",
+                        "skipped",
+                        REASON_UP_TO_DATE,
+                        f"local={local_date} api={api_latest_date}",
+                    )
+                    log_info(
+                        f"[{product_name}] timestamp 门控命中，跳过更新。",
+                        event="SYNC_SKIP",
+                        local_date=local_date,
+                        api_latest_date=api_latest_date,
+                        decision=decision,
+                    )
+                    continue
+
+                log_info(
+                    f"[{product_name}] timestamp 门控通过，执行更新。",
+                    event="PRODUCT_PLAN",
+                    local_date=local_date or "",
+                    api_latest_date=api_latest_date or "",
+                    decision=decision,
+                )
+                requested_date_for_plan = api_latest_raw
+            except Exception as exc:
+                log_info(
+                    f"[{plan.name}] timestamp 门控异常，回退执行更新。",
+                    event="PRODUCT_PLAN",
+                    decision="fallback_run",
+                    error=str(exc),
+                )
+
         try:
             product, actual_time, stats, source_path, reason_code = process_product(
                 plan=plan,
-                date_time=requested_date_time or None,
+                date_time=requested_date_for_plan or None,
                 api_base=command_ctx.api_base.rstrip("/"),
                 hid=hid,
                 headers=headers,
@@ -2026,6 +2183,7 @@ def _execute_plans(
                 status.data_time = actual_time
                 status.data_content_time = actual_time
                 upsert_product_status(conn, status)
+                write_local_timestamp(command_ctx.data_root, product, actual_time)
             continue
         except ProductSyncError as exc:
             reason_code = exc.reason_code
@@ -2036,7 +2194,7 @@ def _execute_plans(
 
         has_error = True
         elapsed = time.time() - t_product_start
-        _append_error_result(report, plan, reason_code, requested_date_time, elapsed, message)
+        _append_error_result(report, plan, reason_code, requested_date_for_plan, elapsed, message)
         log_error(f"[{plan.name}] 处理失败: {message}", event="SYNC_FAIL", reason_code=reason_code)
         if command_ctx.verbose:
             log_debug(traceback.format_exc(), event="DEBUG")
@@ -2395,6 +2553,19 @@ def command_guard(command_name: str):
             except Exception as exc:
                 _handle_command_exception(command_name, exc, REASON_MERGE_ERROR, args, kwargs)
                 raise typer.Exit(code=1)
+            finally:
+                command_ctx = _extract_command_context(args, kwargs)
+                if command_ctx is not None:
+                    try:
+                        cleanup_work_cache_aggressive(command_ctx.work_dir)
+                        log_debug("工作缓存已清理。", event="CACHE_CLEANUP", work_dir=str(command_ctx.work_dir))
+                    except Exception as exc:
+                        log_debug(f"工作缓存清理失败（已忽略）: {exc}", event="CACHE_CLEANUP")
+
+                    try:
+                        cleanup_report_logs(report_dir_path(command_ctx.data_root), retention_days=DEFAULT_REPORT_RETENTION_DAYS)
+                    except Exception as exc:
+                        log_debug(f"报告日志清理失败（已忽略）: {exc}", event="CACHE_CLEANUP")
 
         return wrapper
 
@@ -2454,6 +2625,7 @@ def cmd_one_data(
     ctx: typer.Context,
     product: str = typer.Argument(..., help="产品英文名（可带 -daily）。"),
     date_time: str = typer.Option("", "--date-time", help="指定下载日期（可选）。"),
+    force_update: bool = typer.Option(False, "--force", help="强制更新：跳过 timestamp 门控。"),
 ) -> None:
     """更新单个产品。"""
 
@@ -2474,6 +2646,7 @@ def cmd_one_data(
             report=report,
             requested_date_time=date_time.strip(),
             conn=conn,
+            force_update=force_update,
         )
         if conn is not None:
             export_status_json(conn, status_json_path(command_ctx.data_root))
@@ -2492,6 +2665,7 @@ def cmd_all_data(
     ctx: typer.Context,
     mode: str = typer.Option("local", "--mode", help="local=本地存量更新；catalog=全量轮询。"),
     products: List[str] = typer.Option([], "--products", help="显式产品（可重复传参，也支持逗号分隔）。"),
+    force_update: bool = typer.Option(False, "--force", help="强制更新：跳过 timestamp 门控。"),
 ) -> None:
     """批量更新产品。"""
 
@@ -2542,7 +2716,14 @@ def cmd_all_data(
     if not command_ctx.dry_run:
         conn = connect_status_db(command_ctx.data_root)
     try:
-        total, has_error, t_run_start = _execute_plans(plans, command_ctx, report, requested_date_time="", conn=conn)
+        total, has_error, t_run_start = _execute_plans(
+            plans,
+            command_ctx,
+            report,
+            requested_date_time="",
+            conn=conn,
+            force_update=force_update,
+        )
         if conn is not None:
             export_status_json(conn, status_json_path(command_ctx.data_root))
     finally:
