@@ -113,6 +113,7 @@ KNOWN_DATASETS = tuple(sorted(set(AGGREGATE_SPLIT_COLS) | {"stock-fin-data-xbx"}
 
 # 读取 CSV 时的编码兜底顺序
 ENCODING_CANDIDATES = ("utf-8-sig", "gb18030", "utf-8", "gbk")
+UTF8_BOM = b"\xef\xbb\xbf"
 DATE_NAME_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$|^\d{8}$")
 
 RUN_MODES = {"local", "catalog"}
@@ -1258,16 +1259,36 @@ def decode_text(path: Path, preferred_encoding: Optional[str]) -> Tuple[str, str
     """尝试多个编码读取文本，返回 (文本, 实际编码)。"""
 
     data = path.read_bytes()
+    if data.startswith(UTF8_BOM):
+        try:
+            return data.decode("utf-8-sig"), "utf-8-sig"
+        except Exception:
+            pass
+
     encodings = [preferred_encoding] if preferred_encoding else []
     encodings.extend([enc for enc in ENCODING_CANDIDATES if enc != preferred_encoding])
     for encoding in encodings:
         if not encoding:
             continue
         try:
-            return data.decode(encoding), encoding
+            text = data.decode(encoding)
+            actual_encoding = encoding
+            if encoding == "utf-8-sig":
+                actual_encoding = "utf-8-sig" if data.startswith(UTF8_BOM) else "utf-8"
+            return text, actual_encoding
         except Exception:
             continue
     raise RuntimeError(f"无法识别文件编码: {path}")
+
+
+def choose_output_encoding(existing: Optional[CsvPayload], incoming: CsvPayload, rule: DatasetRule) -> str:
+    """选择写回编码：优先保留本地已有编码，其次跟随下载源，最后回退规则默认值。"""
+
+    if existing and existing.encoding:
+        return existing.encoding
+    if incoming.encoding:
+        return incoming.encoding
+    return rule.encoding
 
 def looks_like_header(row: Sequence[str]) -> bool:
     """粗略判断某一行是否像表头。"""
@@ -1420,7 +1441,7 @@ def merge_payload(existing: Optional[CsvPayload], incoming: CsvPayload, rule: Da
                 note=existing.note if existing else incoming.note,
                 header=[],
                 rows=[],
-                encoding=rule.encoding,
+                encoding=incoming.encoding or (existing.encoding if existing else rule.encoding),
                 delimiter=existing.delimiter if existing else incoming.delimiter,
             ),
             0,
@@ -1456,7 +1477,7 @@ def merge_payload(existing: Optional[CsvPayload], incoming: CsvPayload, rule: Da
         note=note,
         header=list(target_header),
         rows=rows,
-        encoding=rule.encoding,
+        encoding=incoming.encoding or (existing.encoding if existing else rule.encoding),
         delimiter=existing.delimiter if existing else incoming.delimiter,
     )
     return merged, max(0, len(merged_map) - before_count)
@@ -1468,7 +1489,7 @@ def write_csv_payload(path: Path, payload: CsvPayload, rule: DatasetRule, dry_ru
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     delimiter = payload.delimiter or ","
-    with path.open("w", encoding=rule.encoding, newline="") as f:
+    with path.open("w", encoding=payload.encoding or rule.encoding, newline="") as f:
         if rule.has_note and payload.note is not None:
             f.write(payload.note.rstrip("\r\n"))
             f.write("\n")
@@ -1485,11 +1506,19 @@ def sync_payload_to_target(incoming: CsvPayload, target: Path, rule: DatasetRule
     if not incoming.header:
         return "skipped", 0
 
-    existing = read_csv_payload(target, preferred_encoding=rule.encoding) if target.exists() else None
+    existing = read_csv_payload(target, preferred_encoding=incoming.encoding or rule.encoding) if target.exists() else None
+    output_encoding = choose_output_encoding(existing=existing, incoming=incoming, rule=rule)
     merged, added_rows = merge_payload(existing, incoming, rule)
+    merged.encoding = output_encoding
 
     if existing and merged.note == existing.note and merged.header == existing.header and merged.rows == existing.rows:
-        return "unchanged", 0
+        if merged.encoding == existing.encoding:
+            return "unchanged", 0
+        log_debug(
+            f"[{rule.name}] 内容未变化，但检测到编码漂移，触发重写: {target}",
+            from_encoding=existing.encoding,
+            to_encoding=merged.encoding,
+        )
 
     write_csv_payload(target, merged, rule, dry_run=dry_run)
     if existing:
