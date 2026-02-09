@@ -1,10 +1,10 @@
 # QuantClass 数据同步工具（setup + update 傻瓜版）
 
-当前版本：`v0.6.2`
+当前版本：`v0.6.3`
 
-版本备注（v0.6.2）：
-1. 修复 CSV 同步时的编码保留策略，避免更新过程中把已有本地数据文件改成不兼容编码。
-2. 新增编码回归测试，重点覆盖 UTF-8 BOM（文件开头编码标记）相关场景，降低同类问题复发风险。
+版本备注（v0.6.3）：
+1. 移除旧脚本入口 `quantclass_daily_sync.py`，统一使用 `quantclass_sync.py` 作为唯一主入口。
+2. 更新迁移文档与 README，明确目录/脚本重命名兼容入口已清理完成。
 
 这个工具现在主打两条命令：
 1. `setup`：第一次配置（只做一次）
@@ -163,10 +163,10 @@ python3 quantclass_sync.py all_data --mode local --verbose
 
 推荐新项目直接用：`setup + update`。
 
-迁移兼容窗口（目录/脚本重命名）：
-1. 旧目录 `.../quant/data/scripts` 当前通过软链接兼容到新目录 `.../quant/data/quantclass-sync`。
-2. 旧脚本名 `quantclass_daily_sync.py` 当前通过兼容入口转发到 `quantclass_sync.py`。
-3. 兼容保留至 `2026-02-11`（本地时间），之后建议移除旧入口，统一使用新目录与新脚本名。
+迁移状态（目录/脚本重命名，更新于 `2026-02-09`）：
+1. 旧目录 `.../quant/data/scripts` 兼容入口已移除。
+2. 旧脚本名 `quantclass_daily_sync.py` 兼容入口已移除。
+3. 当前统一使用新目录 `.../quant/data/quantclass-sync` 与主脚本 `quantclass_sync.py`。
 
 ---
 
