@@ -131,6 +131,21 @@ REASON_MERGE_ERROR = "merge_error"
 REASON_MIRROR_FALLBACK = "mirror_fallback"
 REASON_UNKNOWN_HEADER_MERGE = "unknown_header_merge"
 REASON_UP_TO_DATE = "up_to_date"
+REASON_PREPROCESS_OK = "preprocess_ok"
+REASON_PREPROCESS_FAILED = "preprocess_failed"
+REASON_PREPROCESS_DRY_RUN = "preprocess_dry_run"
+REASON_PREPROCESS_SKIPPED_NO_DELTA = "preprocess_skipped_no_delta"
+REASON_PREPROCESS_INCREMENTAL_OK = "preprocess_incremental_ok"
+REASON_PREPROCESS_FULL_REBUILD_OK = "preprocess_full_rebuild_ok"
+REASON_PREPROCESS_FALLBACK_FULL_OK = "preprocess_fallback_full_ok"
+
+PREPROCESS_PRODUCT = "coin-binance-spot-swap-preprocess-pkl-1h"
+PREPROCESS_TRIGGER_PRODUCTS = {
+    "coin-binance-candle-csv-1h",
+    "coin-binance-swap-candle-csv-1h",
+}
+# 发现阶段忽略“预处理产物目录”，避免报告里出现 unknown + preprocess 双状态。
+DISCOVERY_IGNORED_PRODUCTS = {PREPROCESS_PRODUCT}
 
 LOG_LEVELS = {
     "ERROR": 0,
@@ -790,9 +805,11 @@ def discover_local_products(data_root: Path, catalog_products: Sequence[str]) ->
     for item in sorted(data_root.iterdir(), key=lambda x: x.name):
         if not item.is_dir():
             continue
+        product_name = normalize_product_name(item.name)
+        if product_name in DISCOVERY_IGNORED_PRODUCTS:
+            continue
         if not _dir_has_data_files(item):
             continue
-        product_name = normalize_product_name(item.name)
         discovered.append(
             DiscoveredProduct(
                 name=product_name,
@@ -2492,6 +2509,224 @@ def _upsert_product_status_after_success(
     write_local_timestamp(command_ctx.data_root, product, actual_time)
 
 
+def _collect_preprocess_source_successes(report: RunReport) -> List[ProductRunResult]:
+    """
+    收集本轮已成功更新的“预处理依赖源产品”。
+
+    预处理只在这三个源产品至少一个真正更新成功时才触发，
+    这样可以避免每次 update 都重复跑一遍重计算任务。
+    """
+
+    successes: List[ProductRunResult] = []
+    for item in report.products:
+        if item.status != "ok":
+            continue
+        if normalize_product_name(item.product) not in PREPROCESS_TRIGGER_PRODUCTS:
+            continue
+        successes.append(item)
+    return successes
+
+
+def _has_effective_source_delta(item: ProductRunResult) -> bool:
+    """
+    判断单个源产品是否存在“有效增量”。
+
+    只把 created/updated/rows_added 视为有效变化，
+    避免仅 mtime 触发但内容未变时重复执行重计算。
+    """
+
+    stats = item.stats
+    return (stats.created_files + stats.updated_files + stats.rows_added) > 0
+
+
+def _run_builtin_coin_preprocess(command_ctx: CommandContext) -> Tuple[str, str]:
+    """
+    执行包内置预处理逻辑（默认路径）。
+
+    设计目标：让分发包在用户机器上开箱即用，不依赖额外环境变量。
+    """
+
+    try:
+        from coin_preprocess_builtin import run_coin_preprocess_builtin
+    except Exception as exc:
+        raise RuntimeError(
+            "内置预处理模块加载失败；请确认依赖已安装（例如 pandas）。"
+        ) from exc
+
+    summary = run_coin_preprocess_builtin(command_ctx.data_root)
+    reason_by_mode = {
+        "incremental_patch": REASON_PREPROCESS_INCREMENTAL_OK,
+        "full_rebuild": REASON_PREPROCESS_FULL_REBUILD_OK,
+        "fallback_full_rebuild": REASON_PREPROCESS_FALLBACK_FULL_OK,
+    }
+    reason_code = reason_by_mode.get(summary.mode, REASON_PREPROCESS_OK)
+    source_path = (
+        f"builtin(mode={summary.mode},changed={summary.changed_symbols},"
+        f"spot={summary.spot_symbols},swap={summary.swap_symbols},output={summary.output_dir})"
+    )
+    return source_path, reason_code
+
+
+def _resolve_preprocess_data_date(
+    command_ctx: CommandContext,
+    source_successes: Sequence[ProductRunResult],
+) -> str:
+    """
+    计算预处理产品写入状态时使用的数据日期。
+
+    优先使用“本轮成功源产品”的 date_time；
+    若异常缺失，再回退读取本地 timestamp。
+    """
+
+    candidates: List[str] = []
+    for item in source_successes:
+        normalized = normalize_data_date(item.date_time)
+        if normalized:
+            candidates.append(normalized)
+    if candidates:
+        return max(candidates)
+
+    for product in PREPROCESS_TRIGGER_PRODUCTS:
+        local_date = read_local_timestamp_date(command_ctx.data_root, product)
+        if local_date:
+            candidates.append(local_date)
+    if candidates:
+        return max(candidates)
+    return datetime.now().date().isoformat()
+
+
+def _append_preprocess_result(
+    report: RunReport,
+    status: str,
+    reason_code: str,
+    elapsed: float,
+    date_time: str = "",
+    error: str = "",
+    source_path: str = "",
+) -> None:
+    """把预处理步骤写入 products/events，确保报告可观测。"""
+
+    report.products.append(
+        ProductRunResult(
+            product=PREPROCESS_PRODUCT,
+            status=status,
+            strategy="preprocess_hook",
+            reason_code=reason_code,
+            date_time=date_time,
+            mode="postprocess",
+            elapsed_seconds=elapsed,
+            source_path=source_path,
+            error=error,
+        )
+    )
+    detail = error if error else f"elapsed={elapsed:.2f}s"
+    _append_run_event(report, PREPROCESS_PRODUCT, "PREPROCESS", status, reason_code, detail)
+
+
+def _maybe_run_coin_preprocess(
+    command_ctx: CommandContext,
+    report: RunReport,
+    conn: Optional[sqlite3.Connection],
+) -> bool:
+    """
+    条件触发币圈合成预处理。
+
+    返回值：
+    - True: 预处理阶段发生错误（应计入本次 update 失败）
+    - False: 未触发或执行成功
+    """
+
+    preprocess_dir = command_ctx.data_root / PREPROCESS_PRODUCT
+    if not preprocess_dir.is_dir():
+        return False
+
+    source_successes = _collect_preprocess_source_successes(report)
+    if not source_successes:
+        log_debug(
+            "预处理跳过：本轮源产品无成功更新。",
+            event="PREPROCESS",
+            target=PREPROCESS_PRODUCT,
+        )
+        return False
+    source_effective = [item for item in source_successes if _has_effective_source_delta(item)]
+    if not source_effective:
+        _append_preprocess_result(
+            report=report,
+            status="skipped",
+            reason_code=REASON_PREPROCESS_SKIPPED_NO_DELTA,
+            elapsed=0.0,
+            error="源产品无有效增量（created/updated/rows_added 均为 0），跳过预处理。",
+        )
+        log_info(
+            "预处理跳过：源产品无有效增量。",
+            event="PREPROCESS",
+            target=PREPROCESS_PRODUCT,
+        )
+        return False
+
+    if command_ctx.dry_run:
+        _append_preprocess_result(
+            report=report,
+            status="skipped",
+            reason_code=REASON_PREPROCESS_DRY_RUN,
+            elapsed=0.0,
+            error="dry-run 模式：未执行预处理命令。",
+        )
+        log_info("dry-run 模式下跳过预处理执行。", event="PREPROCESS", target=PREPROCESS_PRODUCT)
+        return False
+
+    t0 = time.time()
+    raw_cmd = ""
+    try:
+        # 统一使用仓库内置预处理实现，降低分发后的使用门槛。
+        preprocess_result = _run_builtin_coin_preprocess(command_ctx)
+        success_reason_code = REASON_PREPROCESS_OK
+        if isinstance(preprocess_result, tuple):
+            raw_cmd, success_reason_code = preprocess_result
+        else:
+            raw_cmd = str(preprocess_result)
+        elapsed = time.time() - t0
+
+        actual_time = _resolve_preprocess_data_date(command_ctx, source_effective)
+        _upsert_product_status_after_success(
+            conn=conn,
+            command_ctx=command_ctx,
+            product=PREPROCESS_PRODUCT,
+            actual_time=actual_time,
+        )
+        _append_preprocess_result(
+            report=report,
+            status="ok",
+            reason_code=success_reason_code,
+            elapsed=elapsed,
+            date_time=actual_time,
+            source_path=raw_cmd,
+        )
+        log_info(
+            "预处理执行成功。",
+            event="PREPROCESS",
+            target=PREPROCESS_PRODUCT,
+            data_time=actual_time,
+            command=raw_cmd,
+        )
+        return False
+    except Exception as exc:
+        elapsed = time.time() - t0
+        message = str(exc)
+        _append_preprocess_result(
+            report=report,
+            status="error",
+            reason_code=REASON_PREPROCESS_FAILED,
+            elapsed=elapsed,
+            error=message,
+            source_path=raw_cmd,
+        )
+        log_error(f"预处理执行异常: {message}", event="PREPROCESS")
+        if command_ctx.verbose:
+            log_debug(traceback.format_exc(), event="DEBUG")
+        return True
+
+
 def _execute_plans(
     plans: Sequence[ProductPlan],
     command_ctx: CommandContext,
@@ -2692,7 +2927,7 @@ def global_options(
 
     # 无子命令时做“首次引导”：
     # - 首次（无配置）：自动进入 setup
-    # - 非首次（已有配置）：显示帮助
+    # - 非首次（已有配置）：默认执行 update
     if ctx.invoked_subcommand is None:
         if not resolved_config_file.exists():
             if not sys.stdin.isatty():
@@ -2715,7 +2950,21 @@ def global_options(
                 products=[],
             )
             raise typer.Exit(code=0)
-        typer.echo(ctx.get_help())
+        # help 场景保持原行为：明确传 --help 时只展示帮助，不自动执行 update。
+        argv_flags = set(sys.argv[1:])
+        if getattr(ctx, "resilient_parsing", False) or {"-h", "--help"} & argv_flags:
+            typer.echo(ctx.get_help())
+            raise typer.Exit(code=0)
+
+        log_info("检测到用户配置，默认执行 update。", event="CMD_START", command="update")
+        ctx.invoke(
+            cmd_update,
+            ctx=ctx,
+            dry_run=False,
+            verbose=False,
+            products=[],
+            force_update=False,
+        )
         raise typer.Exit(code=0)
 
 
@@ -2968,6 +3217,12 @@ def run_update_with_settings(
             conn=conn,
             force_update=force_update,
         )
+        preprocess_has_error = _maybe_run_coin_preprocess(
+            command_ctx=command_ctx,
+            report=report,
+            conn=conn,
+        )
+        has_error = has_error or preprocess_has_error
         if conn is not None:
             export_status_json(conn, status_json_path(command_ctx.data_root))
     finally:

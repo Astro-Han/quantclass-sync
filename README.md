@@ -1,9 +1,25 @@
 # QuantClass 数据同步工具（setup + update 傻瓜版）
 
-当前版本：`v0.6.3`
+当前版本：`v0.7.0`
 
 ## Changelog / 更新记录：
 
+* **v0.7.0**
+  * 币圈预处理提速：改为“无 sidecar 增量 patch”主路径，仅在 spot/swap 有有效增量时执行。
+  * 预处理触发源去掉 `coin-cap`，避免无关产品更新导致重计算。
+  * 增量异常时自动回退全量重建，仍保持“失败不覆盖旧数据”的安全语义。
+* **v0.6.7**
+  * 币圈合成后处理启用“严格完整性模式”：spot/swap 两侧目录和有效 symbol 必须同时满足，缺任一侧即失败并返回非 0。
+  * 预处理写盘改为“全量成功后原子替换”，任一环节异常都不会覆盖旧版 pkl。
+  * 本地产品发现阶段忽略 `coin-binance-spot-swap-preprocess-pkl-1h`，避免运行报告出现同一产品双状态。
+* **v0.6.6**
+  * 币圈合成后处理进一步收敛：统一使用仓库内置预处理实现，不再依赖或支持外部自定义命令配置。
+* **v0.6.5**
+  * 币圈合成后处理改为“开箱即用”：未配置 `QUANTCLASS_PREPROCESS_CMD` 时，自动使用包内置预处理实现。
+  * `QUANTCLASS_PREPROCESS_CMD` 由必填改为可选覆盖项，便于自定义替换合成脚本。
+* **v0.6.4**
+  * 新增默认入口行为：已有配置时直接运行 `python3 quantclass_sync.py` 会自动执行 `update`。
+  * 新增币圈合成后处理 Hook：检测到 `coin-binance-spot-swap-preprocess-pkl-1h` 且本轮源产品有更新时，自动触发合成命令。
 * **v0.6.3**
   * 移除旧脚本入口 `quantclass_daily_sync.py`，统一使用 `quantclass_sync.py` 作为唯一主入口。
   * 更新迁移文档与 README，明确目录/脚本重命名兼容入口已清理完成。
@@ -16,7 +32,9 @@
 2. `update`：日常更新（每天常用）
 
 如果你是第一次使用，只看下面 3 步就够了。  
-补充：首次直接运行脚本（不带子命令）会自动进入 `setup` 向导。
+补充：
+1. 首次直接运行脚本（不带子命令）会自动进入 `setup` 向导。
+2. 已配置后直接运行脚本（不带子命令）会默认执行 `update`。
 
 ---
 
@@ -64,7 +82,7 @@ python3 quantclass_sync.py setup --non-interactive --product-mode explicit_list 
 - 只写运行报告，不写业务数据
 
 ```bash
-python3 quantclass_sync.py update --dry-run
+python3 quantclass_sync.py --dry-run
 ```
 
 【会写入】影响范围：
@@ -73,7 +91,7 @@ python3 quantclass_sync.py update --dry-run
 - 运行报告
 
 ```bash
-python3 quantclass_sync.py update
+python3 quantclass_sync.py
 ```
 
 说明：工具默认开启详细日志（`verbose`），可实时看到进度；如需安静模式可加 `--no-verbose`。
@@ -101,6 +119,13 @@ python3 quantclass_sync.py setup --non-interactive --data-root /your/data/root -
 ### 2.2 update（日常更新）
 
 ```bash
+python3 quantclass_sync.py
+```
+
+上面是默认推荐写法（不带子命令自动执行 `update`）。
+如果你更喜欢显式写法，也可继续使用：
+
+```bash
 python3 quantclass_sync.py update
 ```
 
@@ -120,6 +145,31 @@ python3 quantclass_sync.py update
 ```bash
 python3 quantclass_sync.py update --products stock-trading-data --products stock-main-index-data --verbose
 ```
+
+### 2.3 可选币圈合成后处理（自动触发）
+
+触发条件（同时满足）：
+1. `data_root` 下存在目录 `coin-binance-spot-swap-preprocess-pkl-1h`
+2. 本轮 `coin-binance-candle-csv-1h` / `coin-binance-swap-candle-csv-1h` 至少一个成功更新且存在有效增量
+
+默认行为：
+1. 统一使用仓库内置预处理逻辑（默认、推荐、分发最省心）。
+2. 无需额外设置环境变量。
+3. 默认严格完整性：spot/swap 两侧都要有有效输入，才会写入新产物。
+4. 写盘采用原子替换：全部文件都写成功才会替换正式文件。
+5. 预处理默认优先走增量 patch（基于 timestamp + mtime），仅在必要时回退全量。
+
+开箱即用示例（无需任何环境变量）：
+
+```bash
+python3 quantclass_sync.py
+```
+
+失败语义：
+1. 若内置预处理依赖缺失或处理异常，会把本次 `update` 标记为失败（非 0 退出码）
+2. 若仅一侧源数据缺失/为空，会直接失败，且保留旧 pkl 不覆盖
+3. 若增量 patch 失败，会自动尝试一次全量回退；回退也失败才会最终报错
+4. `--dry-run` 下不会执行合成命令，只会在报告里记录跳过
 
 ---
 
