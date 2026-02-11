@@ -1,9 +1,13 @@
 # QuantClass 数据同步工具（setup + update 傻瓜版）
 
-当前版本：`v0.7.1`
+当前版本：`v0.7.2`
 
 ## Changelog / 更新记录：
 
+* **v0.7.2**
+  * `update` 默认行为升级为“从本地 `timestamp.txt` 自动回补到 API 最新日”，支持单次命令补齐多日缺口。
+  * 回补链路新增“latest 候选日期 + 逐日探测兜底”策略，兼容接口只返回单日期的场景。
+  * 回补过程中命中真实错误（网络/解压/落库）时立即停止并返回非 0，避免误判为成功。
 * **v0.7.1**
   * 修复币圈增量预处理中的 `PerformanceWarning`：pivot patch 从逐列写入改为批量拼接，避免 DataFrame 内存碎片化。
   * 新增性能回归测试，覆盖“多 symbol 变更场景下不再触发 `PerformanceWarning`”。
@@ -132,6 +136,11 @@ python3 quantclass_sync.py
 ```bash
 python3 quantclass_sync.py update
 ```
+
+默认行为（重要）：
+1. 若本地 `timestamp.txt` 落后，会自动按日期从旧到新补到 API 最新日（单次命令完成回补）。
+2. 若本地已是最新，会命中时间戳门控并跳过（`reason_code=up_to_date`）。
+3. 回补过程中遇到真实错误（网络/解压/落库）会立即停止该产品并返回非 0。
 
 常用可选项：
 1. `--dry-run`：只演练，不写业务数据

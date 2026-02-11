@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import typer
 
@@ -57,7 +58,7 @@ class DefaultEntryUpdateTests(unittest.TestCase):
             config_file = Path(tmpdir) / "missing.json"
             ctx = _FakeContext()
 
-            with unittest.mock.patch.object(qcs.sys.stdin, "isatty", return_value=True):
+            with mock.patch.object(qcs.sys.stdin, "isatty", return_value=True):
                 with self.assertRaises(typer.Exit) as cm:
                     self._call_global_options(ctx=ctx, config_file=config_file)
 

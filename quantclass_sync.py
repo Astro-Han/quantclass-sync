@@ -15,7 +15,7 @@ import time
 import traceback
 import zipfile
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -1005,23 +1005,37 @@ def request_data(method: str, url: str, headers: Dict[str, str], **kwargs) -> re
 
     raise RuntimeError("请求失败：超过最大重试次数。")
 
+def parse_latest_time_candidates(raw_text: str) -> List[str]:
+    """解析 latest 接口返回文本，输出去重升序日期列表（YYYY-MM-DD）。"""
+
+    candidates = [x.strip() for x in re.split(r"[,\s]+", raw_text) if x.strip()]
+    normalized = [normalize_data_date(x) for x in candidates]
+    valid = sorted({x for x in normalized if x})
+    if not valid:
+        raise RuntimeError("接口未返回可用的 date_time。")
+    return valid
+
+
 def normalize_latest_time(raw_text: str) -> str:
     """
     latest 接口可能返回逗号分隔或空白分隔的一串时间，
     这里取最大值作为“最新版本”。
     """
 
-    candidates = [x.strip() for x in re.split(r"[,\s]+", raw_text) if x.strip()]
-    if not candidates:
-        raise RuntimeError("接口未返回可用的 date_time。")
-    return max(candidates)
+    return parse_latest_time_candidates(raw_text)[-1]
+
+
+def get_latest_times(api_base: str, product: str, hid: str, headers: Dict[str, str]) -> List[str]:
+    """调用 latest 接口获取指定产品可用时间列表（归一化后升序）。"""
+
+    url = f"{api_base}/fetch/{product}-daily/latest?uuid={hid}"
+    res = request_data("GET", url=url, headers=headers)
+    return parse_latest_time_candidates(res.text)
 
 def get_latest_time(api_base: str, product: str, hid: str, headers: Dict[str, str]) -> str:
     """调用 latest 接口获取指定产品最新时间。"""
 
-    url = f"{api_base}/fetch/{product}-daily/latest?uuid={hid}"
-    res = request_data("GET", url=url, headers=headers)
-    return normalize_latest_time(res.text)
+    return get_latest_times(api_base=api_base, product=product, hid=hid, headers=headers)[-1]
 
 def get_download_link(api_base: str, product: str, date_time: str, hid: str, headers: Dict[str, str]) -> str:
     """根据产品和时间获取真实下载链接。"""
@@ -2414,7 +2428,71 @@ def _append_gate_skip_result(
     )
 
 
-def _resolve_requested_date_for_plan(
+def _parse_iso_date(raw: str) -> Optional[date]:
+    normalized = normalize_data_date(raw)
+    if not normalized:
+        return None
+    try:
+        return datetime.strptime(normalized, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _iter_calendar_dates(start_date: str, end_date: str) -> Iterable[str]:
+    """按天遍历 [start_date, end_date] 区间，输出 YYYY-MM-DD。"""
+
+    start_obj = _parse_iso_date(start_date)
+    end_obj = _parse_iso_date(end_date)
+    if start_obj is None or end_obj is None or start_obj > end_obj:
+        return []
+    items: List[str] = []
+    current = start_obj
+    while current <= end_obj:
+        items.append(current.isoformat())
+        current += timedelta(days=1)
+    return items
+
+
+def _probe_downloadable_dates(
+    api_base: str,
+    product: str,
+    hid: str,
+    headers: Dict[str, str],
+    local_date: str,
+    latest_date: str,
+) -> List[str]:
+    """
+    回退探测缺口日期。
+
+    规则：
+    - 404/参数错误视为“该日无数据”，继续探测下一天；
+    - 其它错误视为硬失败，抛出异常交给严格模式处理。
+    """
+
+    start_obj = _parse_iso_date(local_date)
+    end_obj = _parse_iso_date(latest_date)
+    if start_obj is None or end_obj is None or start_obj >= end_obj:
+        return []
+
+    found: List[str] = []
+    for day in _iter_calendar_dates((start_obj + timedelta(days=1)).isoformat(), end_obj.isoformat()):
+        try:
+            get_download_link(api_base=api_base, product=product, date_time=day, hid=hid, headers=headers)
+            found.append(day)
+        except FatalRequestError as exc:
+            if str(exc).strip() == "参数错误":
+                log_debug(f"[{product}] 探测到无数据日，已跳过: {day}", event="PROBE_SKIP")
+                continue
+            raise
+        except RuntimeError as exc:
+            if "未返回下载链接" in str(exc):
+                log_debug(f"[{product}] 探测到空下载链接，已跳过: {day}", event="PROBE_SKIP")
+                continue
+            raise
+    return found
+
+
+def _resolve_requested_dates_for_plan(
     plan: ProductPlan,
     command_ctx: CommandContext,
     hid: str,
@@ -2423,40 +2501,42 @@ def _resolve_requested_date_for_plan(
     force_update: bool,
     report: RunReport,
     t_product_start: float,
-) -> Tuple[str, bool]:
+    catch_up_to_latest: bool = False,
+) -> Tuple[List[str], bool]:
     """
-    解析单产品执行时间，并处理 timestamp 门控。
+    解析单产品执行日期列表，并处理 timestamp 门控。
 
     返回：
-    - requested_date_for_plan: 传给下载流程的日期（空字符串代表继续走 latest）
+    - requested_dates_for_plan: 传给下载流程的日期列表（含空字符串时代表继续走 latest）
     - skipped_by_gate: 是否已经被门控判定为“跳过”
     """
 
     # 用户手动指定了日期，就以用户输入为准，不再做 latest/timestamp 判断。
     requested_date_for_plan = requested_date_time.strip()
     if force_update or requested_date_for_plan:
-        return requested_date_for_plan, False
+        return [requested_date_for_plan], False
 
     product_name = normalize_product_name(plan.name)
     try:
-        # 1) 读取 API 最新日期（latest）
-        api_latest_raw = get_latest_time(
+        # 1) 读取 API 可用日期列表（latest）
+        api_latest_candidates = get_latest_times(
             api_base=command_ctx.api_base.rstrip("/"),
             product=product_name,
             hid=hid,
             headers=headers,
         )
+        api_latest_date = api_latest_candidates[-1] if api_latest_candidates else None
         # 2) 读取本地 timestamp 第一列日期
-        api_latest_date = normalize_data_date(api_latest_raw)
         local_date = read_local_timestamp_date(command_ctx.data_root, product_name)
         # 3) 如果本地已经不落后，则直接跳过，不进入下载链路
         if should_skip_by_timestamp(local_date, api_latest_date):
             elapsed = time.time() - t_product_start
+            latest_raw = api_latest_date or ""
             _append_gate_skip_result(
                 report=report,
                 plan=plan,
                 product_name=product_name,
-                api_latest_raw=api_latest_raw,
+                api_latest_raw=latest_raw,
                 api_latest_date=api_latest_date,
                 local_date=local_date,
                 elapsed_seconds=elapsed,
@@ -2468,17 +2548,44 @@ def _resolve_requested_date_for_plan(
                 api_latest_date=api_latest_date,
                 decision="skip",
             )
-            return api_latest_raw, True
+            return [], True
 
-        # 本地落后：继续执行更新
+        # 非回补模式：保持“单次只跑 latest 一次”的旧行为。
+        if not catch_up_to_latest:
+            if api_latest_date:
+                return [api_latest_date], False
+            return [""], False
+
+        # 回补模式：无本地基线时只能跑 latest 一次。
+        if not local_date:
+            if api_latest_date:
+                return [api_latest_date], False
+            return [""], False
+
+        catchup_dates = [x for x in api_latest_candidates if x > local_date]
+        if api_latest_date and local_date < api_latest_date:
+            # 列表缺失或不完整时，用逐日探测补齐。
+            probed_dates = _probe_downloadable_dates(
+                api_base=command_ctx.api_base.rstrip("/"),
+                product=product_name,
+                hid=hid,
+                headers=headers,
+                local_date=local_date,
+                latest_date=api_latest_date,
+            )
+            catchup_dates = sorted(set(catchup_dates) | set(probed_dates))
+            if not catchup_dates:
+                catchup_dates = [api_latest_date]
+
         log_info(
             f"[{product_name}] timestamp 门控通过，执行更新。",
             event="PRODUCT_PLAN",
             local_date=local_date or "",
             api_latest_date=api_latest_date or "",
+            catchup_dates=len(catchup_dates),
             decision="run",
         )
-        return api_latest_raw, False
+        return catchup_dates, False
     except Exception as exc:
         # 门控异常时采用 fail-open（失败放行）策略，避免“该更新却被误跳过”。
         log_info(
@@ -2487,7 +2594,33 @@ def _resolve_requested_date_for_plan(
             decision="fallback_run",
             error=str(exc),
         )
-        return requested_date_for_plan, False
+        return [requested_date_for_plan], False
+
+
+def _resolve_requested_date_for_plan(
+    plan: ProductPlan,
+    command_ctx: CommandContext,
+    hid: str,
+    headers: Dict[str, str],
+    requested_date_time: str,
+    force_update: bool,
+    report: RunReport,
+    t_product_start: float,
+) -> Tuple[str, bool]:
+    """兼容旧调用：返回单日期。"""
+
+    dates, skipped = _resolve_requested_dates_for_plan(
+        plan=plan,
+        command_ctx=command_ctx,
+        hid=hid,
+        headers=headers,
+        requested_date_time=requested_date_time,
+        force_update=force_update,
+        report=report,
+        t_product_start=t_product_start,
+        catch_up_to_latest=False,
+    )
+    return (dates[0] if dates else ""), skipped
 
 
 def _upsert_product_status_after_success(
@@ -2734,13 +2867,14 @@ def _execute_plans(
     requested_date_time: str = "",
     conn: Optional[sqlite3.Connection] = None,
     force_update: bool = False,
+    catch_up_to_latest: bool = False,
 ) -> Tuple[SyncStats, bool, float]:
     """
     执行产品计划并返回汇总统计。
 
     整体流程（单次运行）：
     1) 先构建请求头与凭证（API Key/HID）
-    2) 逐个产品执行“门控判断 -> 下载解压 -> 同步落库 -> 记录结果”
+    2) 逐个产品执行“门控判断 -> 解析日期队列 -> 下载解压 -> 同步落库 -> 记录结果”
     3) 累加统计并在必要时中断（stop-on-error）
     """
 
@@ -2751,9 +2885,8 @@ def _execute_plans(
 
     for plan in plans:
         t_product_start = time.time()
-        debug_trace = ""
         # A. 判断这个产品本次应不应该跑（门控命中会直接 continue）。
-        requested_date_for_plan, skipped_by_gate = _resolve_requested_date_for_plan(
+        requested_dates_for_plan, skipped_by_gate = _resolve_requested_dates_for_plan(
             plan=plan,
             command_ctx=command_ctx,
             hid=hid,
@@ -2762,48 +2895,62 @@ def _execute_plans(
             force_update=force_update,
             report=report,
             t_product_start=t_product_start,
+            catch_up_to_latest=catch_up_to_latest,
         )
         if skipped_by_gate:
             continue
 
-        try:
-            # B. 真正执行单产品同步（网络 + 解压 + 文件同步）。
-            product, actual_time, stats, source_path, reason_code = process_product(
-                plan=plan,
-                date_time=requested_date_for_plan or None,
-                api_base=command_ctx.api_base.rstrip("/"),
-                hid=hid,
-                headers=headers,
-                data_root=command_ctx.data_root,
-                work_dir=command_ctx.work_dir,
-                dry_run=command_ctx.dry_run,
-            )
-            elapsed = time.time() - t_product_start
-            total.merge(stats)
-            _append_success_result(report, plan, product, actual_time, stats, source_path, reason_code, elapsed)
-            # C. 成功后统一回写状态库与 timestamp（dry-run 下不会写）。
-            _upsert_product_status_after_success(conn=conn, command_ctx=command_ctx, product=product, actual_time=actual_time)
-            continue
-        except ProductSyncError as exc:
-            # 可预期业务错误：带有明确 reason_code。
-            reason_code = exc.reason_code
-            message = str(exc)
-            debug_trace = traceback.format_exc()
-        except Exception as exc:
-            # 兜底未知异常：统一归并为 merge_error，避免丢失错误。
-            reason_code = REASON_MERGE_ERROR
-            message = str(exc)
-            debug_trace = traceback.format_exc()
+        if not requested_dates_for_plan:
+            requested_dates_for_plan = [""]
 
-        # D. 失败路径：写报告 + 打日志 + 按 stop-on-error 决定是否中断。
-        has_error = True
-        elapsed = time.time() - t_product_start
-        _append_error_result(report, plan, reason_code, requested_date_for_plan, elapsed, message)
-        log_error(f"[{plan.name}] 处理失败: {message}", event="SYNC_FAIL", reason_code=reason_code)
-        if command_ctx.verbose and debug_trace:
-            log_debug(debug_trace, event="DEBUG")
-        if command_ctx.stop_on_error:
-            log_error("已开启 stop-on-error，任务提前停止。", event="RUN_SUMMARY")
+        # B. 按日期队列执行单产品同步（网络 + 解压 + 文件同步）。
+        for requested_date_for_plan in requested_dates_for_plan:
+            debug_trace = ""
+            try:
+                product, actual_time, stats, source_path, reason_code = process_product(
+                    plan=plan,
+                    date_time=requested_date_for_plan or None,
+                    api_base=command_ctx.api_base.rstrip("/"),
+                    hid=hid,
+                    headers=headers,
+                    data_root=command_ctx.data_root,
+                    work_dir=command_ctx.work_dir,
+                    dry_run=command_ctx.dry_run,
+                )
+                elapsed = time.time() - t_product_start
+                total.merge(stats)
+                _append_success_result(report, plan, product, actual_time, stats, source_path, reason_code, elapsed)
+                # C. 成功后统一回写状态库与 timestamp（dry-run 下不会写）。
+                _upsert_product_status_after_success(
+                    conn=conn,
+                    command_ctx=command_ctx,
+                    product=product,
+                    actual_time=actual_time,
+                )
+                continue
+            except ProductSyncError as exc:
+                # 可预期业务错误：带有明确 reason_code。
+                reason_code = exc.reason_code
+                message = str(exc)
+                debug_trace = traceback.format_exc()
+            except Exception as exc:
+                # 兜底未知异常：统一归并为 merge_error，避免丢失错误。
+                reason_code = REASON_MERGE_ERROR
+                message = str(exc)
+                debug_trace = traceback.format_exc()
+
+            # D. 失败路径：严格模式下直接终止该产品后续日期。
+            has_error = True
+            elapsed = time.time() - t_product_start
+            _append_error_result(report, plan, reason_code, requested_date_for_plan, elapsed, message)
+            log_error(f"[{plan.name}] 处理失败: {message}", event="SYNC_FAIL", reason_code=reason_code)
+            if command_ctx.verbose and debug_trace:
+                log_debug(debug_trace, event="DEBUG")
+            # 回补默认严格模式：命中硬失败后立即终止整次任务。
+            if catch_up_to_latest or command_ctx.stop_on_error:
+                log_error("已开启 stop-on-error，任务提前停止。", event="RUN_SUMMARY")
+                return total, has_error, t_run_start
+            # 非严格模式：仅终止当前产品后续日期，继续下一个产品。
             break
 
     return total, has_error, t_run_start
@@ -3216,6 +3363,7 @@ def run_update_with_settings(
             requested_date_time="",
             conn=conn,
             force_update=force_update,
+            catch_up_to_latest=True,
         )
         preprocess_has_error = _maybe_run_coin_preprocess(
             command_ctx=command_ctx,
@@ -3537,6 +3685,7 @@ def cmd_one_data(
             requested_date_time=date_time.strip(),
             conn=conn,
             force_update=force_update,
+            catch_up_to_latest=False,
         )
         if conn is not None:
             export_status_json(conn, status_json_path(command_ctx.data_root))
