@@ -2492,6 +2492,21 @@ def _probe_downloadable_dates(
     return found
 
 
+def _should_probe_fallback(
+    local_date: str,
+    api_latest_date: Optional[str],
+    api_latest_candidates: Sequence[str],
+) -> bool:
+    """判断是否需要启用逐日探测兜底。"""
+
+    if not api_latest_date or local_date >= api_latest_date:
+        return False
+    # latest 返回多个有效日期时，默认认为候选集已足够，不再逐日探测。
+    if len(api_latest_candidates) > 1:
+        return False
+    return True
+
+
 def _resolve_requested_dates_for_plan(
     plan: ProductPlan,
     command_ctx: CommandContext,
@@ -2563,7 +2578,11 @@ def _resolve_requested_dates_for_plan(
             return [""], False
 
         catchup_dates = [x for x in api_latest_candidates if x > local_date]
-        if api_latest_date and local_date < api_latest_date:
+        if _should_probe_fallback(
+            local_date=local_date,
+            api_latest_date=api_latest_date,
+            api_latest_candidates=api_latest_candidates,
+        ):
             # 列表缺失或不完整时，用逐日探测补齐。
             probed_dates = _probe_downloadable_dates(
                 api_base=command_ctx.api_base.rstrip("/"),
