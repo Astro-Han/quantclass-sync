@@ -4,6 +4,7 @@ user_secrets.env
 user_config.json
 log/
 release/
+.worktrees/
 
 # Python cache
 __pycache__/
