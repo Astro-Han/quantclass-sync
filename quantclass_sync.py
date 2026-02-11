@@ -2501,10 +2501,21 @@ def _should_probe_fallback(
 
     if not api_latest_date or local_date >= api_latest_date:
         return False
-    # latest 返回多个有效日期时，默认认为候选集已足够，不再逐日探测。
-    if len(api_latest_candidates) > 1:
+
+    local_obj = _parse_iso_date(local_date)
+    latest_obj = _parse_iso_date(api_latest_date)
+    if local_obj is None or latest_obj is None or local_obj >= latest_obj:
         return False
-    return True
+
+    # 期望覆盖总天数：local+1 到 latest（闭区间）。
+    expected_total = (latest_obj - local_obj).days
+    covered = {
+        normalize_data_date(x)
+        for x in api_latest_candidates
+        if normalize_data_date(x) and local_date < normalize_data_date(x) <= api_latest_date
+    }
+    # 候选日期未覆盖完整区间时，才启用逐日探测。
+    return len(covered) < expected_total
 
 
 def _resolve_requested_dates_for_plan(

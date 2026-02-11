@@ -85,7 +85,7 @@ class UpdateCatchUpTests(unittest.TestCase):
 
         with patch(
             "quantclass_sync.get_latest_times",
-            return_value=["2026-02-07", "2026-02-10", "2026-02-11"],
+            return_value=["2026-02-07", "2026-02-08", "2026-02-09", "2026-02-10", "2026-02-11"],
         ), patch("quantclass_sync._probe_downloadable_dates") as probe_mock:
             queue, skipped = qcs._resolve_requested_dates_for_plan(
                 plan=plan,
@@ -100,8 +100,34 @@ class UpdateCatchUpTests(unittest.TestCase):
             )
 
         self.assertFalse(skipped)
-        self.assertEqual(["2026-02-07", "2026-02-10", "2026-02-11"], queue)
+        self.assertEqual(["2026-02-07", "2026-02-08", "2026-02-09", "2026-02-10", "2026-02-11"], queue)
         probe_mock.assert_not_called()
+
+    def test_resolve_catchup_dates_calls_probe_when_latest_is_sparse_multi_dates(self) -> None:
+        self._write_local_timestamp("2026-02-06")
+        plan = self._plan()[0]
+        report = self._report()
+        ctx = self._ctx(dry_run=True)
+
+        with patch("quantclass_sync.get_latest_times", return_value=["2026-02-07", "2026-02-11"]), patch(
+            "quantclass_sync._probe_downloadable_dates",
+            return_value=["2026-02-08", "2026-02-09", "2026-02-10"],
+        ) as probe_mock:
+            queue, skipped = qcs._resolve_requested_dates_for_plan(
+                plan=plan,
+                command_ctx=ctx,
+                hid="hid",
+                headers={"api-key": "k"},
+                requested_date_time="",
+                force_update=False,
+                report=report,
+                t_product_start=time.time(),
+                catch_up_to_latest=True,
+            )
+
+        self.assertFalse(skipped)
+        self.assertEqual(["2026-02-07", "2026-02-08", "2026-02-09", "2026-02-10", "2026-02-11"], queue)
+        probe_mock.assert_called_once()
 
     def test_resolve_catchup_dates_calls_probe_when_latest_only_one_date(self) -> None:
         self._write_local_timestamp("2026-02-06")
@@ -129,7 +155,7 @@ class UpdateCatchUpTests(unittest.TestCase):
         self.assertEqual(["2026-02-07", "2026-02-10", "2026-02-11"], queue)
         probe_mock.assert_called_once()
 
-    def test_large_gap_with_multi_latest_payload_does_not_probe_calendar_days(self) -> None:
+    def test_large_gap_with_sparse_multi_latest_payload_calls_probe(self) -> None:
         self._write_local_timestamp("2025-01-01")
         plan = self._plan()[0]
         report = self._report()
@@ -137,7 +163,8 @@ class UpdateCatchUpTests(unittest.TestCase):
         latest_payload = ["2025-12-01", "2025-12-15", "2025-12-31"]
 
         with patch("quantclass_sync.get_latest_times", return_value=latest_payload), patch(
-            "quantclass_sync._probe_downloadable_dates"
+            "quantclass_sync._probe_downloadable_dates",
+            return_value=["2025-12-02", "2025-12-16", "2025-12-30"],
         ) as probe_mock:
             queue, skipped = qcs._resolve_requested_dates_for_plan(
                 plan=plan,
@@ -152,8 +179,8 @@ class UpdateCatchUpTests(unittest.TestCase):
             )
 
         self.assertFalse(skipped)
-        self.assertEqual(latest_payload, queue)
-        probe_mock.assert_not_called()
+        self.assertEqual(["2025-12-01", "2025-12-02", "2025-12-15", "2025-12-16", "2025-12-30", "2025-12-31"], queue)
+        probe_mock.assert_called_once()
 
     def test_execute_plans_catchup_stops_on_first_hard_failure(self) -> None:
         self._write_local_timestamp("2026-02-06")
