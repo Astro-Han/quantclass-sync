@@ -26,6 +26,8 @@ TIMESTAMP_FILE_NAME = "timestamp.txt"
 CSV_ENCODINGS = ("gbk", "utf-8-sig", "utf-8")
 TAIL_READ_MAX_LINES = 4096
 TAIL_READ_MAX_BYTES = 8 * 1024 * 1024
+# pivot 列更新后触发去碎片的阈值（0 表示关闭）。
+PIVOT_DEFRAG_THRESHOLD = 32
 
 # 与历史预处理语义对齐的特殊映射：spot -> swap 别名。
 SPECIAL_SPOT_TO_SWAP_ALIAS = {
@@ -559,26 +561,61 @@ def _patch_market_pivot(
 ) -> Dict[str, pd.DataFrame]:
     """按受影响 symbol 对 pivot 做局部 patch，避免每次全量 concat。"""
 
+    if not changed_symbols and not removed_symbols:
+        return pivot_map
+
     field_pairs = PIVOT_FIELDS[market_type]
     result: Dict[str, pd.DataFrame] = dict(pivot_map)
+
+    # 预构建索引缓存，避免每个字段重复 set_index。
+    indexed_frames: Dict[str, pd.DataFrame] = {}
+    for symbol in sorted(changed_symbols):
+        frame = data_dict.get(symbol)
+        if frame is None or frame.empty or "candle_begin_time" not in frame.columns:
+            continue
+        indexed_frames[symbol] = frame.set_index("candle_begin_time")
+
     for out_name, source_col in field_pairs:
         pivot = result.get(out_name)
         if not isinstance(pivot, pd.DataFrame):
             pivot = pd.DataFrame()
-        if removed_symbols:
-            to_drop = [symbol for symbol in removed_symbols if symbol in pivot.columns]
-            if to_drop:
-                pivot = pivot.drop(columns=to_drop, errors="ignore")
 
-        for symbol in sorted(changed_symbols):
-            frame = data_dict.get(symbol)
-            if frame is None or frame.empty:
+        changed_series_list: List[pd.Series] = []
+        for symbol, indexed in indexed_frames.items():
+            if source_col not in indexed.columns:
                 continue
-            series = frame.set_index("candle_begin_time")[source_col]
+            series = indexed[source_col]
             series.name = symbol
-            pivot[symbol] = series
+            changed_series_list.append(series)
 
-        result[out_name] = pivot.sort_index()
+        changed_df = pd.concat(changed_series_list, axis=1, sort=True) if changed_series_list else pd.DataFrame()
+        # 兼容旧逻辑：若基线已有索引，列更新只按既有索引对齐，不做索引扩展。
+        if not changed_df.empty and len(pivot.index) > 0:
+            changed_df = changed_df.reindex(pivot.index)
+        overlap_cols = set(changed_df.columns.tolist())
+        drop_cols = set(removed_symbols) | overlap_cols
+
+        if drop_cols:
+            drop_targets = [col for col in pivot.columns if col in drop_cols]
+            if drop_targets:
+                pivot_base = pivot.drop(columns=drop_targets, errors="ignore")
+            else:
+                pivot_base = pivot
+        else:
+            pivot_base = pivot
+
+        if changed_df.empty:
+            pivot_new = pivot_base
+            changed_col_count = 0
+        else:
+            pivot_new = pd.concat([pivot_base, changed_df], axis=1, sort=True)
+            changed_col_count = changed_df.shape[1]
+
+        pivot_new = pivot_new.sort_index()
+        if PIVOT_DEFRAG_THRESHOLD > 0 and changed_col_count >= PIVOT_DEFRAG_THRESHOLD:
+            pivot_new = pivot_new.copy()
+        result[out_name] = pivot_new
+
     return result
 
 

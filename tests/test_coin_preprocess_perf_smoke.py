@@ -1,10 +1,12 @@
 import tempfile
 import unittest
+import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+from pandas.errors import PerformanceWarning
 
 from coin_preprocess_builtin import (
     OUTPUT_PIVOT_SPOT,
@@ -14,6 +16,7 @@ from coin_preprocess_builtin import (
     PREPROCESS_PRODUCT,
     SPOT_PRODUCT,
     SWAP_PRODUCT,
+    _patch_market_pivot,
     _run_incremental_patch,
     run_coin_preprocess_builtin,
 )
@@ -77,6 +80,41 @@ class CoinPreprocessPerfSmokeTests(unittest.TestCase):
         rebuild_mock.assert_not_called()
         self.assertEqual("incremental_patch", summary.mode)
         self.assertEqual(0, summary.changed_symbols)
+
+    def test_patch_market_pivot_does_not_emit_performance_warning(self) -> None:
+        timestamps = pd.to_datetime(["2026-02-09 00:00:00", "2026-02-09 01:00:00"])
+        changed_symbols = {f"SYM{i:03d}-USDT" for i in range(140)}
+
+        data_dict = {}
+        for idx, symbol in enumerate(sorted(changed_symbols)):
+            base = float(idx + 1)
+            data_dict[symbol] = pd.DataFrame(
+                {
+                    "candle_begin_time": timestamps,
+                    "open": [base, base + 0.1],
+                    "close": [base + 0.2, base + 0.3],
+                    "avg_price_1m": [base + 0.4, base + 0.5],
+                }
+            )
+
+        pivot_map = {
+            "open": pd.DataFrame(index=timestamps),
+            "close": pd.DataFrame(index=timestamps),
+            "vwap1m": pd.DataFrame(index=timestamps),
+        }
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _patch_market_pivot(
+                pivot_map=pivot_map,
+                data_dict=data_dict,
+                market_type="spot",
+                changed_symbols=changed_symbols,
+                removed_symbols=set(),
+            )
+
+        perf_warnings = [item for item in caught if issubclass(item.category, PerformanceWarning)]
+        self.assertEqual([], perf_warnings)
 
 
 if __name__ == "__main__":

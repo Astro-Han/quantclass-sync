@@ -1,9 +1,13 @@
 # QuantClass 数据同步工具（setup + update 傻瓜版）
 
-当前版本：`v0.7.0`
+当前版本：`v0.7.1`
 
 ## Changelog / 更新记录：
 
+* **v0.7.1**
+  * 修复币圈增量预处理中的 `PerformanceWarning`：pivot patch 从逐列写入改为批量拼接，避免 DataFrame 内存碎片化。
+  * 新增性能回归测试，覆盖“多 symbol 变更场景下不再触发 `PerformanceWarning`”。
+  * 保持 `.pkl` 产物结构与字段语义兼容，同时优化 `_patch_market_pivot` 执行性能。
 * **v0.7.0**
   * 币圈预处理提速：改为“无 sidecar 增量 patch”主路径，仅在 spot/swap 有有效增量时执行。
   * 预处理触发源去掉 `coin-cap`，避免无关产品更新导致重计算。

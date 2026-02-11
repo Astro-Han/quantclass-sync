@@ -18,6 +18,7 @@ from coin_preprocess_builtin import (
     SPOT_PRODUCT,
     SWAP_PRODUCT,
     TIMESTAMP_FILE_NAME,
+    _patch_market_pivot,
     _run_incremental_patch,
     run_coin_preprocess_builtin,
 )
@@ -273,6 +274,105 @@ class CoinPreprocessBuiltinTests(unittest.TestCase):
 
         current_spot_payload = pd.read_pickle(output_dir / OUTPUT_SPOT_DICT)
         self.assertEqual(old_spot_payload, current_spot_payload)
+
+    def test_patch_market_pivot_keeps_legacy_semantics_with_removed_and_changed(self) -> None:
+        def legacy_patch(
+            pivot_map: dict,
+            data_dict: dict,
+            changed_symbols: set,
+            removed_symbols: set,
+        ) -> dict:
+            result = dict(pivot_map)
+            for out_name, source_col in (("open", "open"), ("close", "close"), ("vwap1m", "avg_price_1m")):
+                pivot = result.get(out_name)
+                if not isinstance(pivot, pd.DataFrame):
+                    pivot = pd.DataFrame()
+                if removed_symbols:
+                    to_drop = [symbol for symbol in removed_symbols if symbol in pivot.columns]
+                    if to_drop:
+                        pivot = pivot.drop(columns=to_drop, errors="ignore")
+
+                for symbol in sorted(changed_symbols):
+                    frame = data_dict.get(symbol)
+                    if frame is None or frame.empty:
+                        continue
+                    series = frame.set_index("candle_begin_time")[source_col]
+                    series.name = symbol
+                    pivot[symbol] = series
+
+                result[out_name] = pivot.sort_index()
+            return result
+
+        ts_base = pd.to_datetime(["2026-02-09 00:00:00", "2026-02-09 01:00:00"])
+        ts_new = pd.to_datetime(["2026-02-09 01:00:00", "2026-02-09 02:00:00"])
+
+        pivot_map = {
+            "open": pd.DataFrame(
+                {
+                    "AAA-USDT": [1.0, 1.1],
+                    "BBB-USDT": [2.0, 2.1],
+                    "REMOVED-USDT": [9.0, 9.1],
+                },
+                index=ts_base,
+            ),
+            "close": pd.DataFrame(
+                {
+                    "AAA-USDT": [1.5, 1.6],
+                    "BBB-USDT": [2.5, 2.6],
+                    "REMOVED-USDT": [9.5, 9.6],
+                },
+                index=ts_base,
+            ),
+            "vwap1m": pd.DataFrame(
+                {
+                    "AAA-USDT": [1.3, 1.4],
+                    "BBB-USDT": [2.3, 2.4],
+                    "REMOVED-USDT": [9.3, 9.4],
+                },
+                index=ts_base,
+            ),
+        }
+
+        data_dict = {
+            "BBB-USDT": pd.DataFrame(
+                {
+                    "candle_begin_time": ts_new,
+                    "open": [3.0, 3.1],
+                    "close": [3.5, 3.6],
+                    "avg_price_1m": [3.3, 3.4],
+                }
+            ),
+            "CCC-USDT": pd.DataFrame(
+                {
+                    "candle_begin_time": ts_new,
+                    "open": [4.0, 4.1],
+                    "close": [4.5, 4.6],
+                    "avg_price_1m": [4.3, 4.4],
+                }
+            ),
+            "EMPTY-USDT": pd.DataFrame(),
+        }
+
+        changed_symbols = {"BBB-USDT", "CCC-USDT", "EMPTY-USDT"}
+        removed_symbols = {"REMOVED-USDT", "MISS-USDT"}
+
+        expected = legacy_patch(
+            pivot_map={key: value.copy() for key, value in pivot_map.items()},
+            data_dict=data_dict,
+            changed_symbols=changed_symbols,
+            removed_symbols=removed_symbols,
+        )
+
+        actual = _patch_market_pivot(
+            pivot_map={key: value.copy() for key, value in pivot_map.items()},
+            data_dict=data_dict,
+            market_type="spot",
+            changed_symbols=changed_symbols,
+            removed_symbols=removed_symbols,
+        )
+
+        for key in ("open", "close", "vwap1m"):
+            pd.testing.assert_frame_equal(expected[key], actual[key], check_like=False)
 
     def test_atomic_commit_rolls_back_when_replace_fails(self) -> None:
         self._prepare_basic_dual_side()
