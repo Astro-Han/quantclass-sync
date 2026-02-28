@@ -16,11 +16,12 @@ class UpdateCatchUpTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def _ctx(self, dry_run: bool = False) -> qcs.CommandContext:
+    def _ctx(self, dry_run: bool = False, stop_on_error: bool = False) -> qcs.CommandContext:
         return qcs.CommandContext(
             run_id="test-catchup",
             data_root=self.root,
             dry_run=dry_run,
+            stop_on_error=stop_on_error,
         )
 
     def _report(self) -> qcs.RunReport:
@@ -229,6 +230,111 @@ class UpdateCatchUpTests(unittest.TestCase):
         self.assertEqual(["ok", "ok", "error"], [item.status for item in report.products])
         ts_text = (self.root / self.product / qcs.TIMESTAMP_FILE_NAME).read_text(encoding="utf-8")
         self.assertTrue(ts_text.startswith("2026-02-08,"))
+
+    def test_execute_plans_catchup_skips_no_data_date_and_continues(self) -> None:
+        self._write_local_timestamp("2026-02-06")
+        report = self._report()
+        ctx = self._ctx(dry_run=False)
+        plans = self._plan()
+        conn = qcs.connect_status_db(self.root)
+
+        executed_dates: list[str] = []
+
+        def fake_process_product(
+            plan: qcs.ProductPlan,
+            date_time: str | None,
+            api_base: str,
+            hid: str,
+            headers: dict[str, str],
+            data_root: Path,
+            work_dir: Path,
+            dry_run: bool,
+        ):
+            date = date_time or ""
+            executed_dates.append(date)
+            if date == "2026-02-09":
+                raise qcs.ProductSyncError("simulated 404 no data", qcs.REASON_NO_DATA_FOR_DATE)
+            return plan.name, date, qcs.SyncStats(updated_files=1), "/tmp/src", qcs.REASON_OK
+
+        try:
+            with patch("quantclass_sync.build_headers_or_raise", return_value=({"api-key": "k"}, "hid")), patch(
+                "quantclass_sync._resolve_requested_dates_for_plan",
+                return_value=(["2026-02-07", "2026-02-09", "2026-02-10"], False),
+            ), patch("quantclass_sync.process_product", side_effect=fake_process_product):
+                _total, has_error, _started_at = qcs._execute_plans(
+                    plans=plans,
+                    command_ctx=ctx,
+                    report=report,
+                    requested_date_time="",
+                    conn=conn,
+                    force_update=False,
+                    catch_up_to_latest=True,
+                )
+        finally:
+            conn.close()
+
+        self.assertFalse(has_error)
+        self.assertEqual(["2026-02-07", "2026-02-09", "2026-02-10"], executed_dates)
+        self.assertEqual(["ok", "skipped", "ok"], [item.status for item in report.products])
+        self.assertEqual(qcs.REASON_NO_DATA_FOR_DATE, report.products[1].reason_code)
+        ts_text = (self.root / self.product / qcs.TIMESTAMP_FILE_NAME).read_text(encoding="utf-8")
+        self.assertTrue(ts_text.startswith("2026-02-10,"))
+
+    def test_execute_plans_stop_on_error_stops_all_products(self) -> None:
+        self._write_local_timestamp("2026-02-06")
+        report = self._report()
+        ctx = self._ctx(dry_run=True, stop_on_error=True)
+        plans = [
+            qcs.ProductPlan(name="stock-trading-data", strategy=qcs.STRATEGY_MERGE_KNOWN),
+            qcs.ProductPlan(name="stock-main-index-data", strategy=qcs.STRATEGY_MERGE_KNOWN),
+        ]
+        called_products: list[str] = []
+
+        def fake_resolve_requested_dates_for_plan(
+            plan: qcs.ProductPlan,
+            command_ctx: qcs.CommandContext,
+            hid: str,
+            headers: dict[str, str],
+            requested_date_time: str,
+            force_update: bool,
+            report: qcs.RunReport,
+            t_product_start: float,
+            catch_up_to_latest: bool = False,
+        ) -> tuple[list[str], bool]:
+            return (["2026-02-09"], False)
+
+        def fake_process_product(
+            plan: qcs.ProductPlan,
+            date_time: str | None,
+            api_base: str,
+            hid: str,
+            headers: dict[str, str],
+            data_root: Path,
+            work_dir: Path,
+            dry_run: bool,
+        ):
+            called_products.append(plan.name)
+            if plan.name == "stock-trading-data":
+                raise qcs.ProductSyncError("simulated merge failure", qcs.REASON_MERGE_ERROR)
+            return plan.name, date_time or "", qcs.SyncStats(updated_files=1), "/tmp/src", qcs.REASON_OK
+
+        with patch("quantclass_sync.build_headers_or_raise", return_value=({"api-key": "k"}, "hid")), patch(
+            "quantclass_sync._resolve_requested_dates_for_plan",
+            side_effect=fake_resolve_requested_dates_for_plan,
+        ), patch("quantclass_sync.process_product", side_effect=fake_process_product):
+            _total, has_error, _started_at = qcs._execute_plans(
+                plans=plans,
+                command_ctx=ctx,
+                report=report,
+                requested_date_time="",
+                conn=None,
+                force_update=False,
+                catch_up_to_latest=False,
+            )
+
+        self.assertTrue(has_error)
+        self.assertEqual(["stock-trading-data"], called_products)
+        self.assertEqual(["error"], [item.status for item in report.products])
 
 
 if __name__ == "__main__":

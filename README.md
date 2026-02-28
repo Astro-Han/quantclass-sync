@@ -1,9 +1,21 @@
 # QuantClass 数据同步工具（setup + update 傻瓜版）
 
-当前版本：`v0.7.3`
+当前版本：`v0.7.5`
 
 ## Changelog / 更新记录：
 
+* **v0.7.5**
+  * 修复 `stock-notices-title` 排序一致性问题：纳入已知规则并启用稳定排序键（含并列字段）。
+  * 写入链路新增排序校验与自动修复统计，运行报告可直接看到 `sorted_checked/sorted_violation/sorted_auto_repaired`。
+  * 新增 `repair_sort` 命令，可批量扫描并修复历史 CSV 的排序异常（支持 `--dry-run` 演练）。
+  * 新增排序相关回归测试，覆盖“发现异常、自动修复、dry-run 不落盘”关键场景。
+* **v0.7.4**
+  * 修复下载错误语义：HTTP 404 不再显示“参数错误”，统一改为“资源不存在（该产品该日期无可下载数据）”。
+  * `FatalRequestError` 新增结构化字段 `status_code` 与 `request_url`，便于日志与排障定位。
+  * 新增 `reason_code=no_data_for_date`，下载阶段可明确区分“该日期无数据”与“网络/权限类错误”。
+  * 调整 `update` 回补执行流：回补模式遇到“无数据日”记为 `skipped` 并继续后续日期，不再整批提前停止。
+  * `stop-on-error` 语义收敛为显式开关：仅在传入 `--stop-on-error` 时才全局提前停止。
+  * 新增回归测试：覆盖 HTTP 404 映射、回补跳过无数据日、`stop-on-error` 全局停止行为。
 * **v0.7.3**
   * 修复 `update` 回补链路的 probe 触发策略：仅在 `latest` 候选日期无法完整覆盖缺口区间时才做逐日探测，降低 API 放大量。
   * 修复稀疏 `latest` 多日期场景下的漏补风险（例如 `2026-02-07,2026-02-11` 时可继续探测补齐中间日期）。

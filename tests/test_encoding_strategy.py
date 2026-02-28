@@ -54,7 +54,7 @@ class EncodingStrategyTests(unittest.TestCase):
         target = self.root / "sh000300.csv"
         self._write_csv_text(target, encoding="gb18030", with_bom=False)
 
-        result, added = qcs.sync_payload_to_target(
+        result, added, _audit = qcs.sync_payload_to_target(
             incoming=self._payload(encoding="utf-8-sig"),
             target=target,
             rule=self.rule,
@@ -69,7 +69,7 @@ class EncodingStrategyTests(unittest.TestCase):
         target = self.root / "sh000300.csv"
         self._write_csv_text(target, encoding="utf-8-sig", with_bom=True)
 
-        result, added = qcs.sync_payload_to_target(
+        result, added, _audit = qcs.sync_payload_to_target(
             incoming=self._payload(encoding="utf-8-sig"),
             target=target,
             rule=self.rule,
@@ -83,7 +83,7 @@ class EncodingStrategyTests(unittest.TestCase):
         target = self.root / "sh000300.csv"
         self._write_csv_text(target, encoding="utf-8-sig", with_bom=True)
 
-        result, added = qcs.sync_payload_to_target(
+        result, added, _audit = qcs.sync_payload_to_target(
             incoming=self._payload(encoding="utf-8"),
             target=target,
             rule=self.rule,
@@ -97,7 +97,7 @@ class EncodingStrategyTests(unittest.TestCase):
     def test_sync_created_file_uses_incoming_encoding(self) -> None:
         target = self.root / "new.csv"
 
-        result, added = qcs.sync_payload_to_target(
+        result, added, _audit = qcs.sync_payload_to_target(
             incoming=self._payload(encoding="utf-8-sig"),
             target=target,
             rule=self.rule,

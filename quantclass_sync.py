@@ -126,6 +126,7 @@ REASON_UNKNOWN_LOCAL_PRODUCT = "unknown_local_product"
 REASON_INVALID_EXPLICIT_PRODUCT = "invalid_explicit_product"
 REASON_NO_LOCAL_PRODUCTS = "no_local_products"
 REASON_NETWORK_ERROR = "network_error"
+REASON_NO_DATA_FOR_DATE = "no_data_for_date"
 REASON_EXTRACT_ERROR = "extract_error"
 REASON_MERGE_ERROR = "merge_error"
 REASON_MIRROR_FALLBACK = "mirror_fallback"
@@ -210,6 +211,11 @@ def log_debug(message: str, event: str = "DEBUG", **fields: object) -> None:
 class FatalRequestError(RuntimeError):
     """参数或权限问题，立即失败，不重试。"""
 
+    def __init__(self, message: str, status_code: Optional[int] = None, request_url: str = "") -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.request_url = request_url
+
 class ProductSyncError(RuntimeError):
     """单产品执行错误（携带 reason_code）。"""
 
@@ -246,6 +252,9 @@ class SyncStats:
     unchanged_files: int = 0
     skipped_files: int = 0
     rows_added: int = 0
+    sorted_checked_files: int = 0
+    sorted_violation_files: int = 0
+    sorted_auto_repaired_files: int = 0
 
     def merge(self, other: "SyncStats") -> None:
         self.created_files += other.created_files
@@ -253,6 +262,18 @@ class SyncStats:
         self.unchanged_files += other.unchanged_files
         self.skipped_files += other.skipped_files
         self.rows_added += other.rows_added
+        self.sorted_checked_files += other.sorted_checked_files
+        self.sorted_violation_files += other.sorted_violation_files
+        self.sorted_auto_repaired_files += other.sorted_auto_repaired_files
+
+
+@dataclass
+class SortAudit:
+    """单文件排序质量统计。"""
+
+    checked_files: int = 0
+    violation_files: int = 0
+    auto_repaired_files: int = 0
 
 @dataclass
 class DiscoveredProduct:
@@ -310,6 +331,9 @@ class RunReport:
     success_total: int = 0
     failed_total: int = 0
     skipped_total: int = 0
+    sorted_checked_files: int = 0
+    sorted_violation_files: int = 0
+    sorted_auto_repaired_files: int = 0
     products: List[ProductRunResult] = field(default_factory=list)
     events: List[RunEvent] = field(default_factory=list)
     summary: SyncStats = field(default_factory=SyncStats)
@@ -545,6 +569,14 @@ RULES: Dict[str, DatasetRule] = {
         has_note=True,
         key_cols=("指标名称", "日期"),
         sort_cols=("日期",),
+    ),
+    # 公告标题：按日期落地为日文件，入库时按 公告日期+股票代码+标题 保持稳定顺序
+    "stock-notices-title": DatasetRule(
+        name="stock-notices-title",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("公告日期", "股票代码", "公告标题"),
+        sort_cols=("公告日期", "股票代码", "公告标题"),
     ),
     # period_offset 也按“备注 + 表头 + 日期主键”处理
     "period_offset.csv": DatasetRule(
@@ -971,7 +1003,7 @@ def request_data(method: str, url: str, headers: Dict[str, str], **kwargs) -> re
     """
 
     status_messages = {
-        404: "参数错误",
+        404: "资源不存在（该产品该日期无可下载数据）",
         403: "无下载权限，请检查下载次数和 api-key",
         401: "超出当日下载次数",
         400: "下载时间超出限制",
@@ -998,7 +1030,7 @@ def request_data(method: str, url: str, headers: Dict[str, str], **kwargs) -> re
 
         message = status_messages.get(response.status_code, f"未知错误（HTTP {response.status_code}）")
         if response.status_code in {400, 401, 403, 404}:
-            raise FatalRequestError(message)
+            raise FatalRequestError(message, status_code=response.status_code, request_url=url.split("?")[0])
         if attempt >= max_attempts:
             raise RuntimeError(message)
         time.sleep(min(2 ** (attempt - 1), 8))
@@ -1454,6 +1486,46 @@ def sortable_value(value: str) -> Tuple[int, object]:
     except Exception:
         return (2, value)
 
+
+SORT_TIE_BREAKER_COLS: Dict[str, Tuple[str, ...]] = {
+    # 财务类补充稳定排序键，避免同日多条记录顺序抖动。
+    "stock-fin-data-xbx": ("stock_code", "statement_format", "抓取时间"),
+    "stock-fin-pre-fore-data-xbx": ("股票代码", "预告对应财报日期", "业绩预告类型"),
+}
+
+
+def resolve_sort_indices(header: Sequence[str], rule: DatasetRule) -> List[int]:
+    """根据规则解析可用排序列下标（含 tie-breaker）。"""
+
+    cols: List[str] = []
+    for col in rule.sort_cols:
+        if col in header and col not in cols:
+            cols.append(col)
+    for col in SORT_TIE_BREAKER_COLS.get(rule.name, ()):
+        if col in header and col not in cols:
+            cols.append(col)
+    return [header.index(col) for col in cols]
+
+
+def row_sort_key(row: Sequence[str], sort_indices: Sequence[int]) -> Tuple[Tuple[int, object], ...]:
+    """生成稳定排序键。"""
+
+    return tuple(sortable_value(row[idx] if idx < len(row) else "") for idx in sort_indices)
+
+
+def is_rows_sorted(rows: Sequence[Sequence[str]], sort_indices: Sequence[int]) -> bool:
+    """判断行数据是否按指定列单调非递减。"""
+
+    if not sort_indices:
+        return True
+    prev: Optional[Tuple[Tuple[int, object], ...]] = None
+    for row in rows:
+        current = row_sort_key(row, sort_indices)
+        if prev is not None and current < prev:
+            return False
+        prev = current
+    return True
+
 def merge_payload(existing: Optional[CsvPayload], incoming: CsvPayload, rule: DatasetRule) -> Tuple[CsvPayload, int]:
     """
     增量合并（只追加或覆盖变化部分，不重写全部历史）。
@@ -1494,9 +1566,9 @@ def merge_payload(existing: Optional[CsvPayload], incoming: CsvPayload, rule: Da
 
     rows = list(merged_map.values())
 
-    sort_indices = [target_header.index(col) for col in rule.sort_cols if col in target_header]
+    sort_indices = resolve_sort_indices(target_header, rule)
     if sort_indices:
-        rows.sort(key=lambda row: tuple(sortable_value(row[idx]) for idx in sort_indices))
+        rows.sort(key=lambda row: row_sort_key(row, sort_indices))
 
     note = None
     if rule.has_note:
@@ -1528,23 +1600,37 @@ def write_csv_payload(path: Path, payload: CsvPayload, rule: DatasetRule, dry_ru
         writer.writerow(payload.header)
         writer.writerows(payload.rows)
 
-def sync_payload_to_target(incoming: CsvPayload, target: Path, rule: DatasetRule, dry_run: bool) -> Tuple[str, int]:
+def sync_payload_to_target(incoming: CsvPayload, target: Path, rule: DatasetRule, dry_run: bool) -> Tuple[str, int, SortAudit]:
     """
     把已解析好的 CSV 同步到目标文件。
     返回：(状态, 新增行数)
     """
 
+    audit = SortAudit()
     if not incoming.header:
-        return "skipped", 0
+        return "skipped", 0, audit
 
     existing = read_csv_payload(target, preferred_encoding=incoming.encoding or rule.encoding) if target.exists() else None
     output_encoding = choose_output_encoding(existing=existing, incoming=incoming, rule=rule)
     merged, added_rows = merge_payload(existing, incoming, rule)
     merged.encoding = output_encoding
 
+    sort_indices = resolve_sort_indices(merged.header, rule)
+    if sort_indices:
+        audit.checked_files = 1
+        if not is_rows_sorted(merged.rows, sort_indices):
+            audit.violation_files = 1
+            merged.rows = sorted(merged.rows, key=lambda row: row_sort_key(row, sort_indices))
+            audit.auto_repaired_files = 1
+            log_info(
+                f"[{rule.name}] 检测到排序异常，已自动修复: {target}",
+                event="SYNC_OK",
+                repaired=True,
+            )
+
     if existing and merged.note == existing.note and merged.header == existing.header and merged.rows == existing.rows:
         if merged.encoding == existing.encoding:
-            return "unchanged", 0
+            return "unchanged", 0, audit
         log_debug(
             f"[{rule.name}] 内容未变化，但检测到编码漂移，触发重写: {target}",
             from_encoding=existing.encoding,
@@ -1553,10 +1639,10 @@ def sync_payload_to_target(incoming: CsvPayload, target: Path, rule: DatasetRule
 
     write_csv_payload(target, merged, rule, dry_run=dry_run)
     if existing:
-        return "updated", added_rows
-    return "created", len(merged.rows)
+        return "updated", added_rows, audit
+    return "created", len(merged.rows), audit
 
-def sync_csv_file(src: Path, target: Path, rule: DatasetRule, dry_run: bool) -> Tuple[str, int]:
+def sync_csv_file(src: Path, target: Path, rule: DatasetRule, dry_run: bool) -> Tuple[str, int, SortAudit]:
     """同步单个 CSV（读取 -> 合并 -> 写回）。"""
 
     incoming = read_csv_payload(src, preferred_encoding=rule.encoding)
@@ -1627,8 +1713,8 @@ def sync_daily_aggregate_file(src: Path, product: str, data_root: Path, dry_run:
             encoding=incoming.encoding,
             delimiter=incoming.delimiter,
         )
-        result, added_rows = sync_payload_to_target(incoming=payload, target=target, rule=rule, dry_run=dry_run)
-        apply_file_result(stats, result=result, added_rows=added_rows)
+        result, added_rows, sort_audit = sync_payload_to_target(incoming=payload, target=target, rule=rule, dry_run=dry_run)
+        apply_file_result(stats, result=result, added_rows=added_rows, sort_audit=sort_audit)
 
         if idx % max(PROGRESS_EVERY, 1) == 0 or idx == total_codes:
             log_info(
@@ -1657,8 +1743,13 @@ def sync_raw_file(src: Path, target: Path, dry_run: bool) -> str:
 
     return "updated" if existed_before else "created"
 
-def apply_file_result(stats: SyncStats, result: str, added_rows: int = 0) -> None:
+def apply_file_result(stats: SyncStats, result: str, added_rows: int = 0, sort_audit: Optional[SortAudit] = None) -> None:
     """把单文件结果累加到统计对象。"""
+
+    if sort_audit is not None:
+        stats.sorted_checked_files += sort_audit.checked_files
+        stats.sorted_violation_files += sort_audit.violation_files
+        stats.sorted_auto_repaired_files += sort_audit.auto_repaired_files
 
     if result == "created":
         stats.created_files += 1
@@ -1728,8 +1819,8 @@ def sync_known_product(product: str, extract_path: Path, data_root: Path, dry_ru
                 reason_code = REASON_MIRROR_FALLBACK
             else:
                 # 命中规则时做增量合并（可减少重复写入）。
-                result, added_rows = sync_csv_file(src=src, target=target, rule=rule, dry_run=dry_run)
-                apply_file_result(stats, result=result, added_rows=added_rows)
+                result, added_rows, sort_audit = sync_csv_file(src=src, target=target, rule=rule, dry_run=dry_run)
+                apply_file_result(stats, result=result, added_rows=added_rows, sort_audit=sort_audit)
 
         if idx % max(PROGRESS_EVERY, 1) == 0 or idx == total_files:
             log_info(
@@ -1783,13 +1874,13 @@ def sync_unknown_product(product: str, extract_path: Path, data_root: Path, dry_
                         key_cols=tuple(),
                         sort_cols=tuple(),
                     )
-                    result, added_rows = sync_payload_to_target(
+                    result, added_rows, sort_audit = sync_payload_to_target(
                         incoming=incoming,
                         target=target,
                         rule=auto_rule,
                         dry_run=dry_run,
                     )
-                    apply_file_result(stats, result=result, added_rows=added_rows)
+                    apply_file_result(stats, result=result, added_rows=added_rows, sort_audit=sort_audit)
                     did_unknown_header_merge = True
                     log_debug(f"[{product}] 命中轻量自动合并: {src_rel_path}")
                     if idx % max(PROGRESS_EVERY, 1) == 0 or idx == total_files:
@@ -1821,6 +1912,110 @@ def sync_unknown_product(product: str, extract_path: Path, data_root: Path, dry_
     if did_unknown_header_merge:
         return stats, REASON_UNKNOWN_HEADER_MERGE
     return stats, REASON_MIRROR_FALLBACK
+
+
+def write_csv_payload_atomic(path: Path, payload: CsvPayload, rule: DatasetRule, dry_run: bool) -> None:
+    """原子写回 CSV，避免排序修复中途失败导致文件损坏。"""
+
+    if dry_run:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.parent / f".{path.name}.tmp-sortfix-{os.getpid()}-{time.time_ns()}"
+    try:
+        write_csv_payload(tmp_path, payload, rule, dry_run=False)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+
+def sortable_products() -> List[str]:
+    """返回支持排序修复的产品列表（排除非目录型数据）。"""
+
+    return sorted([name for name, rule in RULES.items() if rule.sort_cols and "." not in name])
+
+
+def repair_sort_product_files(
+    product: str,
+    data_root: Path,
+    dry_run: bool = False,
+    strict: bool = False,
+) -> Tuple[SyncStats, int]:
+    """
+    对单产品做全量排序修复。
+
+    返回：
+    - stats：修复统计
+    - error_count：处理失败的文件数
+    """
+
+    rule = RULES.get(product)
+    if rule is None:
+        raise RuntimeError(f"产品 {product} 未配置排序规则，无法执行 repair_sort。")
+
+    product_root = data_root / product
+    if not product_root.exists():
+        return SyncStats(), 0
+
+    files = sorted([p for p in product_root.rglob("*") if p.is_file() and p.suffix.lower() == ".csv"])
+    stats = SyncStats()
+    error_count = 0
+
+    for idx, path in enumerate(files, start=1):
+        try:
+            payload = read_csv_payload(path, preferred_encoding=rule.encoding)
+            if not payload.header or not payload.rows:
+                stats.unchanged_files += 1
+                continue
+
+            sort_indices = resolve_sort_indices(payload.header, rule)
+            if not sort_indices:
+                stats.skipped_files += 1
+                continue
+
+            stats.sorted_checked_files += 1
+            if is_rows_sorted(payload.rows, sort_indices):
+                stats.unchanged_files += 1
+                continue
+
+            stats.sorted_violation_files += 1
+            stats.sorted_auto_repaired_files += 1
+            sorted_rows = sorted(payload.rows, key=lambda row: row_sort_key(row, sort_indices))
+            repaired_payload = CsvPayload(
+                note=payload.note,
+                header=list(payload.header),
+                rows=sorted_rows,
+                encoding=payload.encoding,
+                delimiter=payload.delimiter,
+            )
+            write_csv_payload_atomic(path=path, payload=repaired_payload, rule=rule, dry_run=dry_run)
+            stats.updated_files += 1
+        except Exception as exc:
+            error_count += 1
+            stats.skipped_files += 1
+            log_error(f"[{product}] 排序修复失败: {path} | err={exc}", event="SORT_REPAIR")
+            if strict:
+                raise RuntimeError(f"{product} 排序修复失败（严格模式）：{path}") from exc
+        finally:
+            if idx % max(PROGRESS_EVERY, 1) == 0 or idx == len(files):
+                log_info(
+                    f"[{product}] 排序修复进度 {idx}/{len(files)}",
+                    event="SORT_REPAIR",
+                    repaired=stats.updated_files,
+                    unchanged=stats.unchanged_files,
+                    skipped=stats.skipped_files,
+                    sorted_checked=stats.sorted_checked_files,
+                    sorted_violation=stats.sorted_violation_files,
+                    sorted_auto_repaired=stats.sorted_auto_repaired_files,
+                    errors=error_count,
+                    dry_run=dry_run,
+                )
+
+    return stats, error_count
+
 
 def sync_from_extract(
     plan: ProductPlan,
@@ -1973,6 +2168,22 @@ def _download_and_prepare_extract(
             save_file(file_url=file_url, file_path=download_path, headers=headers)
         log_info(f"[{product}] 下载完成: {download_path}", event="DOWNLOAD_OK")
         return download_path, extract_path
+    except FatalRequestError as exc:
+        if exc.status_code == 404:
+            raise ProductSyncError(
+                message=(
+                    f"产品 {product} 下载失败；该日期无可下载数据（HTTP 404）；"
+                    f"建议：确认产品与日期是否匹配。原始错误：{exc}"
+                ),
+                reason_code=REASON_NO_DATA_FOR_DATE,
+            ) from exc
+        raise ProductSyncError(
+            message=(
+                f"产品 {product} 下载失败；可能原因：网络波动、下载额度限制或链接失效；"
+                f"建议：稍后重试并确认下载权限。原始错误：{exc}"
+            ),
+            reason_code=REASON_NETWORK_ERROR,
+        ) from exc
     except Exception as exc:
         raise ProductSyncError(
             message=(
@@ -2329,6 +2540,29 @@ def _append_error_result(
     _append_run_event(report, plan.name, "SYNC", "error", reason_code, error_message)
 
 
+def _append_skipped_result(
+    report: RunReport,
+    plan: ProductPlan,
+    reason_code: str,
+    requested_date_time: str,
+    elapsed: float,
+    detail: str,
+) -> None:
+    report.products.append(
+        ProductRunResult(
+            product=plan.name,
+            status="skipped",
+            strategy=plan.strategy,
+            reason_code=reason_code,
+            date_time=requested_date_time,
+            mode="network",
+            elapsed_seconds=elapsed,
+            error=detail,
+        )
+    )
+    _append_run_event(report, plan.name, "SYNC", "skipped", reason_code, detail)
+
+
 def _record_discovery_skips(report: RunReport, unknown_local: Sequence[str], invalid_explicit: Sequence[str]) -> None:
     """把“本地未知目录/无效显式产品”写入报告。"""
 
@@ -2465,7 +2699,7 @@ def _probe_downloadable_dates(
     回退探测缺口日期。
 
     规则：
-    - 404/参数错误视为“该日无数据”，继续探测下一天；
+    - 404 视为“该日无数据”，继续探测下一天；
     - 其它错误视为硬失败，抛出异常交给严格模式处理。
     """
 
@@ -2480,7 +2714,8 @@ def _probe_downloadable_dates(
             get_download_link(api_base=api_base, product=product, date_time=day, hid=hid, headers=headers)
             found.append(day)
         except FatalRequestError as exc:
-            if str(exc).strip() == "参数错误":
+            message = str(exc).strip()
+            if exc.status_code == 404 or message in {"参数错误", "资源不存在（该产品该日期无可下载数据）"}:
                 log_debug(f"[{product}] 探测到无数据日，已跳过: {day}", event="PROBE_SKIP")
                 continue
             raise
@@ -2969,18 +3204,25 @@ def _execute_plans(
                 message = str(exc)
                 debug_trace = traceback.format_exc()
 
-            # D. 失败路径：严格模式下直接终止该产品后续日期。
-            has_error = True
             elapsed = time.time() - t_product_start
+            # D. 回补模式：无数据日记录为 skipped，继续下一个日期。
+            if catch_up_to_latest and reason_code == REASON_NO_DATA_FOR_DATE:
+                _append_skipped_result(report, plan, reason_code, requested_date_for_plan, elapsed, message)
+                log_info(f"[{plan.name}] 无数据日已跳过: {message}", event="SYNC_SKIP", reason_code=reason_code)
+                if command_ctx.verbose and debug_trace:
+                    log_debug(debug_trace, event="DEBUG")
+                continue
+
+            # E. 失败路径：记录错误；若开启 stop-on-error 则终止整次任务。
+            has_error = True
             _append_error_result(report, plan, reason_code, requested_date_for_plan, elapsed, message)
             log_error(f"[{plan.name}] 处理失败: {message}", event="SYNC_FAIL", reason_code=reason_code)
             if command_ctx.verbose and debug_trace:
                 log_debug(debug_trace, event="DEBUG")
-            # 回补默认严格模式：命中硬失败后立即终止整次任务。
-            if catch_up_to_latest or command_ctx.stop_on_error:
+            if command_ctx.stop_on_error:
                 log_error("已开启 stop-on-error，任务提前停止。", event="RUN_SUMMARY")
                 return total, has_error, t_run_start
-            # 非严格模式：仅终止当前产品后续日期，继续下一个产品。
+            # 未开启 stop-on-error：仅终止当前产品后续日期，继续下一个产品。
             break
 
     return total, has_error, t_run_start
@@ -3001,6 +3243,9 @@ def _finalize_and_write_report(
     report.success_total = sum(1 for x in report.products if x.status == "ok")
     report.failed_total = sum(1 for x in report.products if x.status == "error")
     report.skipped_total = sum(1 for x in report.products if x.status == "skipped")
+    report.sorted_checked_files = total.sorted_checked_files
+    report.sorted_violation_files = total.sorted_violation_files
+    report.sorted_auto_repaired_files = total.sorted_auto_repaired_files
 
     log_info(
         "本次运行汇总完成。",
@@ -3015,6 +3260,9 @@ def _finalize_and_write_report(
         unchanged=total.unchanged_files,
         skipped_files=total.skipped_files,
         rows_added=total.rows_added,
+        sorted_checked=total.sorted_checked_files,
+        sorted_violation=total.sorted_violation_files,
+        sorted_auto_repaired=total.sorted_auto_repaired_files,
         duration_seconds=round(report.duration_seconds, 2),
     )
 
@@ -3610,6 +3858,102 @@ def cmd_update(
         fallback_products=fallback_products,
     )
     log_info("update 执行完成。", event="CMD_DONE", exit_code=exit_code)
+    if exit_code != 0:
+        raise typer.Exit(code=exit_code)
+
+
+@app.command("repair_sort")
+@command_guard("repair_sort")
+def cmd_repair_sort(
+    ctx: typer.Context,
+    products: List[str] = typer.Option([], "--products", help="目标产品（可重复传参，也支持逗号分隔）。"),
+    strict: bool = typer.Option(False, "--strict", help="严格模式：遇到文件错误立即失败。"),
+) -> None:
+    """
+    排序修复命令（对历史 CSV 文件做全量排序治理）。
+    """
+
+    command_ctx = _ctx(ctx)
+    data_root, secrets_file, _user_config, data_root_source, secrets_source = _resolve_command_paths(command_ctx)
+    command_ctx = _build_command_ctx_with_overrides(command_ctx, data_root, secrets_file)
+    ctx.obj = command_ctx
+    log_debug(
+        "repair_sort 运行来源已解析。",
+        event="PATHS",
+        data_root_source=data_root_source,
+        secrets_source=secrets_source,
+    )
+    ensure_data_root_ready(command_ctx.data_root, create_if_missing=False)
+
+    requested_products = split_products(products)
+    eligible_products = sortable_products()
+    selected_products = requested_products or eligible_products
+    invalid_products = [x for x in selected_products if x not in eligible_products]
+    if invalid_products:
+        raise RuntimeError(f"以下产品不支持 repair_sort：{', '.join(sorted(set(invalid_products)))}")
+
+    report = _new_report(command_ctx.run_id, mode="maintenance")
+    report_path = resolve_report_path(command_ctx, "repair_sort")
+    report.discovered_total = len(eligible_products)
+    report.planned_total = len(selected_products)
+    t_run_start = time.time()
+    total = SyncStats()
+    has_error = False
+
+    if not selected_products:
+        log_info("无可修复产品，repair_sort 结束。", event="SORT_REPAIR")
+        exit_code = _finalize_and_write_report(report, total, has_error, t_run_start, report_path)
+        if exit_code != 0:
+            raise typer.Exit(code=exit_code)
+        return
+
+    log_info(
+        "开始执行 repair_sort。",
+        event="CMD_START",
+        products=len(selected_products),
+        dry_run=command_ctx.dry_run,
+        strict=strict,
+    )
+
+    for product in selected_products:
+        t_product_start = time.time()
+        plan = ProductPlan(name=product, strategy="repair_sort")
+        try:
+            stats, error_count = repair_sort_product_files(
+                product=product,
+                data_root=command_ctx.data_root,
+                dry_run=command_ctx.dry_run,
+                strict=strict,
+            )
+            elapsed = time.time() - t_product_start
+            total.merge(stats)
+            if error_count > 0:
+                has_error = True
+                message = f"产品 {product} 排序修复存在文件错误（count={error_count}）。"
+                _append_error_result(report, plan, REASON_MERGE_ERROR, "", elapsed, message)
+                if strict:
+                    break
+                continue
+
+            _append_success_result(
+                report=report,
+                plan=plan,
+                product=product,
+                actual_time="",
+                stats=stats,
+                source_path=str(command_ctx.data_root / product),
+                reason_code=REASON_OK,
+                elapsed=elapsed,
+            )
+        except Exception as exc:
+            has_error = True
+            elapsed = time.time() - t_product_start
+            _append_error_result(report, plan, REASON_MERGE_ERROR, "", elapsed, str(exc))
+            if strict:
+                break
+
+    exit_code = _finalize_and_write_report(report, total, has_error, t_run_start, report_path)
+    log_info("repair_sort 执行完成。", event="CMD_DONE", exit_code=exit_code)
     if exit_code != 0:
         raise typer.Exit(code=exit_code)
 
