@@ -102,17 +102,17 @@ run_update_with_settings_impl = _orchestrator.run_update_with_settings
 _request_data_impl = _http.request_data
 
 
-def _sync_http_runtime() -> None:
-    """把 quantclass_sync 命名空间里的 patch 同步到 HTTP 模块。"""
+def _bind_http_runtime() -> None:
+    """把兼容层里可 patch 的底层依赖同步到 HTTP 模块。"""
 
     _http.requests = requests
     _http.time = time
 
 
-def _sync_orchestrator_runtime(*, include_probe_wrapper: bool = True) -> None:
-    """把 quantclass_sync 命名空间里的 patch 同步到编排模块。"""
+def _bind_orchestrator_runtime(*, probe_callable) -> None:
+    """把兼容层导出函数绑定到编排模块，保持旧版 patch 语义。"""
 
-    _sync_http_runtime()
+    _bind_http_runtime()
     _orchestrator.get_latest_times = get_latest_times
     _orchestrator.get_latest_time = get_latest_time
     _orchestrator.get_download_link = get_download_link
@@ -124,16 +124,15 @@ def _sync_orchestrator_runtime(*, include_probe_wrapper: bool = True) -> None:
     _orchestrator._run_builtin_coin_preprocess = _run_builtin_coin_preprocess
     _orchestrator._resolve_requested_dates_for_plan = _resolve_requested_dates_for_plan
     _orchestrator._execute_plans = _execute_plans
-    _orchestrator.ensure_data_root_ready = _cli.ensure_data_root_ready
+    _orchestrator._probe_downloadable_dates = probe_callable
     _reporting.write_run_report = write_run_report
-    if include_probe_wrapper:
-        _orchestrator._probe_downloadable_dates = _probe_downloadable_dates
 
 
-def _sync_cli_runtime() -> None:
-    """把 quantclass_sync 命名空间里的 patch 同步到 CLI 模块。"""
+def _bind_cli_runtime() -> None:
+    """把兼容层导出函数绑定到 CLI 模块。"""
 
-    _sync_orchestrator_runtime()
+    # CLI 内部会调用编排层能力，先完成编排依赖绑定。
+    _bind_orchestrator_runtime(probe_callable=_probe_downloadable_dates)
     _cli.resolve_credentials_for_update = resolve_credentials_for_update
     _cli.run_update_with_settings = run_update_with_settings
     _cli.resolve_report_path = resolve_report_path
@@ -151,37 +150,38 @@ def _sync_cli_runtime() -> None:
 
 # --- 兼容层转发函数（保留旧调用点和 patch 语义） ---
 def request_data(*args, **kwargs):
-    _sync_http_runtime()
+    _bind_http_runtime()
     return _request_data_impl(*args, **kwargs)
 
 
 def _probe_downloadable_dates(*args, **kwargs):
-    _sync_orchestrator_runtime(include_probe_wrapper=False)
+    # 避免把 _probe_downloadable_dates 重新绑定到自己，直接绑定实现函数。
+    _bind_orchestrator_runtime(probe_callable=_probe_downloadable_dates_impl)
     return _probe_downloadable_dates_impl(*args, **kwargs)
 
 
 def _resolve_requested_dates_for_plan(*args, **kwargs):
-    _sync_orchestrator_runtime()
+    _bind_orchestrator_runtime(probe_callable=_probe_downloadable_dates)
     return _resolve_requested_dates_for_plan_impl(*args, **kwargs)
 
 
 def _execute_plans(*args, **kwargs):
-    _sync_orchestrator_runtime()
+    _bind_orchestrator_runtime(probe_callable=_probe_downloadable_dates)
     return _execute_plans_impl(*args, **kwargs)
 
 
 def _maybe_run_coin_preprocess(*args, **kwargs):
-    _sync_orchestrator_runtime()
+    _bind_orchestrator_runtime(probe_callable=_probe_downloadable_dates)
     return _maybe_run_coin_preprocess_impl(*args, **kwargs)
 
 
 def run_update_with_settings(*args, **kwargs):
-    _sync_orchestrator_runtime()
+    _bind_orchestrator_runtime(probe_callable=_probe_downloadable_dates)
     return run_update_with_settings_impl(*args, **kwargs)
 
 
 def global_options(*args, **kwargs):
-    _sync_cli_runtime()
+    _bind_cli_runtime()
     result = _global_options_impl(*args, **kwargs)
     # CLI 层会重设 LOGGER，这里回写到 models，保证全局日志函数看到最新实例。
     _models.LOGGER = _cli.LOGGER
@@ -190,32 +190,32 @@ def global_options(*args, **kwargs):
 
 
 def cmd_setup(*args, **kwargs):
-    _sync_cli_runtime()
+    _bind_cli_runtime()
     return _cmd_setup_impl(*args, **kwargs)
 
 
 def cmd_update(*args, **kwargs):
-    _sync_cli_runtime()
+    _bind_cli_runtime()
     return _cmd_update_impl(*args, **kwargs)
 
 
 def cmd_repair_sort(*args, **kwargs):
-    _sync_cli_runtime()
+    _bind_cli_runtime()
     return _cmd_repair_sort_impl(*args, **kwargs)
 
 
 def cmd_init(*args, **kwargs):
-    _sync_cli_runtime()
+    _bind_cli_runtime()
     return _cmd_init_impl(*args, **kwargs)
 
 
 def cmd_one_data(*args, **kwargs):
-    _sync_cli_runtime()
+    _bind_cli_runtime()
     return _cmd_one_data_impl(*args, **kwargs)
 
 
 def cmd_all_data(*args, **kwargs):
-    _sync_cli_runtime()
+    _bind_cli_runtime()
     return _cmd_all_data_impl(*args, **kwargs)
 
 

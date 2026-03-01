@@ -26,6 +26,29 @@ from .models import (
     split_products,
 )
 
+
+def ensure_data_root_ready(data_root: Path, create_if_missing: bool = False) -> Path:
+    """校验 data_root；需要时可自动创建目录。"""
+
+    data_root = data_root.expanduser().resolve()
+    if data_root.exists():
+        if not data_root.is_dir():
+            raise RuntimeError(f"data_root 不是目录：{data_root}")
+        return data_root
+    if create_if_missing:
+        data_root.mkdir(parents=True, exist_ok=True)
+        return data_root
+    raise RuntimeError(f"data_root 不存在：{data_root}")
+
+
+def validate_run_mode(mode: str) -> str:
+    """校验运行模式并返回标准化值。"""
+
+    normalized = (mode or "local").strip().lower()
+    if normalized not in RUN_MODES:
+        raise ValueError("mode 仅支持 local 或 catalog")
+    return normalized
+
 def _write_text_atomic(path: Path, content: str, encoding: str = "utf-8") -> None:
     """
     原子写入文本文件。

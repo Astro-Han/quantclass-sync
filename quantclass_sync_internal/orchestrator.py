@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import sqlite3
 import traceback
 import time
@@ -13,9 +15,11 @@ from .archive import extract_archive
 from .config import (
     build_product_plan,
     discover_local_products,
+    ensure_data_root_ready,
     load_products_from_catalog,
     resolve_credentials,
     resolve_products_by_mode,
+    validate_run_mode,
 )
 from .constants import (
     BUSINESS_DAY_ONLY_PRODUCTS,
@@ -36,7 +40,6 @@ from .constants import (
     REASON_PREPROCESS_OK,
     REASON_PREPROCESS_SKIPPED_NO_DELTA,
     REASON_UP_TO_DATE,
-    RUN_MODES,
 )
 from .http_client import (
     _reset_http_metrics,
@@ -190,22 +193,12 @@ def _download_and_prepare_extract(
 ) -> Tuple[Path, Path]:
     """下载单产品文件并准备 extract 目录。"""
 
+    file_url: str
+    file_name: str
     try:
         file_url = get_download_link(api_base=api_base, product=product, date_time=actual_time, hid=hid, headers=headers)
         file_name = build_file_name(file_url, product, actual_time)
-        product_work = work_dir / product / actual_time
-        download_path = product_work / file_name
-        extract_path = product_work / "extract"
-
-        if extract_path.exists():
-            shutil.rmtree(extract_path)
-        extract_path.mkdir(parents=True, exist_ok=True)
-        if not download_path.exists() or download_path.stat().st_size == 0:
-            save_file(file_url=file_url, file_path=download_path, headers=headers, product=product)
-        log_info(f"[{product}] 下载完成: {download_path}", event="DOWNLOAD_OK")
-        return download_path, extract_path
     except Exception as exc:
-        # HTTP 404 单独映射为"该日期无数据"，其余统一归类为网络/下载错误。
         if isinstance(exc, FatalRequestError) and exc.status_code == 404:
             raise ProductSyncError(
                 message=(
@@ -221,6 +214,63 @@ def _download_and_prepare_extract(
             ),
             reason_code=REASON_NETWORK_ERROR,
         ) from exc
+
+    product_work = work_dir / product / actual_time
+    download_path = product_work / file_name
+    extract_path = product_work / "extract"
+
+    try:
+        if extract_path.exists():
+            shutil.rmtree(extract_path)
+        extract_path.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        raise ProductSyncError(
+            message=(
+                f"产品 {product} 工作目录准备失败；可能原因：本地权限不足或缓存目录损坏；"
+                f"建议：检查 {product_work} 权限后重试。原始错误：{exc}"
+            ),
+            reason_code=REASON_MERGE_ERROR,
+        ) from exc
+
+    try:
+        _download_file_atomic(file_url=file_url, download_path=download_path, headers=headers, product=product)
+    except Exception as exc:
+        if isinstance(exc, FatalRequestError) and exc.status_code == 404:
+            raise ProductSyncError(
+                message=(
+                    f"产品 {product} 下载失败；该日期无可下载数据（HTTP 404）；"
+                    f"建议：确认产品与日期是否匹配。原始错误：{exc}"
+                ),
+                reason_code=REASON_NO_DATA_FOR_DATE,
+            ) from exc
+        raise ProductSyncError(
+            message=(
+                f"产品 {product} 下载失败；可能原因：网络波动、下载额度限制或链接失效；"
+                f"建议：稍后重试并确认下载权限。原始错误：{exc}"
+            ),
+            reason_code=REASON_NETWORK_ERROR,
+        ) from exc
+
+    log_info(f"[{product}] 下载完成: {download_path}", event="DOWNLOAD_OK")
+    return download_path, extract_path
+
+
+def _download_file_atomic(file_url: str, download_path: Path, headers: Dict[str, str], product: str) -> None:
+    """下载到临时文件并原子替换，避免脏文件污染缓存。"""
+
+    download_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = download_path.parent / f".{download_path.name}.part-{os.getpid()}-{time.time_ns()}"
+    try:
+        save_file(file_url=file_url, file_path=tmp_path, headers=headers, product=product)
+        if not tmp_path.exists() or tmp_path.stat().st_size <= 0:
+            raise RuntimeError("下载结果为空文件。")
+        os.replace(tmp_path, download_path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
 
 def _extract_product_archive(product: str, download_path: Path, extract_path: Path) -> None:
     """解压单产品文件。"""
@@ -292,6 +342,7 @@ def _normalize_date_queue(
     *,
     product: str,
     local_date: str = "",
+    apply_business_day_filter: bool = True,
 ) -> List[str]:
     """
     标准化日期队列：归一化 -> 去重 -> 升序 -> 可选业务日裁剪 -> 可选 local_date 过滤。
@@ -300,7 +351,7 @@ def _normalize_date_queue(
     normalized = sorted({x for x in (normalize_data_date(item) for item in raw_dates) if x})
     if local_date:
         normalized = [x for x in normalized if x > local_date]
-    if _is_business_day_only_product(product):
+    if apply_business_day_filter and _is_business_day_only_product(product):
         normalized = [x for x in normalized if _is_business_day(x)]
     return normalized
 
@@ -431,7 +482,12 @@ def _resolve_requested_dates_for_plan(
             hid=hid,
             headers=headers,
         )
-        api_latest_candidates = _normalize_date_queue(api_latest_candidates, product=product_name)
+        # latest 语义保持原样：这里不做业务日裁剪，只做规范化和去重排序。
+        api_latest_candidates = _normalize_date_queue(
+            api_latest_candidates,
+            product=product_name,
+            apply_business_day_filter=False,
+        )
         api_latest_date = api_latest_candidates[-1] if api_latest_candidates else None
         # 2) 读取本地 timestamp 第一列日期
         local_date = read_local_timestamp_date(command_ctx.data_root, product_name)
@@ -896,9 +952,7 @@ def run_update_with_settings(
 
     ensure_data_root_ready(command_ctx.data_root, create_if_missing=False)
 
-    mode = (mode or "local").strip().lower()
-    if mode not in RUN_MODES:
-        raise typer.BadParameter("mode 仅支持 local 或 catalog")
+    mode = validate_run_mode(mode)
 
     product_args = list(products or [])
     fallback_args = list(fallback_products or [])

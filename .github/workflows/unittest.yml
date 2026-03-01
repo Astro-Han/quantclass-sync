@@ -2,7 +2,11 @@ name: Unittest
 
 on:
   push:
+    branches:
+      - main
   pull_request:
+    branches:
+      - main
 
 jobs:
   unittest:

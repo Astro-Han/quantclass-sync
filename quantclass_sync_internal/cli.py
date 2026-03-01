@@ -14,10 +14,14 @@ from typing import List, Optional, Tuple
 import typer
 
 from .config import (
+    build_product_plan,
+    discover_local_products,
+    ensure_data_root_ready as ensure_data_root_ready_impl,
     load_user_config_or_raise,
     load_user_secrets_or_raise,
     resolve_credentials_for_update,
     save_setup_artifacts_atomic,
+    validate_run_mode,
 )
 from .constants import (
     DEFAULT_API_BASE,
@@ -34,7 +38,6 @@ from .constants import (
     PRODUCT_MODES,
     REASON_MERGE_ERROR,
     REASON_OK,
-    RUN_MODES,
 )
 from .file_sync import repair_sort_product_files, sortable_products
 from .models import (
@@ -247,6 +250,9 @@ def command_guard(command_name: str):
             except typer.Exit:
                 # 业务层主动退出（例如参数校验失败）直接向上抛。
                 raise
+            except typer.BadParameter:
+                # 参数错误属于展示层语义，保留 Typer 原生错误类型。
+                raise
             except ProductSyncError as exc:
                 # 业务可识别错误：保留 reason_code，方便报告聚合。
                 _handle_command_exception(command_name, exc, exc.reason_code, args, kwargs)
@@ -264,17 +270,9 @@ def command_guard(command_name: str):
     return decorator
 
 def ensure_data_root_ready(data_root: Path, create_if_missing: bool = False) -> Path:
-    """校验 data_root；需要时可自动创建目录。"""
+    """兼容导出：内部实现已下沉到 config 模块。"""
 
-    data_root = data_root.expanduser().resolve()
-    if data_root.exists():
-        if not data_root.is_dir():
-            raise RuntimeError(f"data_root 不是目录：{data_root}")
-        return data_root
-    if create_if_missing:
-        data_root.mkdir(parents=True, exist_ok=True)
-        return data_root
-    raise RuntimeError(f"data_root 不存在：{data_root}")
+    return ensure_data_root_ready_impl(data_root, create_if_missing=create_if_missing)
 
 def _build_command_ctx_with_overrides(base_ctx: CommandContext, data_root: Path, secrets_file: Path) -> CommandContext:
     """基于基础上下文生成覆盖后的运行上下文。"""
@@ -749,9 +747,13 @@ def cmd_all_data(
     """
 
     command_ctx = _init_command(ctx, "all_data")
+    try:
+        normalized_mode = validate_run_mode(mode)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--mode") from exc
     exit_code = run_update_with_settings(
         command_ctx=command_ctx,
-        mode=mode,
+        mode=normalized_mode,
         products=products,
         force_update=force_update,
         command_name="all_data",
@@ -759,4 +761,3 @@ def cmd_all_data(
     log_info("all_data 执行完成。", event="CMD_DONE", exit_code=exit_code)
     if exit_code != 0:
         raise typer.Exit(code=exit_code)
-

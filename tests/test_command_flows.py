@@ -146,6 +146,39 @@ class CommandFlowTests(unittest.TestCase):
                 qcs.cmd_repair_sort(ctx=ctx, products=[], strict=True)
         self.assertEqual(1, cm.exception.exit_code)
 
+    def test_cmd_init_dry_run_executes_without_name_error(self) -> None:
+        ctx = _DummyTyperContext(self._base_ctx())
+        with patch("quantclass_sync.load_catalog_or_raise", return_value=["stock-trading-data"]), patch(
+            "quantclass_sync_internal.cli.discover_local_products",
+            return_value=[],
+        ):
+            qcs.cmd_init(ctx=ctx)
+
+    def test_cmd_one_data_executes_single_plan(self) -> None:
+        ctx = _DummyTyperContext(self._base_ctx())
+        started_at = 1234567890.0
+        with patch("quantclass_sync.resolve_report_path", return_value=self.report_path), patch(
+            "quantclass_sync_internal.cli._execute_plans",
+            return_value=(qcs.SyncStats(), False, started_at),
+        ) as execute_mock:
+            qcs.cmd_one_data(
+                ctx=ctx,
+                product="stock-trading-data",
+                date_time="",
+                force_update=False,
+            )
+
+        execute_mock.assert_called_once()
+        plans = execute_mock.call_args.kwargs["plans"]
+        self.assertEqual(1, len(plans))
+        self.assertEqual("stock-trading-data", plans[0].name)
+        self.assertTrue(self.report_path.exists())
+
+    def test_cmd_all_data_invalid_mode_raises_bad_parameter(self) -> None:
+        ctx = _DummyTyperContext(self._base_ctx())
+        with self.assertRaises(typer.BadParameter):
+            qcs.cmd_all_data(ctx=ctx, mode="bad-mode", products=[], force_update=False)
+
 
 if __name__ == "__main__":
     unittest.main()

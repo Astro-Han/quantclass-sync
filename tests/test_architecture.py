@@ -5,11 +5,13 @@ import unittest
 class ArchitectureTests(unittest.TestCase):
     """校验关键依赖方向，防止入口和低层逆向耦合。"""
 
+    REPO_ROOT = Path(__file__).resolve().parent.parent
+
     def _read(self, rel_path: str) -> str:
-        return Path(rel_path).read_text(encoding="utf-8")
+        return (self.REPO_ROOT / rel_path).read_text(encoding="utf-8")
 
     def test_internal_modules_do_not_import_entrypoint(self) -> None:
-        root = Path("quantclass_sync_internal")
+        root = self.REPO_ROOT / "quantclass_sync_internal"
         for path in root.glob("*.py"):
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("import quantclass_sync", text, msg=str(path))

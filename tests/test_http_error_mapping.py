@@ -1,10 +1,13 @@
 import unittest
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import requests
 
 import quantclass_sync as qcs
+from quantclass_sync_internal import orchestrator
 
 
 class HttpErrorMappingTests(unittest.TestCase):
@@ -98,6 +101,49 @@ class HttpErrorMappingTests(unittest.TestCase):
         attempts, failures = qcs._http_metrics_for_product("stock-trading-data")
         self.assertEqual(5, attempts)
         self.assertEqual(5, failures)
+
+    def test_download_file_atomic_replaces_existing_cache_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            download_path = Path(tmpdir) / "stock-trading-data" / "2026-02-11" / "payload.zip"
+            download_path.parent.mkdir(parents=True, exist_ok=True)
+            download_path.write_bytes(b"bad-old-file")
+
+            def fake_save_file(file_url: str, file_path: Path, headers: dict[str, str], product: str = "") -> None:
+                file_path.write_bytes(b"new-good-file")
+
+            with patch("quantclass_sync_internal.orchestrator.save_file", side_effect=fake_save_file):
+                orchestrator._download_file_atomic(
+                    file_url="https://example.com/file.zip",
+                    download_path=download_path,
+                    headers={"api-key": "k"},
+                    product="stock-trading-data",
+                )
+
+            self.assertEqual(b"new-good-file", download_path.read_bytes())
+            part_files = list(download_path.parent.glob("*.part-*"))
+            self.assertEqual([], part_files)
+
+    def test_download_file_atomic_cleans_temp_file_on_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            download_path = Path(tmpdir) / "stock-trading-data" / "2026-02-11" / "payload.zip"
+            download_path.parent.mkdir(parents=True, exist_ok=True)
+            download_path.write_bytes(b"stable-old-file")
+
+            with patch(
+                "quantclass_sync_internal.orchestrator.save_file",
+                side_effect=RuntimeError("download failed"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    orchestrator._download_file_atomic(
+                        file_url="https://example.com/file.zip",
+                        download_path=download_path,
+                        headers={"api-key": "k"},
+                        product="stock-trading-data",
+                    )
+
+            self.assertEqual(b"stable-old-file", download_path.read_bytes())
+            part_files = list(download_path.parent.glob("*.part-*"))
+            self.assertEqual([], part_files)
 
 
 if __name__ == "__main__":
