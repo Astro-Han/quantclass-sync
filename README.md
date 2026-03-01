@@ -3,7 +3,7 @@
 自动从 QuantClass 下载股票和币圈数据，帮你把本地数据保持最新。
 好几天没跑也没关系，一条命令就能把缺的全补上。
 
-当前版本：**v0.8.0**
+当前版本：**v0.8.1**
 
 ---
 
@@ -206,6 +206,17 @@ ls -t log/run_report_* | head -1 | xargs cat
 ---
 
 ## 更新记录
+
+<details>
+<summary>v0.8.1</summary>
+
+- coin-cap 从未知镜像升级为已知规则合并（按 `symbol` 拆分，主键为 `candle_begin_time + symbol`）
+- 加入按文件日期过滤，避免跨天/脏日期行混入当日结果
+- 遇到日期列缺失或过滤后无有效行时，统一按 `merge_error` 处理，避免错误推进 `timestamp.txt`
+- 新增 `scripts/repair_coin_cap.py`，可一键清理历史日期命名文件并对 symbol 文件去重排序
+- 补充 coin-cap 相关回归测试，覆盖过滤异常与失败语义路径
+
+</details>
 
 <details>
 <summary>v0.8.0</summary>
