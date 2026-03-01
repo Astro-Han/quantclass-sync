@@ -1,9 +1,15 @@
 # QuantClass 数据同步工具（setup + update 傻瓜版）
 
-当前版本：`v0.7.5`
+当前版本：`v0.8.0`
 
 ## Changelog / 更新记录：
 
+* **v0.8.0**
+  * 完成主链路模块化重构：`quantclass_sync.py` 收敛为兼容薄入口，核心实现迁移到 `quantclass_sync_internal/`。
+  * 币圈预处理拆分为 `coin_preprocess_internal/`，`coin_preprocess_builtin.py` 保留兼容导出，行为不变。
+  * 补齐 CI 与结构回归测试，命令流、报告 schema、兼容导出等关键路径均有自动化校验。
+  * 运行报告维持 `schema_version=3.1`，保留旧字段并增强阶段耗时与 reason_code 统计可观测性。
+  * P3 首轮完成：拆分 `mirror_fallback` 语义，新增 `mirror_unknown`，避免正常镜像流量污染告警判断。
 * **v0.7.5**
   * 修复 `stock-notices-title` 排序一致性问题：纳入已知规则并启用稳定排序键（含并列字段）。
   * 写入链路新增排序校验与自动修复统计，运行报告可直接看到 `sorted_checked/sorted_violation/sorted_auto_repaired`。

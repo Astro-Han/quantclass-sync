@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目简介
 
-QuantClass 数据同步工具（当前 v0.7.5），从 QuantClass API 自动下载、解析、合并金融数据（股票/币圈）。核心特性：本地落后多日时单次命令自动回补所有缺口。
+QuantClass 数据同步工具（当前 v0.8.0），从 QuantClass API 自动下载、解析、合并金融数据（股票/币圈）。核心特性：本地落后多日时单次命令自动回补所有缺口。
 
 ## 常用命令
 
@@ -31,23 +31,21 @@ python3 quantclass_sync.py
 
 ## 架构概览
 
-单脚本架构，`quantclass_sync.py`（~3940 行）分 4 层，代码内第 68-89 行有"新手阅读路线图"注释：
+当前为“兼容入口 + 内部模块”架构：
 
 ```
-命令入口层（Typer CLI）
-  global_options / cmd_setup / cmd_update / cmd_one_data / cmd_all_data / cmd_repair_sort
+兼容入口层
+  quantclass_sync.py（显式 re-export + CLI 启动）
       ↓
-编排层（流程控制）
-  run_update_with_settings → _resolve_requested_dates_for_plan → _execute_plans → process_product
+内部模块层（quantclass_sync_internal）
+  cli.py（命令） / orchestrator.py（编排） / file_sync.py+csv_engine.py（文件同步）
+  / http_client.py（HTTP） / reporting.py（报告） / status_store.py（状态）等
       ↓
-文件同步层（CSV 合并）
-  sync_known_product（已知产品增量合并） / sync_unknown_product（未知产品镜像写入）
-      ↓
-基础能力层
-  request_data（HTTP+重试） / extract_archive（解压） / StatusDb（SQLite 状态库） / RunReport
+预处理模块层（coin_preprocess_internal）
+  runner.py / csv_source.py / symbol_mapper.py / pivot.py
 ```
 
-辅助模块 `coin_preprocess_builtin.py`（~1165 行）：币圈 spot/swap 合成预处理，产出 `.pkl` 文件。
+`coin_preprocess_builtin.py` 保留兼容导出，实际实现迁移到 `coin_preprocess_internal/`。
 
 ## 关键概念
 
@@ -85,4 +83,4 @@ python3 quantclass_sync.py
 
 - 中文注释和日志；HTTP 错误码有中文映射（404→资源不存在、403→无下载权限等）
 - 新增已知产品规则时需更新 `AGGREGATE_SPLIT_COLS` 和 `RULES` 字典（含排序键配置）
-- v0.7.5+ 写入链路内置排序校验，异常时自动修复并记录统计
+- v0.8.0+ 已完成主链路模块化重构，保持 CLI 兼容；新增 reason_code `mirror_unknown` 区分未知产品正常镜像。
