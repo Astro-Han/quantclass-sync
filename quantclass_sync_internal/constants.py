@@ -95,6 +95,8 @@ REASON_MERGE_ERROR = "merge_error"
 
 REASON_MIRROR_FALLBACK = "mirror_fallback"
 
+REASON_MIRROR_UNKNOWN = "mirror_unknown"
+
 REASON_UNKNOWN_HEADER_MERGE = "unknown_header_merge"
 
 REASON_UP_TO_DATE = "up_to_date"

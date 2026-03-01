@@ -15,6 +15,7 @@ from .constants import (
     INDEX_PRODUCTS,
     KNOWN_DATASETS,
     REASON_MIRROR_FALLBACK,
+    REASON_MIRROR_UNKNOWN,
     REASON_OK,
     REASON_UNKNOWN_HEADER_MERGE,
     STRATEGY_MIRROR_UNKNOWN,
@@ -285,7 +286,6 @@ def sync_known_product(product: str, extract_path: Path, data_root: Path, dry_ru
             # .ts 文件按“镜像复制”处理，不做 CSV 结构化合并。
             result = sync_raw_file(src=src, target=target, dry_run=dry_run)
             apply_file_result(stats, result=result)
-            reason_code = REASON_MIRROR_FALLBACK
         else:
             rule = infer_rule(rel_path)
             if rule is None:
@@ -363,7 +363,7 @@ def sync_unknown_product(product: str, extract_path: Path, data_root: Path, dry_
 
     if did_unknown_header_merge:
         return stats, REASON_UNKNOWN_HEADER_MERGE
-    return stats, REASON_MIRROR_FALLBACK
+    return stats, REASON_MIRROR_UNKNOWN
 
 def write_csv_payload_atomic(path: Path, payload: CsvPayload, rule: DatasetRule, dry_run: bool) -> None:
     """原子写回 CSV，避免排序修复中途失败导致文件损坏。"""
@@ -494,4 +494,3 @@ def sync_from_extract(
         data_root=data_root,
         dry_run=dry_run,
     )
-
