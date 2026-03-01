@@ -61,6 +61,7 @@ AGGREGATE_SPLIT_COLS: Dict[str, str] = {
     "stock-popular-concept-detail": "股票代码",
     "stock-trading-date": "股票代码",
     "stock-interest-rate": "指标名称",
+    "coin-cap": "symbol",
 }
 
 KNOWN_DATASETS = tuple(sorted(set(AGGREGATE_SPLIT_COLS) | {"stock-fin-data-xbx"}))

@@ -14,6 +14,7 @@ from .constants import (
     DATE_NAME_PATTERN,
     INDEX_PRODUCTS,
     KNOWN_DATASETS,
+    REASON_MERGE_ERROR,
     REASON_MIRROR_FALLBACK,
     REASON_MIRROR_UNKNOWN,
     REASON_OK,
@@ -139,6 +140,40 @@ def normalize_split_value(raw_value: str) -> str:
     value = value.replace("/", "_").replace("\\", "_")
     return value
 
+def _normalize_date_token(raw_value: str) -> Optional[str]:
+    """
+    将行内日期标准化为 YYYY-MM-DD。
+
+    兼容：
+    - 2026-02-28
+    - 2026/02/28
+    - 2026-02-28 00:00:00
+    - 20260228
+    """
+
+    value = raw_value.strip().lstrip("\ufeff")
+    if not value:
+        return None
+
+    dash_or_slash = re.match(r"^(\d{4})[-/](\d{2})[-/](\d{2})(?:$|[ T])", value)
+    if dash_or_slash:
+        return f"{dash_or_slash.group(1)}-{dash_or_slash.group(2)}-{dash_or_slash.group(3)}"
+
+    compact = re.match(r"^(\d{8})(?:$|[ T])", value)
+    if compact:
+        d = compact.group(1)
+        return f"{d[0:4]}-{d[4:6]}-{d[6:8]}"
+    return None
+
+def _normalize_file_date(stem: str) -> Optional[str]:
+    """将日文件名（2026-02-28 / 20260228）标准化为 YYYY-MM-DD。"""
+
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", stem):
+        return stem
+    if re.fullmatch(r"\d{8}", stem):
+        return f"{stem[0:4]}-{stem[4:6]}-{stem[6:8]}"
+    return None
+
 def _log_sync_progress(product: str, idx: int, total: int, stats: SyncStats, label: str = "同步进度") -> None:
     """按 PROGRESS_EVERY 间隔打印同步进度日志."""
     if idx % max(PROGRESS_EVERY, 1) == 0 or idx == total:
@@ -146,7 +181,7 @@ def _log_sync_progress(product: str, idx: int, total: int, stats: SyncStats, lab
                  created=stats.created_files, updated=stats.updated_files,
                  unchanged=stats.unchanged_files, skipped=stats.skipped_files)
 
-def sync_daily_aggregate_file(src: Path, product: str, data_root: Path, dry_run: bool) -> SyncStats:
+def sync_daily_aggregate_file(src: Path, product: str, data_root: Path, dry_run: bool) -> Tuple[SyncStats, str]:
     """
     处理按天聚合 CSV（例如 2026-02-06.csv）。
 
@@ -155,24 +190,83 @@ def sync_daily_aggregate_file(src: Path, product: str, data_root: Path, dry_run:
     """
 
     stats = SyncStats()
+    reason_code = REASON_OK
     rule = RULES[product]
     incoming = read_csv_payload(src, preferred_encoding=rule.encoding)
     if not incoming.header:
         stats.skipped_files += 1
-        return stats
+        return stats, reason_code
 
     split_col = AGGREGATE_SPLIT_COLS.get(product)
     if not split_col:
         stats.skipped_files += 1
-        return stats
+        return stats, reason_code
     if split_col not in incoming.header:
         stats.skipped_files += 1
         log_info(f"[{product}] 未找到拆分字段，已跳过: {split_col}", event="SYNC_FAIL")
-        return stats
+        return stats, REASON_MERGE_ERROR
+
+    rows_for_split = incoming.rows
+    if rule.date_filter_col:
+        expected_date = _normalize_file_date(src.stem)
+        if expected_date is None:
+            stats.skipped_files += 1
+            log_info(
+                f"[{product}] 文件名不是合法日期，无法执行日期过滤，已跳过: {src.name}",
+                event="SYNC_SKIP",
+                filter_col=rule.date_filter_col,
+            )
+            return stats, reason_code
+        if rule.date_filter_col not in incoming.header:
+            stats.skipped_files += 1
+            log_info(
+                f"[{product}] 缺少日期过滤列，已跳过: {rule.date_filter_col}",
+                event="SYNC_FAIL",
+                file=src.name,
+            )
+            return stats, REASON_MERGE_ERROR
+
+        date_idx = incoming.header.index(rule.date_filter_col)
+        filtered_rows: List[List[str]] = []
+        dropped_invalid_date = 0
+        dropped_cross_day = 0
+        for row in incoming.rows:
+            raw_value = row[date_idx] if date_idx < len(row) else ""
+            row_date = _normalize_date_token(raw_value)
+            if row_date is None:
+                dropped_invalid_date += 1
+                continue
+            if row_date != expected_date:
+                dropped_cross_day += 1
+                continue
+            normalized_row = list(row)
+            if date_idx < len(normalized_row):
+                # 统一日期格式，避免同日不同格式（如日期/日期时间）被主键误判为不同行。
+                normalized_row[date_idx] = expected_date
+            filtered_rows.append(normalized_row)
+
+        rows_for_split = filtered_rows
+        if dropped_invalid_date or dropped_cross_day:
+            log_info(
+                f"[{product}] 已按文件日期过滤聚合行: {src.name}",
+                event="SYNC_OK",
+                expected_date=expected_date,
+                kept_rows=len(rows_for_split),
+                dropped_cross_day=dropped_cross_day,
+                dropped_invalid_date=dropped_invalid_date,
+            )
+        if not rows_for_split:
+            stats.skipped_files += 1
+            log_info(
+                f"[{product}] 日期过滤后无有效数据，视为异常: {src.name}",
+                event="SYNC_FAIL",
+                expected_date=expected_date,
+            )
+            return stats, REASON_MERGE_ERROR
 
     split_idx = incoming.header.index(split_col)
     grouped_rows: Dict[str, List[List[str]]] = {}
-    for row in incoming.rows:
+    for row in rows_for_split:
         split_raw = row[split_idx] if split_idx < len(row) else ""
         split_value = normalize_split_value(split_raw)
         if not split_value:
@@ -181,7 +275,7 @@ def sync_daily_aggregate_file(src: Path, product: str, data_root: Path, dry_run:
 
     if not grouped_rows:
         stats.skipped_files += 1
-        return stats
+        return stats, reason_code
 
     total_codes = len(grouped_rows)
     log_info(
@@ -204,7 +298,7 @@ def sync_daily_aggregate_file(src: Path, product: str, data_root: Path, dry_run:
 
         _log_sync_progress(product, idx, total_codes, stats, label="拆分进度")
 
-    return stats
+    return stats, reason_code
 
 def sync_raw_file(src: Path, target: Path, dry_run: bool) -> str:
     """
@@ -269,8 +363,10 @@ def sync_known_product(product: str, extract_path: Path, data_root: Path, dry_ru
 
         if product in AGGREGATE_SPLIT_COLS and is_daily_aggregate_file(normalized_rel_path):
             # 聚合日文件（一个文件含多标的）先拆分，再逐个同步。
-            agg = sync_daily_aggregate_file(src=src, product=product, data_root=data_root, dry_run=dry_run)
+            agg, agg_reason = sync_daily_aggregate_file(src=src, product=product, data_root=data_root, dry_run=dry_run)
             stats.merge(agg)
+            if agg_reason != REASON_OK:
+                reason_code = agg_reason
             continue
 
         rel_path = infer_target_relpath(normalized_rel_path, product)

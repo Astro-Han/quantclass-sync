@@ -125,6 +125,21 @@ python3 quantclass_sync.py repair_sort            # 扫描 + 修复
 python3 quantclass_sync.py repair_sort --dry-run   # 只看不动
 ```
 
+### repair_coin_cap — 一次性修 coin-cap 历史文件
+
+`coin-cap` 现在按已知规则同步（按 `symbol` 拆分，主键为 `candle_begin_time + symbol`）。
+如果你本地还留有旧版日期文件（如 `2026-02-28.csv`），可以用这个脚本做一次清理：
+
+```bash
+python3 scripts/repair_coin_cap.py --dry-run
+python3 scripts/repair_coin_cap.py
+```
+
+说明：
+- 默认会先备份到 `<data_root>/coin-cap.backup-<timestamp>/`
+- `--no-backup` 可关闭备份
+- 会清理 `coin-cap` 目录下日期命名的遗留 CSV，并对 symbol 文件做去重+排序
+
 ---
 
 ## 文件在哪

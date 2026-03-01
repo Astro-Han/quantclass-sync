@@ -145,6 +145,42 @@ class HttpErrorMappingTests(unittest.TestCase):
             part_files = list(download_path.parent.glob("*.part-*"))
             self.assertEqual([], part_files)
 
+    def test_process_product_merge_error_reason_raises_product_sync_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            download_path = root / "cache" / "coin-cap.zip"
+            extract_path = root / "cache" / "extract"
+            extract_path.mkdir(parents=True, exist_ok=True)
+
+            plan = qcs.ProductPlan(name="coin-cap", strategy=qcs.STRATEGY_MERGE_KNOWN)
+
+            with patch(
+                "quantclass_sync_internal.orchestrator._resolve_actual_time",
+                return_value="2026-02-28",
+            ), patch(
+                "quantclass_sync_internal.orchestrator._download_and_prepare_extract",
+                return_value=(download_path, extract_path),
+            ), patch(
+                "quantclass_sync_internal.orchestrator._extract_product_archive",
+                return_value=None,
+            ), patch(
+                "quantclass_sync_internal.orchestrator.sync_from_extract",
+                return_value=(qcs.SyncStats(skipped_files=1), qcs.REASON_MERGE_ERROR),
+            ):
+                with self.assertRaises(qcs.ProductSyncError) as cm:
+                    orchestrator.process_product(
+                        plan=plan,
+                        date_time=None,
+                        api_base="https://api.quantclass.cn/api/data",
+                        hid="hid",
+                        headers={"api-key": "k"},
+                        data_root=root / "data",
+                        work_dir=root / ".cache",
+                        dry_run=True,
+                    )
+
+            self.assertEqual(qcs.REASON_MERGE_ERROR, cm.exception.reason_code)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -105,6 +105,7 @@ class DatasetRule:
     has_note: bool
     key_cols: Tuple[str, ...]
     sort_cols: Tuple[str, ...]
+    date_filter_col: Optional[str] = None
 
 @dataclass
 class CsvPayload:
@@ -435,6 +436,15 @@ RULES: Dict[str, DatasetRule] = {
         key_cols=("公告日期", "股票代码", "公告标题"),
         sort_cols=("公告日期", "股票代码", "公告标题"),
     ),
+    # 币圈市值快照：按 symbol 拆分后，以 日期+symbol 为主键增量合并
+    "coin-cap": DatasetRule(
+        name="coin-cap",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("candle_begin_time", "symbol"),
+        sort_cols=("candle_begin_time", "symbol"),
+        date_filter_col="candle_begin_time",
+    ),
     # period_offset 也按“备注 + 表头 + 日期主键”处理
     "period_offset.csv": DatasetRule(
         name="period_offset.csv",
@@ -476,4 +486,3 @@ class TextFileSnapshot:
     exists: bool
     content: str = ""
     mode: Optional[int] = None
-

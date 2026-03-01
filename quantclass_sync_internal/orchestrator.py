@@ -147,6 +147,14 @@ def process_product(
             ),
             reason_code=REASON_MERGE_ERROR,
         ) from exc
+    if reason_code == REASON_MERGE_ERROR:
+        raise ProductSyncError(
+            message=(
+                f"产品 {product} 落库检测到数据质量异常；"
+                f"为避免错误推进 timestamp，本次按失败处理。"
+            ),
+            reason_code=REASON_MERGE_ERROR,
+        )
 
     elapsed = time.time() - t0
     log_info(
