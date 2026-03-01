@@ -9,6 +9,11 @@ release/
 # Python cache
 __pycache__/
 *.py[cod]
+.pytest_cache/
+
+# Editor / local tooling
+.vscode/
+.claude/
 
 # macOS
 .DS_Store
