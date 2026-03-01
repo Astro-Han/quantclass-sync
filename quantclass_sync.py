@@ -69,11 +69,11 @@ META_STATUS_JSON_REL = Path(SYNC_META_DIRNAME) / "status" / "products-status.jso
 # 这份脚本分成 4 层。第一次读代码，建议按这个顺序：
 #
 # 1) 命令入口层（Typer 命令行框架）：
-#    - global_options / cmd_init / cmd_one_data / cmd_all_data
+#    - global_options / cmd_init / cmd_setup / cmd_update / cmd_one_data / cmd_all_data / cmd_repair_sort
 #    - 你在终端输入命令，最先进入这一层。
 #
-# 2) 编排层（把“要做什么”串起来）：
-#    - _execute_plans / process_product / sync_from_extract
+# 2) 编排层（把”要做什么”串起来）：
+#    - run_update_with_settings / _resolve_requested_dates_for_plan / _execute_plans / process_product / sync_from_extract
 #    - 这一层决定每个产品要不要更新、怎么更新、失败怎么记报告。
 #
 # 3) 文件同步层（真正处理 CSV/TS 文件）：
@@ -2408,106 +2408,74 @@ def _append_run_event(report: RunReport, product: str, stage: str, status: str, 
     )
 
 
-def _append_success_result(
+def _append_result(
     report: RunReport,
-    plan: ProductPlan,
+    *,
     product: str,
-    actual_time: str,
-    stats: SyncStats,
-    source_path: str,
-    reason_code: str,
-    elapsed: float,
+    status: str,
+    strategy: str = "",
+    reason_code: str = REASON_OK,
+    date_time: str = "",
+    mode: str = "network",
+    elapsed: float = 0.0,
+    stats: Optional[SyncStats] = None,
+    source_path: str = "",
+    error: str = "",
+    stage: str = "SYNC",
+    event_detail: str = "",
 ) -> None:
+    """统一把产品结果写入 report.products 并触发 RunEvent。
+
+    - stats 为 None 时用空 SyncStats（避免调用方每次都显式传 SyncStats()）
+    - event_detail 为空时自动推导：有 error 用 error，否则用 elapsed 信息
+    """
     report.products.append(
         ProductRunResult(
             product=product,
-            status="ok",
-            strategy=plan.strategy,
+            status=status,
+            strategy=strategy,
             reason_code=reason_code,
-            date_time=actual_time,
-            mode="network",
+            date_time=date_time,
+            mode=mode,
             elapsed_seconds=elapsed,
-            stats=stats,
+            stats=stats if stats is not None else SyncStats(),
             source_path=source_path,
+            error=error,
         )
     )
-    _append_run_event(report, product, "SYNC", "ok", reason_code, f"elapsed={elapsed:.2f}s")
-
-
-def _append_error_result(
-    report: RunReport,
-    plan: ProductPlan,
-    reason_code: str,
-    requested_date_time: str,
-    elapsed: float,
-    error_message: str,
-) -> None:
-    report.products.append(
-        ProductRunResult(
-            product=plan.name,
-            status="error",
-            strategy=plan.strategy,
-            reason_code=reason_code,
-            date_time=requested_date_time,
-            mode="network",
-            elapsed_seconds=elapsed,
-            error=error_message,
-        )
-    )
-    _append_run_event(report, plan.name, "SYNC", "error", reason_code, error_message)
-
-
-def _append_skipped_result(
-    report: RunReport,
-    plan: ProductPlan,
-    reason_code: str,
-    requested_date_time: str,
-    elapsed: float,
-    detail: str,
-) -> None:
-    report.products.append(
-        ProductRunResult(
-            product=plan.name,
-            status="skipped",
-            strategy=plan.strategy,
-            reason_code=reason_code,
-            date_time=requested_date_time,
-            mode="network",
-            elapsed_seconds=elapsed,
-            error=detail,
-        )
-    )
-    _append_run_event(report, plan.name, "SYNC", "skipped", reason_code, detail)
+    if not event_detail:
+        event_detail = error if error else f"elapsed={elapsed:.2f}s"
+    _append_run_event(report, product, stage, status, reason_code, event_detail)
 
 
 def _record_discovery_skips(report: RunReport, unknown_local: Sequence[str], invalid_explicit: Sequence[str]) -> None:
     """把“本地未知目录/无效显式产品”写入报告。"""
 
     for product in sorted(unknown_local):
-        report.products.append(
-            ProductRunResult(
-                product=product,
-                status="skipped",
-                strategy="skip",
-                reason_code=REASON_UNKNOWN_LOCAL_PRODUCT,
-                mode="discover",
-                error="本地目录不在 catalog 产品清单中，已跳过。",
-            )
+        _append_result(
+            report,
+            product=product,
+            status="skipped",
+            strategy="skip",
+            reason_code=REASON_UNKNOWN_LOCAL_PRODUCT,
+            mode="discover",
+            error="本地目录不在 catalog 产品清单中，已跳过。",
+            stage="DISCOVER",
+            event_detail="本地目录不在 catalog",
         )
-        _append_run_event(report, product, "DISCOVER", "skipped", REASON_UNKNOWN_LOCAL_PRODUCT, "本地目录不在 catalog")
 
     for product in sorted(invalid_explicit):
-        report.products.append(
-            ProductRunResult(
-                product=product,
-                status="skipped",
-                strategy="skip",
-                reason_code=REASON_INVALID_EXPLICIT_PRODUCT,
-                mode="explicit",
-                error="显式指定产品不在 catalog 清单中，已跳过。",
-            )
+        _append_result(
+            report,
+            product=product,
+            status="skipped",
+            strategy="skip",
+            reason_code=REASON_INVALID_EXPLICIT_PRODUCT,
+            mode="explicit",
+            error="显式指定产品不在 catalog 清单中，已跳过。",
+            stage="PLAN",
+            event_detail="显式产品不在 catalog",
         )
-        _append_run_event(report, product, "PLAN", "skipped", REASON_INVALID_EXPLICIT_PRODUCT, "显式产品不在 catalog")
 
 
 def resolve_report_path(ctx: CommandContext, command: str) -> Path:
@@ -2546,39 +2514,6 @@ def build_headers_or_raise(ctx: CommandContext) -> Tuple[Dict[str, str], str]:
         raise RuntimeError(f"缺少 hid；可能原因：命令行/环境变量/本地密钥文件都未提供；建议：配置 --hid 或更新 {ctx.secrets_file}。")
 
     return _build_headers(api_key), hid
-
-
-def _append_gate_skip_result(
-    report: RunReport,
-    plan: ProductPlan,
-    product_name: str,
-    api_latest_raw: str,
-    api_latest_date: Optional[str],
-    local_date: Optional[str],
-    elapsed_seconds: float,
-) -> None:
-    """记录 timestamp 门控命中的跳过结果。"""
-
-    report.products.append(
-        ProductRunResult(
-            product=product_name,
-            status="skipped",
-            strategy=plan.strategy,
-            reason_code=REASON_UP_TO_DATE,
-            date_time=api_latest_date or api_latest_raw,
-            mode="gate",
-            elapsed_seconds=elapsed_seconds,
-            error=f"本地 timestamp 已是最新（local={local_date}, api={api_latest_date}）。",
-        )
-    )
-    _append_run_event(
-        report,
-        product_name,
-        "GATE",
-        "skipped",
-        REASON_UP_TO_DATE,
-        f"local={local_date} api={api_latest_date}",
-    )
 
 
 def _parse_iso_date(raw: str) -> Optional[date]:
@@ -2712,14 +2647,18 @@ def _resolve_requested_dates_for_plan(
         if should_skip_by_timestamp(local_date, api_latest_date):
             elapsed = time.time() - t_product_start
             latest_raw = api_latest_date or ""
-            _append_gate_skip_result(
-                report=report,
-                plan=plan,
-                product_name=product_name,
-                api_latest_raw=latest_raw,
-                api_latest_date=api_latest_date,
-                local_date=local_date,
-                elapsed_seconds=elapsed,
+            _append_result(
+                report,
+                product=product_name,
+                status="skipped",
+                strategy=plan.strategy,
+                reason_code=REASON_UP_TO_DATE,
+                date_time=api_latest_date or latest_raw,
+                mode="gate",
+                elapsed=elapsed,
+                error=f"本地 timestamp 已是最新（local={local_date}, api={api_latest_date}）。",
+                stage="GATE",
+                event_detail=f"local={local_date} api={api_latest_date}",
             )
             log_info(
                 f"[{product_name}] timestamp 门控命中，跳过更新。",
@@ -2886,34 +2825,6 @@ def _resolve_preprocess_data_date(
     return datetime.now().date().isoformat()
 
 
-def _append_preprocess_result(
-    report: RunReport,
-    status: str,
-    reason_code: str,
-    elapsed: float,
-    date_time: str = "",
-    error: str = "",
-    source_path: str = "",
-) -> None:
-    """把预处理步骤写入 products/events，确保报告可观测。"""
-
-    report.products.append(
-        ProductRunResult(
-            product=PREPROCESS_PRODUCT,
-            status=status,
-            strategy="preprocess_hook",
-            reason_code=reason_code,
-            date_time=date_time,
-            mode="postprocess",
-            elapsed_seconds=elapsed,
-            source_path=source_path,
-            error=error,
-        )
-    )
-    detail = error if error else f"elapsed={elapsed:.2f}s"
-    _append_run_event(report, PREPROCESS_PRODUCT, "PREPROCESS", status, reason_code, detail)
-
-
 def _maybe_run_coin_preprocess(
     command_ctx: CommandContext,
     report: RunReport,
@@ -2941,12 +2852,15 @@ def _maybe_run_coin_preprocess(
         return False
     source_effective = [item for item in source_successes if _has_effective_source_delta(item)]
     if not source_effective:
-        _append_preprocess_result(
-            report=report,
+        _append_result(
+            report,
+            product=PREPROCESS_PRODUCT,
             status="skipped",
+            strategy="preprocess_hook",
             reason_code=REASON_PREPROCESS_SKIPPED_NO_DELTA,
-            elapsed=0.0,
+            mode="postprocess",
             error="源产品无有效增量（created/updated/rows_added 均为 0），跳过预处理。",
+            stage="PREPROCESS",
         )
         log_info(
             "预处理跳过：源产品无有效增量。",
@@ -2956,12 +2870,15 @@ def _maybe_run_coin_preprocess(
         return False
 
     if command_ctx.dry_run:
-        _append_preprocess_result(
-            report=report,
+        _append_result(
+            report,
+            product=PREPROCESS_PRODUCT,
             status="skipped",
+            strategy="preprocess_hook",
             reason_code=REASON_PREPROCESS_DRY_RUN,
-            elapsed=0.0,
+            mode="postprocess",
             error="dry-run 模式：未执行预处理命令。",
+            stage="PREPROCESS",
         )
         log_info("dry-run 模式下跳过预处理执行。", event="PREPROCESS", target=PREPROCESS_PRODUCT)
         return False
@@ -2985,13 +2902,17 @@ def _maybe_run_coin_preprocess(
             product=PREPROCESS_PRODUCT,
             actual_time=actual_time,
         )
-        _append_preprocess_result(
-            report=report,
+        _append_result(
+            report,
+            product=PREPROCESS_PRODUCT,
             status="ok",
+            strategy="preprocess_hook",
             reason_code=success_reason_code,
             elapsed=elapsed,
             date_time=actual_time,
+            mode="postprocess",
             source_path=raw_cmd,
+            stage="PREPROCESS",
         )
         log_info(
             "预处理执行成功。",
@@ -3004,13 +2925,17 @@ def _maybe_run_coin_preprocess(
     except Exception as exc:
         elapsed = time.time() - t0
         message = str(exc)
-        _append_preprocess_result(
-            report=report,
+        _append_result(
+            report,
+            product=PREPROCESS_PRODUCT,
             status="error",
+            strategy="preprocess_hook",
             reason_code=REASON_PREPROCESS_FAILED,
             elapsed=elapsed,
+            mode="postprocess",
             error=message,
             source_path=raw_cmd,
+            stage="PREPROCESS",
         )
         log_error(f"预处理执行异常: {message}", event="PREPROCESS")
         if command_ctx.verbose:
@@ -3077,7 +3002,17 @@ def _execute_plans(
                 )
                 elapsed = time.time() - t_product_start
                 total.merge(stats)
-                _append_success_result(report, plan, product, actual_time, stats, source_path, reason_code, elapsed)
+                _append_result(
+                    report,
+                    product=product,
+                    status="ok",
+                    strategy=plan.strategy,
+                    reason_code=reason_code,
+                    date_time=actual_time,
+                    elapsed=elapsed,
+                    stats=stats,
+                    source_path=source_path,
+                )
                 # C. 成功后统一回写状态库与 timestamp（dry-run 下不会写）。
                 _upsert_product_status_after_success(
                     conn=conn,
@@ -3100,7 +3035,16 @@ def _execute_plans(
             elapsed = time.time() - t_product_start
             # D. 回补模式：无数据日记录为 skipped，继续下一个日期。
             if catch_up_to_latest and reason_code == REASON_NO_DATA_FOR_DATE:
-                _append_skipped_result(report, plan, reason_code, requested_date_for_plan, elapsed, message)
+                _append_result(
+                    report,
+                    product=plan.name,
+                    status="skipped",
+                    strategy=plan.strategy,
+                    reason_code=reason_code,
+                    date_time=requested_date_for_plan,
+                    elapsed=elapsed,
+                    error=message,
+                )
                 log_info(f"[{plan.name}] 无数据日已跳过: {message}", event="SYNC_SKIP", reason_code=reason_code)
                 if command_ctx.verbose and debug_trace:
                     log_debug(debug_trace, event="DEBUG")
@@ -3108,7 +3052,16 @@ def _execute_plans(
 
             # E. 失败路径：记录错误；若开启 stop-on-error 则终止整次任务。
             has_error = True
-            _append_error_result(report, plan, reason_code, requested_date_for_plan, elapsed, message)
+            _append_result(
+                report,
+                product=plan.name,
+                status="error",
+                strategy=plan.strategy,
+                reason_code=reason_code,
+                date_time=requested_date_for_plan,
+                elapsed=elapsed,
+                error=message,
+            )
             log_error(f"[{plan.name}] 处理失败: {message}", event="SYNC_FAIL", reason_code=reason_code)
             if command_ctx.verbose and debug_trace:
                 log_debug(debug_trace, event="DEBUG")
@@ -3816,25 +3769,41 @@ def cmd_repair_sort(
             if error_count > 0:
                 has_error = True
                 message = f"产品 {product} 排序修复存在文件错误（count={error_count}）。"
-                _append_error_result(report, plan, REASON_MERGE_ERROR, "", elapsed, message)
+                _append_result(
+                    report,
+                    product=plan.name,
+                    status="error",
+                    strategy=plan.strategy,
+                    reason_code=REASON_MERGE_ERROR,
+                    elapsed=elapsed,
+                    error=message,
+                )
                 if strict:
                     break
                 continue
 
-            _append_success_result(
-                report=report,
-                plan=plan,
+            _append_result(
+                report,
                 product=product,
-                actual_time="",
-                stats=stats,
-                source_path=str(command_ctx.data_root / product),
+                status="ok",
+                strategy=plan.strategy,
                 reason_code=REASON_OK,
                 elapsed=elapsed,
+                stats=stats,
+                source_path=str(command_ctx.data_root / product),
             )
         except Exception as exc:
             has_error = True
             elapsed = time.time() - t_product_start
-            _append_error_result(report, plan, REASON_MERGE_ERROR, "", elapsed, str(exc))
+            _append_result(
+                report,
+                product=plan.name,
+                status="error",
+                strategy=plan.strategy,
+                reason_code=REASON_MERGE_ERROR,
+                elapsed=elapsed,
+                error=str(exc),
+            )
             if strict:
                 break
 

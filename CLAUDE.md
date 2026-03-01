@@ -31,7 +31,7 @@ python3 quantclass_sync.py
 
 ## 架构概览
 
-单脚本架构，`quantclass_sync.py`（~4100 行）分 4 层，代码内第 74-95 行有"新手阅读路线图"注释：
+单脚本架构，`quantclass_sync.py`（~3940 行）分 4 层，代码内第 68-89 行有"新手阅读路线图"注释：
 
 ```
 命令入口层（Typer CLI）
@@ -47,7 +47,7 @@ python3 quantclass_sync.py
   request_data（HTTP+重试） / extract_archive（解压） / StatusDb（SQLite 状态库） / RunReport
 ```
 
-辅助模块 `coin_preprocess_builtin.py`（~1180 行）：币圈 spot/swap 合成预处理，产出 `.pkl` 文件。
+辅助模块 `coin_preprocess_builtin.py`（~1165 行）：币圈 spot/swap 合成预处理，产出 `.pkl` 文件。
 
 ## 关键概念
 
