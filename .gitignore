@@ -14,6 +14,6 @@ __pycache__/
 .DS_Store
 
 # 代码审查 / 执行计划 / 发布草稿（临时文件）
-code_review_phase1.md
+docs/code_review_phase1.md
 docs/PLAN.md
 docs/RELEASE_POST.md
