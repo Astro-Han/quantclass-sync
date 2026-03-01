@@ -12,3 +12,7 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# 代码审查 / 执行计划（临时文件）
+code_review_phase1.md
+PLAN.md
