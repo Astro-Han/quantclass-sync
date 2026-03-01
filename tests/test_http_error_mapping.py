@@ -2,10 +2,15 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import requests
+
 import quantclass_sync as qcs
 
 
 class HttpErrorMappingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        qcs._reset_http_metrics()
+
     def test_request_data_404_raises_structured_fatal_error(self) -> None:
         with patch("quantclass_sync.requests.request", return_value=SimpleNamespace(status_code=404)):
             with self.assertRaises(qcs.FatalRequestError) as ctx:
@@ -50,6 +55,49 @@ class HttpErrorMappingTests(unittest.TestCase):
             )
 
         self.assertEqual(["2026-02-08"], result)
+
+    def test_request_data_latest_uses_short_policy(self) -> None:
+        with patch("quantclass_sync.time.sleep"), patch(
+            "quantclass_sync.requests.request",
+            side_effect=requests.RequestException("boom"),
+        ) as req_mock:
+            with self.assertRaises(RuntimeError):
+                qcs.request_data(
+                    "GET",
+                    url="https://api.quantclass.cn/api/data/fetch/stock-trading-data-daily/latest?uuid=hid",
+                    headers={"api-key": "k"},
+                    product="stock-trading-data",
+                    request_profile="latest",
+                )
+
+        self.assertEqual(3, req_mock.call_count)
+        for call in req_mock.call_args_list:
+            self.assertEqual(15, call.kwargs["timeout"])
+        attempts, failures = qcs._http_metrics_for_product("stock-trading-data")
+        self.assertEqual(3, attempts)
+        self.assertEqual(3, failures)
+
+    def test_request_data_file_download_uses_robust_policy(self) -> None:
+        with patch("quantclass_sync.time.sleep"), patch(
+            "quantclass_sync.requests.request",
+            side_effect=requests.RequestException("boom"),
+        ) as req_mock:
+            with self.assertRaises(RuntimeError):
+                qcs.request_data(
+                    "GET",
+                    url="https://example.com/file.zip",
+                    headers={"api-key": "k"},
+                    product="stock-trading-data",
+                    request_profile="file_download",
+                    stream=True,
+                )
+
+        self.assertEqual(5, req_mock.call_count)
+        for call in req_mock.call_args_list:
+            self.assertEqual(60, call.kwargs["timeout"])
+        attempts, failures = qcs._http_metrics_for_product("stock-trading-data")
+        self.assertEqual(5, attempts)
+        self.assertEqual(5, failures)
 
 
 if __name__ == "__main__":

@@ -76,7 +76,7 @@ class UpdateCatchUpTests(unittest.TestCase):
             )
 
         self.assertFalse(skipped)
-        self.assertEqual(["2026-02-07", "2026-02-10", "2026-02-11"], queue)
+        self.assertEqual(["2026-02-10", "2026-02-11"], queue)
 
     def test_resolve_catchup_dates_skips_probe_when_latest_has_multiple_dates(self) -> None:
         self._write_local_timestamp("2026-02-06")
@@ -101,7 +101,7 @@ class UpdateCatchUpTests(unittest.TestCase):
             )
 
         self.assertFalse(skipped)
-        self.assertEqual(["2026-02-07", "2026-02-08", "2026-02-09", "2026-02-10", "2026-02-11"], queue)
+        self.assertEqual(["2026-02-09", "2026-02-10", "2026-02-11"], queue)
         probe_mock.assert_not_called()
 
     def test_resolve_catchup_dates_calls_probe_when_latest_is_sparse_multi_dates(self) -> None:
@@ -127,12 +127,67 @@ class UpdateCatchUpTests(unittest.TestCase):
             )
 
         self.assertFalse(skipped)
-        self.assertEqual(["2026-02-07", "2026-02-08", "2026-02-09", "2026-02-10", "2026-02-11"], queue)
+        self.assertEqual(["2026-02-09", "2026-02-10", "2026-02-11"], queue)
         probe_mock.assert_called_once()
 
     def test_resolve_catchup_dates_calls_probe_when_latest_only_one_date(self) -> None:
         self._write_local_timestamp("2026-02-06")
         plan = self._plan()[0]
+        report = self._report()
+        ctx = self._ctx(dry_run=True)
+
+        with patch("quantclass_sync.get_latest_times", return_value=["2026-02-11"]), patch(
+            "quantclass_sync._probe_downloadable_dates",
+            return_value=["2026-02-07", "2026-02-10", "2026-02-11"],
+        ) as probe_mock:
+            queue, skipped = qcs._resolve_requested_dates_for_plan(
+                plan=plan,
+                command_ctx=ctx,
+                hid="hid",
+                headers={"api-key": "k"},
+                requested_date_time="",
+                force_update=False,
+                report=report,
+                t_product_start=time.time(),
+                catch_up_to_latest=True,
+            )
+
+        self.assertFalse(skipped)
+        self.assertEqual(["2026-02-10", "2026-02-11"], queue)
+        probe_mock.assert_called_once()
+
+    def test_resolve_catchup_dates_normalizes_queue_sorted_unique(self) -> None:
+        self._write_local_timestamp("2026-02-06")
+        plan = self._plan()[0]
+        report = self._report()
+        ctx = self._ctx(dry_run=True)
+
+        with patch(
+            "quantclass_sync.get_latest_times",
+            return_value=["2026-02-11", "2026-02-10", "20260210", "2026-02-09"],
+        ), patch("quantclass_sync._probe_downloadable_dates") as probe_mock:
+            queue, skipped = qcs._resolve_requested_dates_for_plan(
+                plan=plan,
+                command_ctx=ctx,
+                hid="hid",
+                headers={"api-key": "k"},
+                requested_date_time="",
+                force_update=False,
+                report=report,
+                t_product_start=time.time(),
+                catch_up_to_latest=True,
+            )
+
+        self.assertFalse(skipped)
+        self.assertEqual(["2026-02-09", "2026-02-10", "2026-02-11"], queue)
+        probe_mock.assert_not_called()
+
+    def test_resolve_catchup_dates_non_business_product_keeps_weekend(self) -> None:
+        product = "stock-fin-data-xbx"
+        path = self.root / product / qcs.TIMESTAMP_FILE_NAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("2026-02-06,2026-02-11 10:00:00\n", encoding="utf-8")
+        plan = qcs.build_product_plan([product])[0]
         report = self._report()
         ctx = self._ctx(dry_run=True)
 
