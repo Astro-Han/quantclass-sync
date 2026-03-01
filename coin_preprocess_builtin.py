@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import pandas as pd
 
@@ -156,6 +156,17 @@ def _collect_source_csv_map(root: Path) -> Dict[str, Path]:
     return result
 
 
+def _try_read_with_encodings(path: Path, reader_fn: Callable[[str], Any], error_prefix: str = "读取失败") -> Any:
+    """按 CSV_ENCODINGS 顺序尝试 reader_fn, 成功即返回, 全部失败则抛出 RuntimeError."""
+    errors: List[str] = []
+    for encoding in CSV_ENCODINGS:
+        try:
+            return reader_fn(encoding)
+        except Exception as exc:
+            errors.append(f"{encoding}: {exc}")
+    raise RuntimeError(f"{error_prefix}: {path}; 尝试编码: {' | '.join(errors)}")
+
+
 def _read_symbol_csv(path: Path) -> pd.DataFrame:
     """
     读取单个币种 CSV。
@@ -163,19 +174,16 @@ def _read_symbol_csv(path: Path) -> pd.DataFrame:
     数据源首行通常是备注，因此固定 skiprows=1，再用多编码兜底读取。
     """
 
-    errors: List[str] = []
-    for encoding in CSV_ENCODINGS:
-        try:
-            return pd.read_csv(
-                path,
-                encoding=encoding,
-                skiprows=1,
-                parse_dates=["candle_begin_time"],
-                low_memory=False,
-            )
-        except Exception as exc:  # pragma: no cover - 兜底编码链路
-            errors.append(f"{encoding}: {exc}")
-    raise RuntimeError(f"读取失败: {path}；尝试编码: {' | '.join(errors)}")
+    def _reader(encoding: str) -> pd.DataFrame:
+        return pd.read_csv(
+            path,
+            encoding=encoding,
+            skiprows=1,
+            parse_dates=["candle_begin_time"],
+            low_memory=False,
+        )
+
+    return _try_read_with_encodings(path, _reader, error_prefix="读取失败")
 
 
 def _read_csv_header_line(path: Path, encoding: str) -> str:
@@ -214,37 +222,34 @@ def _read_symbol_csv_tail(path: Path, max_lines: int = TAIL_READ_MAX_LINES) -> p
     """
     读取 symbol CSV 尾部窗口。
 
-    目的：优先用“尾部追加”判断是否可增量 patch；
+    目的：优先用"尾部追加"判断是否可增量 patch；
     若尾部不足覆盖边界，外层会回退到全文件重算该 symbol。
     """
 
-    errors: List[str] = []
-    for encoding in CSV_ENCODINGS:
-        try:
-            header = _read_csv_header_line(path, encoding=encoding)
-            expected_cols = max(1, len(header.split(",")))
-            tail_lines = _read_tail_lines(path, encoding=encoding, max_lines=max_lines, max_bytes=TAIL_READ_MAX_BYTES)
-            valid_lines = [
-                line
-                for line in tail_lines
-                if not line.startswith("备注")
-                and not line.lower().startswith("candle_begin_time")
-                and line.count(",") >= expected_cols - 1
-            ]
-            if not valid_lines:
-                return pd.DataFrame()
-            text = header + "\n" + "\n".join(valid_lines) + "\n"
-            frame = pd.read_csv(StringIO(text), low_memory=False)
-            if "candle_begin_time" in frame.columns:
-                frame["candle_begin_time"] = pd.to_datetime(
-                    frame["candle_begin_time"],
-                    errors="coerce",
-                    format="mixed",
-                )
-            return frame
-        except Exception as exc:  # pragma: no cover - 尾读兜底链路
-            errors.append(f"{encoding}: {exc}")
-    raise RuntimeError(f"读取尾部窗口失败: {path}；尝试编码: {' | '.join(errors)}")
+    def _reader(encoding: str) -> pd.DataFrame:
+        header = _read_csv_header_line(path, encoding=encoding)
+        expected_cols = max(1, len(header.split(",")))
+        tail_lines = _read_tail_lines(path, encoding=encoding, max_lines=max_lines, max_bytes=TAIL_READ_MAX_BYTES)
+        valid_lines = [
+            line
+            for line in tail_lines
+            if not line.startswith("备注")
+            and not line.lower().startswith("candle_begin_time")
+            and line.count(",") >= expected_cols - 1
+        ]
+        if not valid_lines:
+            return pd.DataFrame()
+        text = header + "\n" + "\n".join(valid_lines) + "\n"
+        frame = pd.read_csv(StringIO(text), low_memory=False)
+        if "candle_begin_time" in frame.columns:
+            frame["candle_begin_time"] = pd.to_datetime(
+                frame["candle_begin_time"],
+                errors="coerce",
+                format="mixed",
+            )
+        return frame
+
+    return _try_read_with_encodings(path, _reader, error_prefix="读取尾部窗口失败")
 
 
 def _detect_relist_segments(raw_df: pd.DataFrame) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
@@ -290,6 +295,32 @@ def _detect_relist_segments(raw_df: pd.DataFrame) -> List[Tuple[pd.Timestamp, pd
     return segments
 
 
+def _fill_standard_columns(df: pd.DataFrame, symbol_name: str, is_swap: bool) -> None:
+    """就地填充 open/high/low/symbol/volume/funding_fee/是否交易 等标准列（close 需已就绪）。"""
+
+    df["open"] = df.get("open", pd.Series(dtype="float64")).fillna(df["close"])
+    df["high"] = df.get("high", pd.Series(dtype="float64")).fillna(df["close"])
+    df["low"] = df.get("low", pd.Series(dtype="float64")).fillna(df["close"])
+    df["symbol"] = df.get("symbol", pd.Series(dtype="object")).ffill().fillna(symbol_name)
+
+    for col in (
+        "volume",
+        "quote_volume",
+        "trade_num",
+        "taker_buy_base_asset_volume",
+        "taker_buy_quote_asset_volume",
+    ):
+        df[col] = df.get(col, pd.Series(dtype="float64")).fillna(0)
+
+    df["avg_price_1m"] = df.get("avg_price_1m", pd.Series(dtype="float64")).fillna(df["open"])
+    df["avg_price_5m"] = df.get("avg_price_5m", pd.Series(dtype="float64")).fillna(df["open"])
+    if is_swap:
+        df["funding_fee"] = df.get("fundingRate", pd.Series(dtype="float64")).fillna(0)
+    else:
+        df["funding_fee"] = 0
+    df["是否交易"] = (df["volume"] > 0).astype("int8")
+
+
 def _prepare_symbol_frame(raw_df: pd.DataFrame, symbol: str, is_swap: bool) -> pd.DataFrame:
     """把单币种原始 K 线整理为统一结构（20 列口径）。"""
 
@@ -319,28 +350,7 @@ def _prepare_symbol_frame(raw_df: pd.DataFrame, symbol: str, is_swap: bool) -> p
     merged = benchmark.merge(data, how="left", on="candle_begin_time", sort=True)
 
     merged["close"] = merged.get("close", pd.Series(dtype="float64")).ffill()
-    merged["open"] = merged.get("open", pd.Series(dtype="float64")).fillna(merged["close"])
-    merged["high"] = merged.get("high", pd.Series(dtype="float64")).fillna(merged["close"])
-    merged["low"] = merged.get("low", pd.Series(dtype="float64")).fillna(merged["close"])
-    merged["symbol"] = merged.get("symbol", pd.Series(dtype="object")).ffill().fillna(symbol)
-
-    for col in (
-        "volume",
-        "quote_volume",
-        "trade_num",
-        "taker_buy_base_asset_volume",
-        "taker_buy_quote_asset_volume",
-    ):
-        merged[col] = merged.get(col, pd.Series(dtype="float64")).fillna(0)
-
-    merged["avg_price_1m"] = merged.get("avg_price_1m", pd.Series(dtype="float64")).fillna(merged["open"])
-    merged["avg_price_5m"] = merged.get("avg_price_5m", pd.Series(dtype="float64")).fillna(merged["open"])
-    if is_swap:
-        merged["funding_fee"] = merged.get("fundingRate", pd.Series(dtype="float64")).fillna(0)
-    else:
-        merged["funding_fee"] = 0
-
-    merged["是否交易"] = (merged["volume"] > 0).astype("int8")
+    _fill_standard_columns(merged, symbol_name=symbol, is_swap=is_swap)
     merged["first_candle_time"] = first_candle_time
     merged["last_candle_time"] = last_candle_time
     merged["symbol_spot"] = symbol if not is_swap else ""
@@ -374,28 +384,7 @@ def _build_incremental_rows(
         data.loc[data.index[0], "close"] = prev_close
     data["close"] = data["close"].ffill().fillna(prev_close)
 
-    data["open"] = data.get("open", pd.Series(dtype="float64")).fillna(data["close"])
-    data["high"] = data.get("high", pd.Series(dtype="float64")).fillna(data["close"])
-    data["low"] = data.get("low", pd.Series(dtype="float64")).fillna(data["close"])
-    data["symbol"] = data.get("symbol", pd.Series(dtype="object")).ffill().fillna(source_symbol)
-
-    for col in (
-        "volume",
-        "quote_volume",
-        "trade_num",
-        "taker_buy_base_asset_volume",
-        "taker_buy_quote_asset_volume",
-    ):
-        data[col] = data.get(col, pd.Series(dtype="float64")).fillna(0)
-
-    data["avg_price_1m"] = data.get("avg_price_1m", pd.Series(dtype="float64")).fillna(data["open"])
-    data["avg_price_5m"] = data.get("avg_price_5m", pd.Series(dtype="float64")).fillna(data["open"])
-    if is_swap:
-        data["funding_fee"] = data.get("fundingRate", pd.Series(dtype="float64")).fillna(0)
-    else:
-        data["funding_fee"] = 0
-
-    data["是否交易"] = (data["volume"] > 0).astype("int8")
+    _fill_standard_columns(data, symbol_name=source_symbol, is_swap=is_swap)
     base_first = pd.to_datetime(existing_frame["first_candle_time"].iloc[0])
     data["first_candle_time"] = base_first
     data["last_candle_time"] = data["candle_begin_time"].max()
@@ -813,7 +802,7 @@ def _try_tail_append_symbol(
     is_swap: bool,
 ) -> Tuple[bool, Set[str]]:
     """
-    尝试走“尾部追加”增量路径。
+    尝试走"尾部追加"增量路径。
 
     返回：
     - bool: 是否命中增量追加（True 表示不需要全文件重算该 symbol）
@@ -829,7 +818,7 @@ def _try_tail_append_symbol(
     if last_time is None:
         return False, set()
 
-    # 选“最新分段”做尾部追加，历史分段不变。
+    # 选"最新分段"做尾部追加，历史分段不变。
     active_key = max(
         keys,
         key=lambda key: pd.to_datetime(data_dict[key]["candle_begin_time"].max(), errors="coerce"),
@@ -854,7 +843,7 @@ def _try_tail_append_symbol(
 
     tail_min = pd.to_datetime(tail_raw["candle_begin_time"].min(), errors="coerce")
     if pd.isna(tail_min) or pd.Timestamp(tail_min) > last_time:
-        # 尾部窗口没覆盖到旧边界，无法证明“只需追加”，回退单 symbol 全量重算。
+        # 尾部窗口没覆盖到旧边界，无法证明"只需追加"，回退单 symbol 全量重算。
         return False, set()
 
     new_raw = tail_raw[pd.to_datetime(tail_raw["candle_begin_time"], errors="coerce") > last_time]
@@ -934,7 +923,7 @@ def _resolve_source_delta(
     removed_sources = baseline_sources - current_sources
 
     changed_sources: Set[str] = set(added_sources)
-    # 注意：这里使用“本地时间戳”比较，避免 epoch/时区换算造成误判。
+    # 注意：这里使用"本地时间戳"比较，避免 epoch/时区换算造成误判。
     baseline_local = pd.Timestamp(baseline_runtime)
     for symbol in current_sources - added_sources:
         path = source_files[symbol]
@@ -983,6 +972,55 @@ def _run_full_rebuild(spot_dir: Path, swap_dir: Path, output_dir: Path, mode: st
     )
 
 
+def _patch_one_side(
+    sources: Dict[str, Path],
+    data_dict: Dict[str, pd.DataFrame],
+    grouped: Dict[str, List[str]],
+    removed_sources: Set[str],
+    changed_sources: Set[str],
+    is_swap: bool,
+) -> Tuple[Set[str], Set[str]]:
+    """处理单侧（spot 或 swap）的删除 + 变更，返回 (removed_symbols, changed_symbols)。"""
+
+    removed_symbols: Set[str] = set()
+    changed_symbols: Set[str] = set()
+
+    # 删除源 symbol：把对应 split 键从产物移除。
+    for source_symbol in sorted(removed_sources):
+        for key in grouped.get(source_symbol, []):
+            if key in data_dict:
+                data_dict.pop(key, None)
+                removed_symbols.add(key)
+
+    # 变更源 symbol：先尝试尾部追加，失败则仅重算该 symbol。
+    for source_symbol in sorted(changed_sources):
+        source_file = sources.get(source_symbol)
+        if source_file is None:
+            continue
+        tail_ok, tail_affected = _try_tail_append_symbol(
+            source_file=source_file,
+            source_symbol=source_symbol,
+            data_dict=data_dict,
+            existing_keys=grouped.get(source_symbol, []),
+            is_swap=is_swap,
+        )
+        if tail_ok:
+            changed_symbols.update(tail_affected)
+            continue
+
+        removed, added = _rebuild_source_symbol(
+            source_file=source_file,
+            source_symbol=source_symbol,
+            is_swap=is_swap,
+            data_dict=data_dict,
+            grouped_by_source=grouped,
+        )
+        removed_symbols.update(removed)
+        changed_symbols.update(added)
+
+    return removed_symbols, changed_symbols
+
+
 def _run_incremental_patch(
     spot_dir: Path,
     swap_dir: Path,
@@ -1012,74 +1050,22 @@ def _run_incremental_patch(
         baseline_sources=set(swap_grouped.keys()),
     )
 
-    spot_changed_symbols: Set[str] = set()
-    swap_changed_symbols: Set[str] = set()
-    spot_removed_symbols: Set[str] = set()
-    swap_removed_symbols: Set[str] = set()
-
-    # 删除源 symbol：把对应 split 键从产物移除。
-    for source_symbol in sorted(removed_spot_sources):
-        for key in spot_grouped.get(source_symbol, []):
-            if key in spot_dict:
-                spot_dict.pop(key, None)
-                spot_removed_symbols.add(key)
-
-    for source_symbol in sorted(removed_swap_sources):
-        for key in swap_grouped.get(source_symbol, []):
-            if key in swap_dict:
-                swap_dict.pop(key, None)
-                swap_removed_symbols.add(key)
-
-    # 变更源 symbol：先尝试尾部追加，失败则仅重算该 symbol。
-    for source_symbol in sorted(changed_spot_sources):
-        source_file = spot_sources.get(source_symbol)
-        if source_file is None:
-            continue
-        tail_ok, tail_affected = _try_tail_append_symbol(
-            source_file=source_file,
-            source_symbol=source_symbol,
-            data_dict=spot_dict,
-            existing_keys=spot_grouped.get(source_symbol, []),
-            is_swap=False,
-        )
-        if tail_ok:
-            spot_changed_symbols.update(tail_affected)
-            continue
-
-        removed, added = _rebuild_source_symbol(
-            source_file=source_file,
-            source_symbol=source_symbol,
-            is_swap=False,
-            data_dict=spot_dict,
-            grouped_by_source=spot_grouped,
-        )
-        spot_removed_symbols.update(removed)
-        spot_changed_symbols.update(added)
-
-    for source_symbol in sorted(changed_swap_sources):
-        source_file = swap_sources.get(source_symbol)
-        if source_file is None:
-            continue
-        tail_ok, tail_affected = _try_tail_append_symbol(
-            source_file=source_file,
-            source_symbol=source_symbol,
-            data_dict=swap_dict,
-            existing_keys=swap_grouped.get(source_symbol, []),
-            is_swap=True,
-        )
-        if tail_ok:
-            swap_changed_symbols.update(tail_affected)
-            continue
-
-        removed, added = _rebuild_source_symbol(
-            source_file=source_file,
-            source_symbol=source_symbol,
-            is_swap=True,
-            data_dict=swap_dict,
-            grouped_by_source=swap_grouped,
-        )
-        swap_removed_symbols.update(removed)
-        swap_changed_symbols.update(added)
+    spot_removed_symbols, spot_changed_symbols = _patch_one_side(
+        sources=spot_sources,
+        data_dict=spot_dict,
+        grouped=spot_grouped,
+        removed_sources=removed_spot_sources,
+        changed_sources=changed_spot_sources,
+        is_swap=False,
+    )
+    swap_removed_symbols, swap_changed_symbols = _patch_one_side(
+        sources=swap_sources,
+        data_dict=swap_dict,
+        grouped=swap_grouped,
+        removed_sources=removed_swap_sources,
+        changed_sources=changed_swap_sources,
+        is_swap=True,
+    )
 
     _validate_integrity(
         spot_dir=spot_dir,

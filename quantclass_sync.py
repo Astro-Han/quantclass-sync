@@ -25,7 +25,6 @@ import requests
 
 try:
     import typer
-    from apscheduler.schedulers.background import BackgroundScheduler
     from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
     from rich.console import Console
 except ModuleNotFoundError as exc:  # pragma: no cover - 环境缺依赖时给出中文提示
@@ -55,9 +54,6 @@ DEFAULT_CATALOG_FILE = BASE_DIR / "catalog.txt"
 DEFAULT_REPORT_DIR = BASE_DIR / "log"
 DEFAULT_PROGRESS_EVERY = 500
 SYNC_META_DIRNAME = ".quantclass_sync"
-DEFAULT_METADATA_ROOT = DEFAULT_DATA_ROOT / SYNC_META_DIRNAME
-DEFAULT_STATUS_DB = DEFAULT_METADATA_ROOT / "status" / "FuelBinStat.db"
-DEFAULT_STATUS_JSON = DEFAULT_METADATA_ROOT / "status" / "products-status.json"
 DEFAULT_REPORT_RETENTION_DAYS = 365
 TIMESTAMP_FILE_NAME = "timestamp.txt"
 PRODUCT_MODE_LOCAL_SCAN = "local_scan"
@@ -66,10 +62,8 @@ PRODUCT_MODES = {PRODUCT_MODE_LOCAL_SCAN, PRODUCT_MODE_EXPLICIT_LIST}
 
 LEGACY_STATUS_DB_REL = Path("code") / "data" / "FuelBinStat.db"
 LEGACY_STATUS_JSON_REL = Path("code") / "data" / "products-status.json"
-LEGACY_REPORT_DIR_REL = Path("code") / "data" / "log" / "quantclass"
 META_STATUS_DB_REL = Path(SYNC_META_DIRNAME) / "status" / "FuelBinStat.db"
 META_STATUS_JSON_REL = Path(SYNC_META_DIRNAME) / "status" / "products-status.json"
-META_REPORT_DIR_REL = Path(SYNC_META_DIRNAME) / "log" / "quantclass"
 
 # ========================= 新手阅读路线图（先看这里） =========================
 # 这份脚本分成 4 层。第一次读代码，建议按这个顺序：
@@ -401,16 +395,6 @@ class CommandContext(BaseModel):
     work_dir: Path = DEFAULT_WORK_DIR
 
 
-class CommandResult(BaseModel):
-    """命令执行结果（用于命令级状态回传与总结）。"""
-
-    command: str
-    status: str
-    reason_code: str = REASON_OK
-    elapsed_seconds: float = 0.0
-    report_file: Optional[str] = None
-    detail: str = ""
-
 
 class ProductStatus(BaseModel):
     """产品状态模型（仅保留更新链路所需字段）。"""
@@ -476,13 +460,6 @@ class ProductStatus(BaseModel):
             "ts": self.ts or "",
         }
 
-
-class SchedulerConfig(BaseModel):
-    """调度器配置（定时任务框架，仅预留接口，默认不启动）。"""
-
-    enabled: bool = False
-    timezone: str = "Asia/Shanghai"
-    interval_minutes: int = Field(default=60, ge=1)
 
 def run_report_to_dict(report: RunReport) -> Dict[str, object]:
     """RunReport 转 dict，便于输出 JSON。"""
@@ -605,6 +582,16 @@ def normalize_product_name(product: str) -> str:
         return product[:-6]
     return product
 
+def _deduplicate(items: Sequence[str]) -> List[str]:
+    """保序去重: 保留第一次出现的元素, 丢弃后续重复项."""
+    seen: set = set()
+    result: List[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
 def split_products(raw_products: Sequence[str]) -> List[str]:
     """
     解析命令行产品列表，支持空格分隔和逗号分隔。
@@ -617,13 +604,7 @@ def split_products(raw_products: Sequence[str]) -> List[str]:
             if part:
                 products.append(part)
 
-    seen = set()
-    result: List[str] = []
-    for item in products:
-        if item not in seen:
-            seen.add(item)
-            result.append(item)
-    return result
+    return _deduplicate(products)
 
 
 def _write_text_atomic(path: Path, content: str, encoding: str = "utf-8") -> None:
@@ -796,12 +777,7 @@ def load_products_from_catalog(path: Path) -> List[str]:
             )
         products.append(normalize_product_name(s.lower()))
 
-    seen = set()
-    result: List[str] = []
-    for item in products:
-        if item not in seen:
-            seen.add(item)
-            result.append(item)
+    result = _deduplicate(products)
     if not result:
         raise RuntimeError(f"产品清单为空：{path}；请至少配置一个产品英文名。")
     return result
@@ -887,12 +863,7 @@ def resolve_products_by_mode(
     else:
         selected = list(local_valid)
 
-    seen = set()
-    result: List[str] = []
-    for item in selected:
-        if item not in seen:
-            seen.add(item)
-            result.append(item)
+    result = _deduplicate(selected)
 
     return result, unknown_local, invalid_explicit
 
@@ -1046,15 +1017,6 @@ def parse_latest_time_candidates(raw_text: str) -> List[str]:
     if not valid:
         raise RuntimeError("接口未返回可用的 date_time。")
     return valid
-
-
-def normalize_latest_time(raw_text: str) -> str:
-    """
-    latest 接口可能返回逗号分隔或空白分隔的一串时间，
-    这里取最大值作为“最新版本”。
-    """
-
-    return parse_latest_time_candidates(raw_text)[-1]
 
 
 def get_latest_times(api_base: str, product: str, hid: str, headers: Dict[str, str]) -> List[str]:
@@ -1660,6 +1622,13 @@ def normalize_split_value(raw_value: str) -> str:
     value = value.replace("/", "_").replace("\\", "_")
     return value
 
+def _log_sync_progress(product: str, idx: int, total: int, stats: SyncStats, label: str = "同步进度") -> None:
+    """按 PROGRESS_EVERY 间隔打印同步进度日志."""
+    if idx % max(PROGRESS_EVERY, 1) == 0 or idx == total:
+        log_info(f"[{product}] {label} {idx}/{total}", event="SYNC_OK",
+                 created=stats.created_files, updated=stats.updated_files,
+                 unchanged=stats.unchanged_files, skipped=stats.skipped_files)
+
 def sync_daily_aggregate_file(src: Path, product: str, data_root: Path, dry_run: bool) -> SyncStats:
     """
     处理按天聚合 CSV（例如 2026-02-06.csv）。
@@ -1716,14 +1685,7 @@ def sync_daily_aggregate_file(src: Path, product: str, data_root: Path, dry_run:
         result, added_rows, sort_audit = sync_payload_to_target(incoming=payload, target=target, rule=rule, dry_run=dry_run)
         apply_file_result(stats, result=result, added_rows=added_rows, sort_audit=sort_audit)
 
-        if idx % max(PROGRESS_EVERY, 1) == 0 or idx == total_codes:
-            log_info(
-                f"[{product}] 拆分进度 {idx}/{total_codes}",
-                event="SYNC_OK",
-                created=stats.created_files,
-                updated=stats.updated_files,
-                unchanged=stats.unchanged_files,
-            )
+        _log_sync_progress(product, idx, total_codes, stats, label="拆分进度")
 
     return stats
 
@@ -1822,15 +1784,7 @@ def sync_known_product(product: str, extract_path: Path, data_root: Path, dry_ru
                 result, added_rows, sort_audit = sync_csv_file(src=src, target=target, rule=rule, dry_run=dry_run)
                 apply_file_result(stats, result=result, added_rows=added_rows, sort_audit=sort_audit)
 
-        if idx % max(PROGRESS_EVERY, 1) == 0 or idx == total_files:
-            log_info(
-                f"[{product}] 同步进度 {idx}/{total_files}",
-                event="SYNC_OK",
-                created=stats.created_files,
-                updated=stats.updated_files,
-                unchanged=stats.unchanged_files,
-                skipped=stats.skipped_files,
-            )
+        _log_sync_progress(product, idx, total_files, stats)
 
     return stats, reason_code
 
@@ -1883,15 +1837,7 @@ def sync_unknown_product(product: str, extract_path: Path, data_root: Path, dry_
                     apply_file_result(stats, result=result, added_rows=added_rows, sort_audit=sort_audit)
                     did_unknown_header_merge = True
                     log_debug(f"[{product}] 命中轻量自动合并: {src_rel_path}")
-                    if idx % max(PROGRESS_EVERY, 1) == 0 or idx == total_files:
-                        log_info(
-                            f"[{product}] 轻量合并进度 {idx}/{total_files}",
-                            event="SYNC_OK",
-                            created=stats.created_files,
-                            updated=stats.updated_files,
-                            unchanged=stats.unchanged_files,
-                            skipped=stats.skipped_files,
-                        )
+                    _log_sync_progress(product, idx, total_files, stats, label="轻量合并进度")
                     continue
             except Exception as exc:
                 log_debug(f"[{product}] 轻量合并条件检查失败，改走镜像: {src_rel_path}, err={exc}")
@@ -1899,15 +1845,7 @@ def sync_unknown_product(product: str, extract_path: Path, data_root: Path, dry_
         result = sync_raw_file(src=src, target=target, dry_run=dry_run)
         apply_file_result(stats, result=result)
 
-        if idx % max(PROGRESS_EVERY, 1) == 0 or idx == total_files:
-            log_info(
-                f"[{product}] 镜像进度 {idx}/{total_files}",
-                event="SYNC_OK",
-                created=stats.created_files,
-                updated=stats.updated_files,
-                unchanged=stats.unchanged_files,
-                skipped=stats.skipped_files,
-            )
+        _log_sync_progress(product, idx, total_files, stats, label="镜像进度")
 
     if did_unknown_header_merge:
         return stats, REASON_UNKNOWN_HEADER_MERGE
@@ -2168,8 +2106,9 @@ def _download_and_prepare_extract(
             save_file(file_url=file_url, file_path=download_path, headers=headers)
         log_info(f"[{product}] 下载完成: {download_path}", event="DOWNLOAD_OK")
         return download_path, extract_path
-    except FatalRequestError as exc:
-        if exc.status_code == 404:
+    except Exception as exc:
+        # HTTP 404 单独映射为"该日期无数据"，其余统一归类为网络/下载错误。
+        if isinstance(exc, FatalRequestError) and exc.status_code == 404:
             raise ProductSyncError(
                 message=(
                     f"产品 {product} 下载失败；该日期无可下载数据（HTTP 404）；"
@@ -2177,14 +2116,6 @@ def _download_and_prepare_extract(
                 ),
                 reason_code=REASON_NO_DATA_FOR_DATE,
             ) from exc
-        raise ProductSyncError(
-            message=(
-                f"产品 {product} 下载失败；可能原因：网络波动、下载额度限制或链接失效；"
-                f"建议：稍后重试并确认下载权限。原始错误：{exc}"
-            ),
-            reason_code=REASON_NETWORK_ERROR,
-        ) from exc
-    except Exception as exc:
         raise ProductSyncError(
             message=(
                 f"产品 {product} 下载失败；可能原因：网络波动、下载额度限制或链接失效；"
@@ -2216,20 +2147,6 @@ def write_run_report(path: Path, report: RunReport) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 # 状态库与命令行（Typer 子命令模式）
-
-def build_scheduler_placeholder(config: SchedulerConfig) -> BackgroundScheduler:
-    """
-    构建调度器（定时任务框架：只初始化，不启动）。
-
-    说明：
-    - 这里只做接口预留，方便后续接自动更新。
-    - 当前版本默认不注册任何定时任务。
-    """
-
-    scheduler = BackgroundScheduler(timezone=config.timezone)
-    log_debug("调度器已初始化（仅预留接口，当前不启动）。", event="SCHEDULER_INIT", enabled=config.enabled)
-    return scheduler
-
 
 def resolve_runtime_paths(data_root: Path) -> RuntimePaths:
     """
@@ -2607,6 +2524,16 @@ def load_catalog_or_raise(catalog_file: Path) -> List[str]:
     return load_products_from_catalog(catalog_file)
 
 
+def _build_headers(api_key: str) -> Dict[str, str]:
+    """构建标准 HTTP 请求头."""
+    return {
+        "user-agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/100.0.4896.127 Safari/537.36"),
+        "content-type": "application/json",
+        "api-key": api_key,
+    }
+
 def build_headers_or_raise(ctx: CommandContext) -> Tuple[Dict[str, str], str]:
     """构建请求头并校验凭证。"""
 
@@ -2618,15 +2545,7 @@ def build_headers_or_raise(ctx: CommandContext) -> Tuple[Dict[str, str], str]:
     if not hid:
         raise RuntimeError(f"缺少 hid；可能原因：命令行/环境变量/本地密钥文件都未提供；建议：配置 --hid 或更新 {ctx.secrets_file}。")
 
-    return {
-        "user-agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/100.0.4896.127 Safari/537.36"
-        ),
-        "content-type": "application/json",
-        "api-key": api_key,
-    }, hid
+    return _build_headers(api_key), hid
 
 
 def _append_gate_skip_result(
@@ -2860,32 +2779,6 @@ def _resolve_requested_dates_for_plan(
             error=str(exc),
         )
         return [requested_date_for_plan], False
-
-
-def _resolve_requested_date_for_plan(
-    plan: ProductPlan,
-    command_ctx: CommandContext,
-    hid: str,
-    headers: Dict[str, str],
-    requested_date_time: str,
-    force_update: bool,
-    report: RunReport,
-    t_product_start: float,
-) -> Tuple[str, bool]:
-    """兼容旧调用：返回单日期。"""
-
-    dates, skipped = _resolve_requested_dates_for_plan(
-        plan=plan,
-        command_ctx=command_ctx,
-        hid=hid,
-        headers=headers,
-        requested_date_time=requested_date_time,
-        force_update=force_update,
-        report=report,
-        t_product_start=t_product_start,
-        catch_up_to_latest=False,
-    )
-    return (dates[0] if dates else ""), skipped
 
 
 def _upsert_product_status_after_success(
@@ -3348,7 +3241,6 @@ def global_options(
         work_dir=DEFAULT_WORK_DIR.resolve(),
     )
     ctx.obj = command_ctx
-    build_scheduler_placeholder(SchedulerConfig())
 
     # 无子命令时做“首次引导”：
     # - 首次（无配置）：自动进入 setup
@@ -3552,6 +3444,17 @@ def _resolve_command_paths(
     return data_root.resolve(), secrets_file.resolve(), user_config, data_root_source, secrets_source
 
 
+def _init_command(ctx: typer.Context, command_name: str) -> CommandContext:
+    """兼容命令的统一初始化: 解析路径来源 -> 应用覆盖 -> 更新 ctx.obj -> 打印调试日志."""
+    command_ctx = _ctx(ctx)
+    data_root, secrets_file, _user_config, data_root_source, secrets_source = _resolve_command_paths(command_ctx)
+    command_ctx = _build_command_ctx_with_overrides(command_ctx, data_root, secrets_file)
+    ctx.obj = command_ctx
+    log_debug(f"{command_name} 运行来源已解析.", event="PATHS",
+              data_root_source=data_root_source, secrets_source=secrets_source)
+    return command_ctx
+
+
 def run_update_with_settings(
     command_ctx: CommandContext,
     mode: str = "local",
@@ -3743,15 +3646,7 @@ def cmd_setup(
     # 这样检查失败时不会留下“新配置写了一半”的状态。
     if not skip_check:
         probe_product = default_products[0] if default_products else (catalog[0] if catalog else "stock-trading-data")
-        headers = {
-            "user-agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/100.0.4896.127 Safari/537.36"
-            ),
-            "content-type": "application/json",
-            "api-key": raw_api_key,
-        }
+        headers = _build_headers(raw_api_key)
         try:
             get_latest_time(api_base=setup_ctx.api_base.rstrip("/"), product=probe_product, hid=raw_hid, headers=headers)
         except Exception as exc:
@@ -3873,16 +3768,7 @@ def cmd_repair_sort(
     排序修复命令（对历史 CSV 文件做全量排序治理）。
     """
 
-    command_ctx = _ctx(ctx)
-    data_root, secrets_file, _user_config, data_root_source, secrets_source = _resolve_command_paths(command_ctx)
-    command_ctx = _build_command_ctx_with_overrides(command_ctx, data_root, secrets_file)
-    ctx.obj = command_ctx
-    log_debug(
-        "repair_sort 运行来源已解析。",
-        event="PATHS",
-        data_root_source=data_root_source,
-        secrets_source=secrets_source,
-    )
+    command_ctx = _init_command(ctx, "repair_sort")
     ensure_data_root_ready(command_ctx.data_root, create_if_missing=False)
 
     requested_products = split_products(products)
@@ -3967,16 +3853,7 @@ def cmd_init(ctx: typer.Context) -> None:
     这一步只更新状态文件，不下载数据。
     """
 
-    command_ctx = _ctx(ctx)
-    data_root, secrets_file, _user_config, data_root_source, secrets_source = _resolve_command_paths(command_ctx)
-    command_ctx = _build_command_ctx_with_overrides(command_ctx, data_root, secrets_file)
-    ctx.obj = command_ctx
-    log_debug(
-        "init 运行来源已解析。",
-        event="PATHS",
-        data_root_source=data_root_source,
-        secrets_source=secrets_source,
-    )
+    command_ctx = _init_command(ctx, "init")
     ensure_data_root_ready(command_ctx.data_root, create_if_missing=True)
     t0 = time.time()
     log_info("开始执行 init。", event="CMD_START")
@@ -4029,16 +3906,7 @@ def cmd_one_data(
     适合场景：排障、验证单个产品、减少批量更新的等待时间。
     """
 
-    command_ctx = _ctx(ctx)
-    data_root, secrets_file, _user_config, data_root_source, secrets_source = _resolve_command_paths(command_ctx)
-    command_ctx = _build_command_ctx_with_overrides(command_ctx, data_root, secrets_file)
-    ctx.obj = command_ctx
-    log_debug(
-        "one_data 运行来源已解析。",
-        event="PATHS",
-        data_root_source=data_root_source,
-        secrets_source=secrets_source,
-    )
+    command_ctx = _init_command(ctx, "one_data")
     ensure_data_root_ready(command_ctx.data_root, create_if_missing=False)
     # one_data 的最小执行单元就是一个 ProductPlan。
     report = _new_report(command_ctx.run_id, mode="network")
@@ -4087,16 +3955,7 @@ def cmd_all_data(
     mode=catalog：按 catalog 清单轮询（补齐或巡检时使用）。
     """
 
-    command_ctx = _ctx(ctx)
-    data_root, secrets_file, _user_config, data_root_source, secrets_source = _resolve_command_paths(command_ctx)
-    command_ctx = _build_command_ctx_with_overrides(command_ctx, data_root, secrets_file)
-    ctx.obj = command_ctx
-    log_debug(
-        "all_data 运行来源已解析。",
-        event="PATHS",
-        data_root_source=data_root_source,
-        secrets_source=secrets_source,
-    )
+    command_ctx = _init_command(ctx, "all_data")
     exit_code = run_update_with_settings(
         command_ctx=command_ctx,
         mode=mode,
