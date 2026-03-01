@@ -13,7 +13,5 @@ __pycache__/
 # macOS
 .DS_Store
 
-# 代码审查 / 执行计划 / 发布草稿（临时文件）
-docs/code_review_phase1.md
-docs/PLAN.md
-docs/RELEASE_POST.md
+# 本地文档（计划 / 审查 / 发布草稿，不进仓库）
+docs/
