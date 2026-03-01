@@ -7,7 +7,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .constants import (
     DISCOVERY_IGNORED_PRODUCTS,
@@ -49,7 +49,13 @@ def validate_run_mode(mode: str) -> str:
         raise ValueError("mode 仅支持 local 或 catalog")
     return normalized
 
-def _write_text_atomic(path: Path, content: str, encoding: str = "utf-8") -> None:
+def _write_text_atomic(
+    path: Path,
+    content: str,
+    encoding: str = "utf-8",
+    create_mode: int = 0o666,
+    final_mode: int | None = None,
+) -> None:
     """
     原子写入文本文件。
 
@@ -58,8 +64,19 @@ def _write_text_atomic(path: Path, content: str, encoding: str = "utf-8") -> Non
 
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.parent / f".{path.name}.tmp-{os.getpid()}-{time.time_ns()}"
-    tmp_path.write_text(content, encoding=encoding)
-    os.replace(tmp_path, path)
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, create_mode)
+    os.close(fd)
+    try:
+        tmp_path.write_text(content, encoding=encoding)
+        os.replace(tmp_path, path)
+        if final_mode is not None:
+            os.chmod(path, final_mode)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
 
 def snapshot_text_file(path: Path) -> TextFileSnapshot:
     """保存文件当前状态。"""
@@ -114,12 +131,7 @@ def save_user_secrets_atomic(path: Path, api_key: str, hid: str) -> None:
     """保存用户密钥文件（原子写入）。"""
 
     body = f"QUANTCLASS_API_KEY={api_key.strip()}\nQUANTCLASS_HID={hid.strip()}\n"
-    _write_text_atomic(path, body)
-    try:
-        os.chmod(path, 0o600)
-    except Exception:
-        # 非关键路径（部分系统无 chmod 权限），失败不阻断主流程。
-        pass
+    _write_text_atomic(path, body, create_mode=0o600, final_mode=0o600)
 
 def save_setup_artifacts_atomic(
     config_path: Path,
@@ -199,7 +211,7 @@ def load_products_from_catalog(path: Path) -> List[str]:
         if not is_product_identifier(s):
             raise RuntimeError(
                 f"产品清单格式错误：{path}:{lineno} -> `{s}`；"
-                "请使用“每行一个产品英文名”的写法。"
+                '请使用"每行一个产品英文名"的写法。'
             )
         products.append(normalize_product_name(s.lower()))
 

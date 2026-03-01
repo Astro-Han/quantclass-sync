@@ -157,6 +157,17 @@ class CoinPreprocessHookTests(unittest.TestCase):
         self.assertEqual("ok", result.status)
         self.assertEqual(qcs.REASON_PREPROCESS_FALLBACK_FULL_OK, result.reason_code)
 
+    def test_error_when_builtin_preprocess_returns_non_tuple(self) -> None:
+        self._ensure_preprocess_dir()
+        report = self._report_with_source_success(stats=self._stats(updated=1))
+        with patch("quantclass_sync._run_builtin_coin_preprocess", return_value="legacy-command"):
+            has_error = qcs._maybe_run_coin_preprocess(self._ctx(), report, conn=None)
+        self.assertTrue(has_error)
+        result = report.products[-1]
+        self.assertEqual("error", result.status)
+        self.assertEqual(qcs.REASON_PREPROCESS_FAILED, result.reason_code)
+        self.assertTrue(result.error)
+
     def test_run_report_contains_at_most_one_preprocess_record(self) -> None:
         preprocess_dir = self.root / qcs.PREPROCESS_PRODUCT
         preprocess_dir.mkdir(parents=True, exist_ok=True)

@@ -301,7 +301,8 @@ __all__ = [
     "cmd_init",
     "cmd_one_data",
     "cmd_all_data",
-    # patch helpers
+    # patch helpers：保留旧版 monkey patch 入口；测试可替换这三个符号，
+    # 兼容层会在调用前把替换结果回写到内部模块依赖上。
     "requests",
     "time",
     "sys",

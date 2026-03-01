@@ -31,6 +31,9 @@ class ImportCompatTests(unittest.TestCase):
             "cmd_one_data",
             "cmd_all_data",
             "app",
+            "requests",
+            "time",
+            "sys",
         ]
         missing = [name for name in expected if not hasattr(qcs, name)]
         self.assertEqual([], missing)

@@ -59,6 +59,30 @@ class HttpErrorMappingTests(unittest.TestCase):
 
         self.assertEqual(["2026-02-08"], result)
 
+    def test_probe_downloadable_dates_skips_legacy_fatal_without_status(self) -> None:
+        def fake_get_download_link(
+            api_base: str,
+            product: str,
+            date_time: str,
+            hid: str,
+            headers: dict[str, str],
+        ) -> str:
+            if date_time == "2026-02-07":
+                raise qcs.FatalRequestError("legacy-no-status")
+            return f"https://example.com/{product}/{date_time}.zip"
+
+        with patch("quantclass_sync.get_download_link", side_effect=fake_get_download_link):
+            result = qcs._probe_downloadable_dates(
+                api_base="https://api.quantclass.cn/api/data",
+                product="stock-fin-data-xbx",
+                hid="hid",
+                headers={"api-key": "k"},
+                local_date="2026-02-06",
+                latest_date="2026-02-08",
+            )
+
+        self.assertEqual(["2026-02-08"], result)
+
     def test_request_data_latest_uses_short_policy(self) -> None:
         with patch("quantclass_sync.time.sleep"), patch(
             "quantclass_sync.requests.request",
@@ -180,6 +204,45 @@ class HttpErrorMappingTests(unittest.TestCase):
                     )
 
             self.assertEqual(qcs.REASON_MERGE_ERROR, cm.exception.reason_code)
+
+    def test_download_and_prepare_extract_maps_404_from_get_link_to_no_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch(
+                "quantclass_sync_internal.orchestrator.get_download_link",
+                side_effect=qcs.FatalRequestError("not found", status_code=404),
+            ):
+                with self.assertRaises(qcs.ProductSyncError) as cm:
+                    orchestrator._download_and_prepare_extract(
+                        product="stock-trading-data",
+                        actual_time="2026-02-11",
+                        api_base="https://api.quantclass.cn/api/data",
+                        hid="hid",
+                        headers={"api-key": "k"},
+                        work_dir=Path(tmpdir),
+                    )
+
+        self.assertEqual(qcs.REASON_NO_DATA_FOR_DATE, cm.exception.reason_code)
+
+    def test_download_and_prepare_extract_maps_404_from_file_download_to_no_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch(
+                "quantclass_sync_internal.orchestrator.get_download_link",
+                return_value="https://example.com/payload.zip",
+            ), patch(
+                "quantclass_sync_internal.orchestrator._download_file_atomic",
+                side_effect=qcs.FatalRequestError("not found", status_code=404),
+            ):
+                with self.assertRaises(qcs.ProductSyncError) as cm:
+                    orchestrator._download_and_prepare_extract(
+                        product="stock-trading-data",
+                        actual_time="2026-02-11",
+                        api_base="https://api.quantclass.cn/api/data",
+                        hid="hid",
+                        headers={"api-key": "k"},
+                        work_dir=Path(tmpdir),
+                    )
+
+        self.assertEqual(qcs.REASON_NO_DATA_FOR_DATE, cm.exception.reason_code)
 
 
 if __name__ == "__main__":

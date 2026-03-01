@@ -85,9 +85,16 @@ def normalize_data_date(raw: str) -> Optional[str]:
     if not text:
         return None
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
-        return text
+        try:
+            return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
+        except ValueError:
+            return None
     if re.fullmatch(r"\d{8}", text):
-        return f"{text[0:4]}-{text[4:6]}-{text[6:8]}"
+        normalized = f"{text[0:4]}-{text[4:6]}-{text[6:8]}"
+        try:
+            return datetime.strptime(normalized, "%Y-%m-%d").date().isoformat()
+        except ValueError:
+            return None
     try:
         return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
     except Exception:
@@ -101,7 +108,7 @@ def read_local_timestamp_date(data_root: Path, product: str) -> Optional[str]:
         return None
     try:
         text = path.read_text(encoding="utf-8-sig", errors="ignore").strip()
-    except Exception:
+    except OSError:
         return None
     if not text:
         return None
@@ -132,13 +139,19 @@ def cleanup_work_cache_aggressive(work_dir: Path) -> None:
     if not work_dir.exists():
         return
     for child in work_dir.iterdir():
-        if child.is_dir():
-            shutil.rmtree(child, ignore_errors=True)
-        else:
+        if child.is_symlink():
             try:
                 child.unlink()
             except FileNotFoundError:
                 pass
+            continue
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+            continue
+        try:
+            child.unlink()
+        except FileNotFoundError:
+            pass
     work_dir.mkdir(parents=True, exist_ok=True)
 
 def cleanup_report_logs(report_dir: Path, retention_days: int = DEFAULT_REPORT_RETENTION_DAYS) -> None:
@@ -204,7 +217,11 @@ def load_product_status(conn: sqlite3.Connection, product: str) -> Optional[Prod
         return None
     return ProductStatus(**dict(row))
 
-def upsert_product_status(conn: sqlite3.Connection, status: ProductStatus) -> None:
+def upsert_product_status(
+    conn: sqlite3.Connection,
+    status: ProductStatus,
+    commit_immediately: bool = True,
+) -> None:
     """写入或更新单产品状态。"""
 
     payload = status.model_dump()
@@ -237,7 +254,8 @@ def upsert_product_status(conn: sqlite3.Connection, status: ProductStatus) -> No
         """,
         payload,
     )
-    conn.commit()
+    if commit_immediately:
+        conn.commit()
 
 def list_product_status(conn: sqlite3.Connection) -> List[ProductStatus]:
     """读取全部产品状态。"""
@@ -253,4 +271,3 @@ def export_status_json(conn: sqlite3.Connection, output_path: Path) -> None:
     for item in list_product_status(conn):
         payload[item.name] = item.to_json_record()
     output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-

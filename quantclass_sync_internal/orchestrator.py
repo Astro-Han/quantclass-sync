@@ -191,6 +191,55 @@ def _resolve_actual_time(
             reason_code=REASON_NETWORK_ERROR,
         ) from exc
 
+def _is_no_data_request_error(exc: Exception, *, allow_legacy_no_status: bool = False) -> bool:
+    """判断是否属于“该日期无可下载数据”的请求错误。"""
+
+    if not isinstance(exc, FatalRequestError):
+        return False
+    if exc.status_code == 404:
+        return True
+    if not allow_legacy_no_status or exc.status_code is not None:
+        return False
+    request_url = (exc.request_url or "").strip()
+    # 兼容历史错误对象：可能缺少 status_code/request_url，但语义仍是“当天无数据”。
+    return (not request_url) or ("/get-download-link/" in request_url)
+
+
+def _is_empty_download_link_error(exc: Exception) -> bool:
+    """判断是否是 get_download_link 内部抛出的“空下载链接”错误。"""
+
+    if not isinstance(exc, RuntimeError) or isinstance(exc, FatalRequestError):
+        return False
+    tb = exc.__traceback__
+    if tb is None:
+        return False
+    while tb.tb_next is not None:
+        tb = tb.tb_next
+    module_name = str(tb.tb_frame.f_globals.get("__name__", ""))
+    function_name = tb.tb_frame.f_code.co_name
+    return module_name == "quantclass_sync_internal.http_client" and function_name == "get_download_link"
+
+
+def _raise_download_stage_error(product: str, exc: Exception) -> None:
+    """把下载阶段底层异常统一映射为 ProductSyncError。"""
+
+    if _is_no_data_request_error(exc):
+        raise ProductSyncError(
+            message=(
+                f"产品 {product} 下载失败；该日期无可下载数据（HTTP 404）；"
+                f"建议：确认产品与日期是否匹配。原始错误：{exc}"
+            ),
+            reason_code=REASON_NO_DATA_FOR_DATE,
+        ) from exc
+    raise ProductSyncError(
+        message=(
+            f"产品 {product} 下载失败；可能原因：网络波动、下载额度限制或链接失效；"
+            f"建议：稍后重试并确认下载权限。原始错误：{exc}"
+        ),
+        reason_code=REASON_NETWORK_ERROR,
+    ) from exc
+
+
 def _download_and_prepare_extract(
     product: str,
     actual_time: str,
@@ -207,21 +256,7 @@ def _download_and_prepare_extract(
         file_url = get_download_link(api_base=api_base, product=product, date_time=actual_time, hid=hid, headers=headers)
         file_name = build_file_name(file_url, product, actual_time)
     except Exception as exc:
-        if isinstance(exc, FatalRequestError) and exc.status_code == 404:
-            raise ProductSyncError(
-                message=(
-                    f"产品 {product} 下载失败；该日期无可下载数据（HTTP 404）；"
-                    f"建议：确认产品与日期是否匹配。原始错误：{exc}"
-                ),
-                reason_code=REASON_NO_DATA_FOR_DATE,
-            ) from exc
-        raise ProductSyncError(
-            message=(
-                f"产品 {product} 下载失败；可能原因：网络波动、下载额度限制或链接失效；"
-                f"建议：稍后重试并确认下载权限。原始错误：{exc}"
-            ),
-            reason_code=REASON_NETWORK_ERROR,
-        ) from exc
+        _raise_download_stage_error(product=product, exc=exc)
 
     product_work = work_dir / product / actual_time
     download_path = product_work / file_name
@@ -243,21 +278,7 @@ def _download_and_prepare_extract(
     try:
         _download_file_atomic(file_url=file_url, download_path=download_path, headers=headers, product=product)
     except Exception as exc:
-        if isinstance(exc, FatalRequestError) and exc.status_code == 404:
-            raise ProductSyncError(
-                message=(
-                    f"产品 {product} 下载失败；该日期无可下载数据（HTTP 404）；"
-                    f"建议：确认产品与日期是否匹配。原始错误：{exc}"
-                ),
-                reason_code=REASON_NO_DATA_FOR_DATE,
-            ) from exc
-        raise ProductSyncError(
-            message=(
-                f"产品 {product} 下载失败；可能原因：网络波动、下载额度限制或链接失效；"
-                f"建议：稍后重试并确认下载权限。原始错误：{exc}"
-            ),
-            reason_code=REASON_NETWORK_ERROR,
-        ) from exc
+        _raise_download_stage_error(product=product, exc=exc)
 
     log_info(f"[{product}] 下载完成: {download_path}", event="DOWNLOAD_OK")
     return download_path, extract_path
@@ -401,7 +422,8 @@ def _probe_downloadable_dates(
     回退探测缺口日期。
 
     规则：
-    - 404 视为“该日无数据”，继续探测下一天；
+    - 404（含历史兼容的无 status no-data 异常）视为“该日无数据”，继续探测下一天；
+    - 空下载链接错误视为“该日无数据”，继续探测下一天；
     - 其它错误视为硬失败，抛出异常交给严格模式处理。
     """
 
@@ -419,13 +441,12 @@ def _probe_downloadable_dates(
             get_download_link(api_base=api_base, product=product, date_time=day, hid=hid, headers=headers)
             found.append(day)
         except FatalRequestError as exc:
-            message = str(exc).strip()
-            if exc.status_code == 404 or message in {"参数错误", "资源不存在（该产品该日期无可下载数据）"}:
+            if _is_no_data_request_error(exc, allow_legacy_no_status=True):
                 log_debug(f"[{product}] 探测到无数据日，已跳过: {day}", event="PROBE_SKIP")
                 continue
             raise
         except RuntimeError as exc:
-            if "未返回下载链接" in str(exc):
+            if _is_empty_download_link_error(exc):
                 log_debug(f"[{product}] 探测到空下载链接，已跳过: {day}", event="PROBE_SKIP")
                 continue
             raise
@@ -747,12 +768,7 @@ def _maybe_run_coin_preprocess(
     raw_cmd = ""
     try:
         # 统一使用仓库内置预处理实现，降低分发后的使用门槛。
-        preprocess_result = _run_builtin_coin_preprocess(command_ctx)
-        success_reason_code = REASON_PREPROCESS_OK
-        if isinstance(preprocess_result, tuple):
-            raw_cmd, success_reason_code = preprocess_result
-        else:
-            raw_cmd = str(preprocess_result)
+        raw_cmd, success_reason_code = _run_builtin_coin_preprocess(command_ctx)
         elapsed = time.time() - t0
 
         actual_time = _resolve_preprocess_data_date(command_ctx, source_effective)

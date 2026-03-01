@@ -24,7 +24,7 @@ class _FakeContext:
 
 
 class DefaultEntryUpdateTests(unittest.TestCase):
-    def _call_global_options(self, ctx: _FakeContext, config_file: Path) -> None:
+    def _call_global_options(self, ctx: _FakeContext, config_file: Path, dry_run: bool = False, verbose: bool = False) -> None:
         qcs.global_options(
             ctx=ctx,
             data_root=None,
@@ -32,10 +32,10 @@ class DefaultEntryUpdateTests(unittest.TestCase):
             hid="",
             secrets_file=None,
             config_file=config_file,
-            dry_run=False,
+            dry_run=dry_run,
             report_file=None,
             stop_on_error=False,
-            verbose=False,
+            verbose=verbose,
         )
 
     def test_no_subcommand_with_config_invokes_update(self) -> None:
@@ -52,6 +52,20 @@ class DefaultEntryUpdateTests(unittest.TestCase):
             func, kwargs = ctx.invocations[0]
             self.assertEqual(qcs.cmd_update, func)
             self.assertIs(kwargs.get("ctx"), ctx)
+
+    def test_no_subcommand_with_config_passes_global_flags_to_update(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_file = Path(tmpdir) / "user_config.json"
+            config_file.write_text("{}", encoding="utf-8")
+            ctx = _FakeContext()
+
+            with self.assertRaises(typer.Exit):
+                self._call_global_options(ctx=ctx, config_file=config_file, dry_run=True, verbose=True)
+
+            self.assertEqual(1, len(ctx.invocations))
+            _func, kwargs = ctx.invocations[0]
+            self.assertEqual(True, kwargs.get("dry_run"))
+            self.assertEqual(True, kwargs.get("verbose"))
 
     def test_no_subcommand_without_config_invokes_setup(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

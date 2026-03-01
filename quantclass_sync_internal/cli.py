@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import sys
 import time
 import traceback
@@ -40,6 +41,7 @@ from .constants import (
     REASON_OK,
 )
 from .file_sync import repair_sort_product_files, sortable_products
+from .http_client import get_latest_time
 from .models import (
     CommandContext,
     ConsoleLogger,
@@ -178,8 +180,8 @@ def global_options(
         ctx.invoke(
             cmd_update,
             ctx=ctx,
-            dry_run=False,
-            verbose=False,
+            dry_run=command_ctx.dry_run,
+            verbose=command_ctx.verbose,
             products=[],
             force_update=False,
         )
@@ -463,7 +465,7 @@ def cmd_setup(
 def cmd_update(
     ctx: typer.Context,
     dry_run: bool = typer.Option(False, "--dry-run", help="演练模式（不写业务数据和状态文件）。"),
-    verbose: bool = typer.Option(False, "--verbose", help="显示调试日志。"),
+    verbose: Optional[bool] = typer.Option(None, "--verbose/--no-verbose", help="显示调试日志（默认跟随全局设置）。"),
     products: List[str] = typer.Option([], "--products", help="临时覆盖默认产品清单。"),
     force_update: bool = typer.Option(False, "--force", help="强制更新：跳过 timestamp 门控。"),
 ) -> None:
@@ -479,8 +481,8 @@ def cmd_update(
     if user_config is None:
         raise RuntimeError(f"未找到用户配置文件：{base_ctx.config_file}；请先执行 setup。")
 
-    if verbose and LOGGER.level != "DEBUG":
-        LOGGER.level = "DEBUG"
+    effective_verbose = base_ctx.verbose if verbose is None else verbose
+    LOGGER.level = "DEBUG" if effective_verbose else "INFO"
     run_ctx = _build_command_ctx_with_overrides(base_ctx, data_root=data_root, secrets_file=secrets_file)
     # update 明确固定优先级：CLI > setup secrets > ENV，
     # 解析后写回 run_ctx，避免后续流程再次按“旧优先级”重算。
@@ -489,17 +491,31 @@ def cmd_update(
         cli_hid=run_ctx.hid,
         secrets_file=run_ctx.secrets_file.resolve(),
     )
+    if "setup_secrets" in credential_source:
+        # 仅在最终凭证确实依赖 setup secrets 时，才强校验文件完整性。
+        load_user_secrets_or_raise(run_ctx.secrets_file)
+    missing_fields: List[str] = []
+    if not api_key:
+        missing_fields.append("API Key")
+    if not hid:
+        missing_fields.append("HID")
+    if missing_fields:
+        raise RuntimeError(
+            "update 缺少凭证（{}）；可能原因：命令行参数、setup 密钥文件和环境变量都未提供有效值；"
+            "建议：补齐 --api-key/--hid、设置 QUANTCLASS_API_KEY/QUANTCLASS_HID，或重新执行 setup。".format(
+                "、".join(missing_fields)
+            )
+        )
     run_ctx = run_ctx.model_copy(
         update={
             "dry_run": base_ctx.dry_run or dry_run,
-            "verbose": base_ctx.verbose or verbose,
+            "verbose": effective_verbose,
             "api_key": api_key,
             "hid": hid,
         }
     )
     ctx.obj = run_ctx
     ensure_data_root_ready(run_ctx.data_root, create_if_missing=False)
-    load_user_secrets_or_raise(run_ctx.secrets_file)
     log_debug(
         "update 运行来源已解析。",
         event="SETUP",
@@ -535,6 +551,7 @@ def cmd_update(
     if exit_code != 0:
         raise typer.Exit(code=exit_code)
 
+@app.command("repair-sort")
 @app.command("repair_sort")
 @command_guard("repair_sort")
 def cmd_repair_sort(
@@ -676,7 +693,8 @@ def cmd_init(ctx: typer.Context) -> None:
             status.can_auto_update = 1
             if product in local_set:
                 status.last_update_time = utc_now_iso()
-            upsert_product_status(conn, status)
+            upsert_product_status(conn, status, commit_immediately=False)
+        conn.commit()
         export_status_json(conn, status_json_path(command_ctx.data_root))
     finally:
         conn.close()
