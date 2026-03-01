@@ -72,9 +72,6 @@ def _patch_market_pivot(
             changed_series_list.append(series)
 
         changed_df = pd.concat(changed_series_list, axis=1, sort=True) if changed_series_list else pd.DataFrame()
-        # 兼容旧逻辑：若基线已有索引，列更新只按既有索引对齐，不做索引扩展。
-        if not changed_df.empty and len(pivot.index) > 0:
-            changed_df = changed_df.reindex(pivot.index)
         overlap_cols = set(changed_df.columns.tolist())
         drop_cols = set(removed_symbols) | overlap_cols
 
@@ -189,4 +186,3 @@ def _validate_integrity(
         raise RuntimeError(
             f"严格完整性检查失败：spot_symbols={spot_symbols} swap_symbols={swap_symbols}。"
         )
-

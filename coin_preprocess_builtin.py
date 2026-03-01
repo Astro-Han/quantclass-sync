@@ -80,7 +80,10 @@ def run_coin_preprocess_builtin(data_root: Path) -> PreprocessSummary:
     output_dir = root / PREPROCESS_PRODUCT
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    baseline = _load_existing_baseline(output_dir)
+    try:
+        baseline = _load_existing_baseline(output_dir)
+    except Exception:
+        baseline = None
     baseline_runtime = _read_baseline_runtime(output_dir)
     if baseline is None or baseline_runtime is None:
         return _run_full_rebuild(spot_dir=spot_dir, swap_dir=swap_dir, output_dir=output_dir, mode="full_rebuild")
@@ -110,4 +113,4 @@ def run_coin_preprocess_builtin(data_root: Path) -> PreprocessSummary:
             raise RuntimeError(
                 "增量 patch 与全量回退均失败；"
                 f"incremental_error={incremental_exc}; full_rebuild_error={rebuild_exc}"
-            ) from rebuild_exc
+            ) from incremental_exc

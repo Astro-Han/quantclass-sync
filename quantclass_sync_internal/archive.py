@@ -46,6 +46,9 @@ def safe_extract_tar(path: Path, save_path: Path) -> None:
 
     with tarfile.open(path) as tf:
         for member in tf.getmembers():
+            if member.isdev():
+                raise RuntimeError(f"tar 包含不安全的特殊文件类型，已拒绝: {member.name}")
+
             member_name = _normalize_member_name(member.name)
             target = save_path / member_name
             _ensure_within(save_path, target)
@@ -148,4 +151,3 @@ def extract_archive(path: Path, save_path: Path) -> None:
         return
 
     raise RuntimeError(f"不支持的压缩格式: {path.name}")
-

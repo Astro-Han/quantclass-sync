@@ -127,6 +127,30 @@ def _read_symbol_csv_tail(path: Path, max_lines: int = TAIL_READ_MAX_LINES) -> p
 
     return _try_read_with_encodings(path, _reader, error_prefix="读取尾部窗口失败")
 
+def _aligned_series(df: pd.DataFrame, col: str, dtype: str) -> pd.Series:
+    """读取并对齐列索引；缺列时返回同长度空 Series。"""
+
+    if col in df.columns:
+        series = df[col]
+    else:
+        series = pd.Series(index=df.index, dtype=dtype)
+    return series.reindex(df.index)
+
+def _sanitize_candle_time_rows(raw_df: pd.DataFrame, symbol_name: str) -> pd.DataFrame:
+    """清洗时间列：把脏时间转 NaT 并剔除，避免后续排序/比较报错。"""
+
+    if raw_df.empty:
+        return raw_df.copy()
+    if "candle_begin_time" not in raw_df.columns:
+        raise RuntimeError(f"{symbol_name} 缺少 candle_begin_time 列。")
+
+    data = raw_df.copy()
+    data["candle_begin_time"] = pd.to_datetime(data["candle_begin_time"], errors="coerce", format="mixed")
+    data = data.dropna(subset=["candle_begin_time"])
+    if data.empty:
+        return data
+    return data.sort_values("candle_begin_time").drop_duplicates(subset=["candle_begin_time"], keep="last")
+
 def _detect_relist_segments(raw_df: pd.DataFrame) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
     """
     识别 relist 切段区间。
@@ -134,7 +158,7 @@ def _detect_relist_segments(raw_df: pd.DataFrame) -> List[Tuple[pd.Timestamp, pd
     规则：时间间隔 > 1 天 且前收盘到当前开盘跳变 >= 1%。
     """
 
-    data = raw_df.sort_values("candle_begin_time").drop_duplicates(subset=["candle_begin_time"], keep="last")
+    data = _sanitize_candle_time_rows(raw_df, symbol_name="source_symbol")
     if data.empty:
         return []
 
@@ -172,10 +196,18 @@ def _detect_relist_segments(raw_df: pd.DataFrame) -> List[Tuple[pd.Timestamp, pd
 def _fill_standard_columns(df: pd.DataFrame, symbol_name: str, is_swap: bool) -> None:
     """就地填充 open/high/low/symbol/volume/funding_fee/是否交易 等标准列（close 需已就绪）。"""
 
-    df["open"] = df.get("open", pd.Series(dtype="float64")).fillna(df["close"])
-    df["high"] = df.get("high", pd.Series(dtype="float64")).fillna(df["close"])
-    df["low"] = df.get("low", pd.Series(dtype="float64")).fillna(df["close"])
-    df["symbol"] = df.get("symbol", pd.Series(dtype="object")).ffill().fillna(symbol_name)
+    close_series = pd.to_numeric(_aligned_series(df, "close", "float64"), errors="coerce")
+    df["close"] = close_series
+
+    open_series = pd.to_numeric(_aligned_series(df, "open", "float64"), errors="coerce")
+    high_series = pd.to_numeric(_aligned_series(df, "high", "float64"), errors="coerce")
+    low_series = pd.to_numeric(_aligned_series(df, "low", "float64"), errors="coerce")
+    df["open"] = open_series.fillna(df["close"])
+    df["high"] = high_series.fillna(df["close"])
+    df["low"] = low_series.fillna(df["close"])
+
+    symbol_series = _aligned_series(df, "symbol", "object").astype("string")
+    df["symbol"] = symbol_series.ffill().fillna(symbol_name).astype("object")
 
     for col in (
         "volume",
@@ -184,12 +216,16 @@ def _fill_standard_columns(df: pd.DataFrame, symbol_name: str, is_swap: bool) ->
         "taker_buy_base_asset_volume",
         "taker_buy_quote_asset_volume",
     ):
-        df[col] = df.get(col, pd.Series(dtype="float64")).fillna(0)
+        values = pd.to_numeric(_aligned_series(df, col, "float64"), errors="coerce")
+        df[col] = values.fillna(0)
 
-    df["avg_price_1m"] = df.get("avg_price_1m", pd.Series(dtype="float64")).fillna(df["open"])
-    df["avg_price_5m"] = df.get("avg_price_5m", pd.Series(dtype="float64")).fillna(df["open"])
+    avg_1m = pd.to_numeric(_aligned_series(df, "avg_price_1m", "float64"), errors="coerce")
+    avg_5m = pd.to_numeric(_aligned_series(df, "avg_price_5m", "float64"), errors="coerce")
+    df["avg_price_1m"] = avg_1m.fillna(df["open"])
+    df["avg_price_5m"] = avg_5m.fillna(df["open"])
     if is_swap:
-        df["funding_fee"] = df.get("fundingRate", pd.Series(dtype="float64")).fillna(0)
+        funding = pd.to_numeric(_aligned_series(df, "fundingRate", "float64"), errors="coerce")
+        df["funding_fee"] = funding.fillna(0)
     else:
         df["funding_fee"] = 0
     df["是否交易"] = (df["volume"] > 0).astype("int8")
@@ -199,12 +235,7 @@ def _prepare_symbol_frame(raw_df: pd.DataFrame, symbol: str, is_swap: bool) -> p
 
     if raw_df.empty:
         return pd.DataFrame()
-    if "candle_begin_time" not in raw_df.columns:
-        raise RuntimeError(f"{symbol} 缺少 candle_begin_time 列。")
-
-    data = raw_df.sort_values("candle_begin_time").drop_duplicates(
-        subset=["candle_begin_time"], keep="last"
-    )
+    data = _sanitize_candle_time_rows(raw_df, symbol_name=symbol)
     if data.empty:
         return pd.DataFrame()
 
@@ -222,7 +253,7 @@ def _prepare_symbol_frame(raw_df: pd.DataFrame, symbol: str, is_swap: bool) -> p
     )
     merged = benchmark.merge(data, how="left", on="candle_begin_time", sort=True)
 
-    merged["close"] = merged.get("close", pd.Series(dtype="float64")).ffill()
+    merged["close"] = pd.to_numeric(_aligned_series(merged, "close", "float64"), errors="coerce").ffill()
     _fill_standard_columns(merged, symbol_name=symbol, is_swap=is_swap)
     merged["first_candle_time"] = first_candle_time
     merged["last_candle_time"] = last_candle_time
@@ -269,14 +300,12 @@ def _split_symbol_frames(raw_df: pd.DataFrame, source_symbol: str, is_swap: bool
     """按 relist 规则拆分单币种，并返回 symbol->DataFrame。"""
 
     source_symbol = _normalize_symbol(source_symbol)
-    segments = _detect_relist_segments(raw_df)
+    data = _sanitize_candle_time_rows(raw_df, symbol_name=source_symbol)
+    segments = _detect_relist_segments(data)
     if not segments:
         return {}
 
     side_tag = "SW" if is_swap else "SP"
-    data = raw_df.sort_values("candle_begin_time").drop_duplicates(
-        subset=["candle_begin_time"], keep="last"
-    )
 
     result: Dict[str, pd.DataFrame] = {}
     for idx, (start_time, end_time) in enumerate(segments):
@@ -300,4 +329,3 @@ def _load_symbol_dict(product_dir: Path, is_swap: bool) -> Tuple[Dict[str, pd.Da
         result.update(split_result)
 
     return result, len(files)
-

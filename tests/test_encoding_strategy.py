@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 import quantclass_sync as qcs
+from quantclass_sync_internal.csv_engine import sortable_value
 
 
 class EncodingStrategyTests(unittest.TestCase):
@@ -107,6 +108,12 @@ class EncodingStrategyTests(unittest.TestCase):
         self.assertEqual("created", result)
         self.assertEqual(1, added)
         self.assertTrue(target.read_bytes().startswith(qcs.UTF8_BOM))
+
+    def test_sortable_value_treats_non_finite_numbers_as_text(self) -> None:
+        self.assertEqual((2, "nan"), sortable_value("nan"))
+        self.assertEqual((2, "inf"), sortable_value("inf"))
+        self.assertEqual((2, "-inf"), sortable_value("-inf"))
+        self.assertEqual((1, 123.0), sortable_value("123"))
 
 
 if __name__ == "__main__":

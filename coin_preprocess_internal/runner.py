@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
@@ -32,6 +33,8 @@ from .symbol_mapper import (
     _extract_base_symbol,
     _group_split_symbols_by_source,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 def _read_baseline_runtime(output_dir: Path) -> Optional[pd.Timestamp]:
     """读取 timestamp.txt 第二列（运行时间）作为增量基线。"""
@@ -98,6 +101,106 @@ def _has_relist_break(prev_time: pd.Timestamp, prev_close: float, next_time: pd.
     change = next_open / prev_close - 1.0
     return abs(change) >= RELIST_CHANGE_THRESHOLD
 
+def _frame_max_candle_time(frame: pd.DataFrame) -> Optional[pd.Timestamp]:
+    """返回单个 frame 的最大 candle_begin_time（脏时间自动跳过）。"""
+
+    if frame is None or frame.empty or "candle_begin_time" not in frame.columns:
+        return None
+    parsed = pd.to_datetime(frame["candle_begin_time"], errors="coerce", format="mixed")
+    parsed = parsed.dropna()
+    if parsed.empty:
+        return None
+    return pd.Timestamp(parsed.max())
+
+def _safe_float(value: object, fallback: float) -> float:
+    """把值安全转换成 float，失败时返回 fallback。"""
+
+    try:
+        parsed = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    except Exception:
+        return fallback
+    if pd.isna(parsed):
+        return fallback
+    return float(parsed)
+
+def _build_overlap_snapshot(data_dict: Dict[str, pd.DataFrame], keys: Sequence[str]) -> pd.DataFrame:
+    """把同源 split symbol 合并成按时间索引的快照，便于重叠区对比。"""
+
+    frames: List[pd.DataFrame] = []
+    keep_cols = ("candle_begin_time", "open", "close", "avg_price_1m", "funding_fee")
+    for key in keys:
+        frame = data_dict.get(key)
+        if frame is None or frame.empty or "candle_begin_time" not in frame.columns:
+            continue
+        cols = [col for col in keep_cols if col in frame.columns]
+        if "candle_begin_time" not in cols:
+            continue
+        part = frame[cols].copy()
+        part["candle_begin_time"] = pd.to_datetime(part["candle_begin_time"], errors="coerce", format="mixed")
+        part = part.dropna(subset=["candle_begin_time"])
+        if not part.empty:
+            frames.append(part)
+
+    if not frames:
+        return pd.DataFrame()
+
+    merged = pd.concat(frames, ignore_index=True)
+    merged = merged.sort_values("candle_begin_time").drop_duplicates(subset=["candle_begin_time"], keep="last")
+    return merged.set_index("candle_begin_time")
+
+def _overlap_matches_existing(overlap_raw: pd.DataFrame, overlap_snapshot: pd.DataFrame, is_swap: bool) -> bool:
+    """
+    判断尾部重叠区是否与现有产物一致。
+
+    返回 True 表示可视为“无实质变更”；返回 False 则应回退单 symbol 重建。
+    """
+
+    if overlap_raw.empty or overlap_snapshot.empty:
+        return False
+
+    compare_pairs = [
+        ("open", "open"),
+        ("close", "close"),
+        ("avg_price_1m", "avg_price_1m"),
+    ]
+    if is_swap:
+        compare_pairs.append(("fundingRate", "funding_fee"))
+
+    sorted_overlap = overlap_raw.sort_values("candle_begin_time")
+    compared_points = 0
+    for _, row in sorted_overlap.iterrows():
+        timestamp = pd.to_datetime(row.get("candle_begin_time"), errors="coerce", format="mixed")
+        if pd.isna(timestamp):
+            continue
+        ts = pd.Timestamp(timestamp)
+        if ts not in overlap_snapshot.index:
+            return False
+
+        existing = overlap_snapshot.loc[ts]
+        if isinstance(existing, pd.DataFrame):
+            existing = existing.iloc[-1]
+
+        row_compared = 0
+        for raw_col, old_col in compare_pairs:
+            if raw_col not in row.index or old_col not in existing.index:
+                continue
+            raw_val = _safe_float(row.get(raw_col), fallback=float("nan"))
+            if pd.isna(raw_val):
+                continue
+            old_val = _safe_float(existing.get(old_col), fallback=float("nan"))
+            if pd.isna(old_val):
+                return False
+            row_compared += 1
+            if abs(raw_val - old_val) > 1e-12:
+                return False
+
+        # 当前行没有可比字段，无法证明一致性，保守回退重建。
+        if row_compared == 0:
+            return False
+        compared_points += row_compared
+
+    return compared_points > 0
+
 def _try_tail_append_symbol(
     source_file: Path,
     source_symbol: str,
@@ -117,16 +220,25 @@ def _try_tail_append_symbol(
     if not keys:
         return False, set()
 
-    existing_frames = [data_dict[key] for key in keys if not data_dict[key].empty]
+    existing_frames: List[pd.DataFrame] = []
+    for key in keys:
+        frame = data_dict.get(key)
+        if frame is None or frame.empty or "candle_begin_time" not in frame.columns:
+            continue
+        existing_frames.append(frame)
     last_time = _max_candle_time(existing_frames)
     if last_time is None:
         return False, set()
 
-    # 选"最新分段"做尾部追加，历史分段不变。
-    active_key = max(
-        keys,
-        key=lambda key: pd.to_datetime(data_dict[key]["candle_begin_time"].max(), errors="coerce"),
-    )
+    # 选"最新分段"做尾部追加，历史分段不变；NaT 时间不会参与排序。
+    active_candidates: List[Tuple[str, pd.Timestamp]] = []
+    for key in keys:
+        max_time = _frame_max_candle_time(data_dict.get(key, pd.DataFrame()))
+        if max_time is not None:
+            active_candidates.append((key, max_time))
+    if not active_candidates:
+        return False, set()
+    active_key = max(active_candidates, key=lambda item: item[1])[0]
     active_frame = data_dict[active_key]
     if active_frame.empty:
         return False, set()
@@ -150,14 +262,20 @@ def _try_tail_append_symbol(
         # 尾部窗口没覆盖到旧边界，无法证明"只需追加"，回退单 symbol 全量重算。
         return False, set()
 
+    overlap_snapshot = _build_overlap_snapshot(data_dict, keys)
+    overlap_raw = tail_raw[pd.to_datetime(tail_raw["candle_begin_time"], errors="coerce") <= last_time]
+    if not _overlap_matches_existing(overlap_raw=overlap_raw, overlap_snapshot=overlap_snapshot, is_swap=is_swap):
+        return False, set()
+
     new_raw = tail_raw[pd.to_datetime(tail_raw["candle_begin_time"], errors="coerce") > last_time]
     if new_raw.empty:
-        # mtime 变化但尾部没有新增行，视为该 symbol 无需重算。
+        # mtime 变化但无新增行：重叠区对比一致，判定为无需重算。
         return True, set()
 
-    prev_close = float(active_frame["close"].iloc[-1])
+    prev_close = _safe_float(active_frame["close"].iloc[-1], fallback=0.0)
     next_time = pd.Timestamp(pd.to_datetime(new_raw["candle_begin_time"].min(), errors="coerce"))
-    next_open = float(new_raw.sort_values("candle_begin_time").iloc[0].get("open", prev_close) or prev_close)
+    next_open_raw = new_raw.sort_values("candle_begin_time").iloc[0].get("open", pd.NA)
+    next_open = _safe_float(next_open_raw, fallback=prev_close)
     if _has_relist_break(last_time, prev_close, next_time, next_open):
         # 边界触发 relist，必须全文件重算该 symbol 才能保证分段正确。
         return False, set()
@@ -233,7 +351,8 @@ def _resolve_source_delta(
             mtime_local = pd.Timestamp.fromtimestamp(path.stat().st_mtime)
             if mtime_local > baseline_local:
                 changed_sources.add(symbol)
-        except OSError:
+        except OSError as exc:
+            LOGGER.warning("读取文件时间失败，跳过该 symbol 变更探测: symbol=%s error=%s", symbol, exc)
             continue
     return changed_sources, removed_sources
 

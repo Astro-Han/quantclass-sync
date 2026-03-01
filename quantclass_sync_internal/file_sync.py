@@ -305,16 +305,39 @@ def sync_raw_file(src: Path, target: Path, dry_run: bool) -> str:
     镜像写入（按原文件路径复制，不做字段级合并）。
     """
 
-    src_bytes = src.read_bytes()
     existed_before = target.exists()
-    if existed_before and target.read_bytes() == src_bytes:
+    if existed_before and _files_equal_by_chunk(src, target):
         return "unchanged"
 
     if not dry_run:
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, target)
+        tmp_path = target.parent / f".{target.name}.tmp-raw-{os.getpid()}-{time.time_ns()}"
+        try:
+            shutil.copy2(src, tmp_path)
+            os.replace(tmp_path, target)
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except Exception:
+                    pass
 
     return "updated" if existed_before else "created"
+
+def _files_equal_by_chunk(src: Path, target: Path, chunk_size: int = 1024 * 1024) -> bool:
+    """按块比较两个文件内容是否一致，避免整文件读入内存。"""
+
+    if src.stat().st_size != target.stat().st_size:
+        return False
+
+    with src.open("rb") as src_file, target.open("rb") as target_file:
+        while True:
+            src_chunk = src_file.read(chunk_size)
+            target_chunk = target_file.read(chunk_size)
+            if src_chunk != target_chunk:
+                return False
+            if not src_chunk:
+                return True
 
 def apply_file_result(stats: SyncStats, result: str, added_rows: int = 0, sort_audit: Optional[SortAudit] = None) -> None:
     """把单文件结果累加到统计对象。"""

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import csv
+import math
 import re
+from io import StringIO
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -102,27 +104,37 @@ def read_csv_payload(path: Path, preferred_encoding: Optional[str] = None) -> Cs
     """
 
     text, encoding = decode_text(path, preferred_encoding)
-    lines = [line for line in text.splitlines() if line.strip() != ""]
-    if not lines:
+    non_empty_lines = [line for line in text.splitlines() if line.strip() != ""]
+    if not non_empty_lines:
         return CsvPayload(note=None, header=[], rows=[], encoding=encoding, delimiter=",")
 
-    delimiter = detect_delimiter(lines[:3])
-    first = parse_csv_line(lines[0], delimiter=delimiter)
-    second = parse_csv_line(lines[1], delimiter=delimiter) if len(lines) > 1 else []
+    delimiter = detect_delimiter(non_empty_lines[:3])
+    parsed_rows: List[List[str]] = []
+    for row in csv.reader(StringIO(text), delimiter=delimiter):
+        if not row:
+            continue
+        if all(cell.strip() == "" for cell in row):
+            continue
+        parsed_rows.append(list(row))
+    if not parsed_rows:
+        return CsvPayload(note=None, header=[], rows=[], encoding=encoding, delimiter=delimiter)
+
+    first = parsed_rows[0]
+    second = parsed_rows[1] if len(parsed_rows) > 1 else []
 
     note: Optional[str] = None
     if looks_like_header(first):
         header = first
         data_start = 1
     elif looks_like_header(second):
-        note = lines[0].lstrip("\ufeff")
+        note = non_empty_lines[0].lstrip("\ufeff")
         header = second
         data_start = 2
     else:
         header = first
         data_start = 1
 
-    rows = [parse_csv_line(line, delimiter=delimiter) for line in lines[data_start:]]
+    rows = [list(row) for row in parsed_rows[data_start:]]
     return CsvPayload(note=note, header=header, rows=rows, encoding=encoding, delimiter=delimiter)
 
 def _normalize_header_cells(header: Sequence[str]) -> List[str]:
@@ -173,7 +185,11 @@ def sortable_value(value: str) -> Tuple[int, object]:
     if re.fullmatch(r"\d{8}", value):
         return (0, f"{value[0:4]}-{value[4:6]}-{value[6:8]}")
     try:
-        return (1, float(value))
+        numeric = float(value)
+        if math.isfinite(numeric):
+            return (1, numeric)
+        # nan/inf 排序不稳定，统一按普通字符串处理。
+        return (2, value)
     except Exception:
         return (2, value)
 
@@ -237,7 +253,12 @@ def merge_payload(existing: Optional[CsvPayload], incoming: CsvPayload, rule: Da
             0,
         )
 
-    existing_rows = align_rows(existing.rows, existing.header, target_header) if existing else []
+    existing_rows: List[List[str]] = []
+    if existing:
+        if _headers_equal(existing.header, target_header):
+            existing_rows = [list(row) for row in existing.rows]
+        else:
+            existing_rows = align_rows(existing.rows, existing.header, target_header)
     incoming_rows = align_rows(incoming.rows, incoming.header, target_header)
 
     key_cols = [col for col in rule.key_cols if col in target_header]
@@ -334,4 +355,3 @@ def sync_csv_file(src: Path, target: Path, rule: DatasetRule, dry_run: bool) -> 
 
     incoming = read_csv_payload(src, preferred_encoding=rule.encoding)
     return sync_payload_to_target(incoming=incoming, target=target, rule=rule, dry_run=dry_run)
-
