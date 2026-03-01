@@ -101,6 +101,31 @@ def _has_relist_break(prev_time: pd.Timestamp, prev_close: float, next_time: pd.
     change = next_open / prev_close - 1.0
     return abs(change) >= RELIST_CHANGE_THRESHOLD
 
+def _has_internal_relist_break(new_raw: pd.DataFrame) -> bool:
+    """判断增量窗口内部相邻行是否触发 relist 切段。"""
+
+    if new_raw.empty or len(new_raw) < 2:
+        return False
+
+    ordered = new_raw.sort_values("candle_begin_time")
+    for idx in range(1, len(ordered)):
+        prev_row = ordered.iloc[idx - 1]
+        curr_row = ordered.iloc[idx]
+
+        prev_time = pd.to_datetime(prev_row.get("candle_begin_time"), errors="coerce", format="mixed")
+        curr_time = pd.to_datetime(curr_row.get("candle_begin_time"), errors="coerce", format="mixed")
+        if pd.isna(prev_time) or pd.isna(curr_time):
+            continue
+
+        prev_close = _safe_float(prev_row.get("close", pd.NA), fallback=float("nan"))
+        curr_open = _safe_float(curr_row.get("open", pd.NA), fallback=float("nan"))
+        if pd.isna(prev_close) or pd.isna(curr_open):
+            continue
+
+        if _has_relist_break(pd.Timestamp(prev_time), prev_close, pd.Timestamp(curr_time), curr_open):
+            return True
+    return False
+
 def _frame_max_candle_time(frame: pd.DataFrame) -> Optional[pd.Timestamp]:
     """返回单个 frame 的最大 candle_begin_time（脏时间自动跳过）。"""
 
@@ -157,6 +182,8 @@ def _overlap_matches_existing(overlap_raw: pd.DataFrame, overlap_snapshot: pd.Da
 
     if overlap_raw.empty or overlap_snapshot.empty:
         return False
+    if "candle_begin_time" not in overlap_raw.columns:
+        return False
 
     compare_pairs = [
         ("open", "open"),
@@ -166,40 +193,48 @@ def _overlap_matches_existing(overlap_raw: pd.DataFrame, overlap_snapshot: pd.Da
     if is_swap:
         compare_pairs.append(("fundingRate", "funding_fee"))
 
-    sorted_overlap = overlap_raw.sort_values("candle_begin_time")
-    compared_points = 0
-    for _, row in sorted_overlap.iterrows():
-        timestamp = pd.to_datetime(row.get("candle_begin_time"), errors="coerce", format="mixed")
-        if pd.isna(timestamp):
+    sorted_overlap = overlap_raw.sort_values("candle_begin_time").copy()
+    sorted_overlap["__cmp_ts__"] = pd.to_datetime(
+        sorted_overlap["candle_begin_time"],
+        errors="coerce",
+        format="mixed",
+    )
+    sorted_overlap = sorted_overlap.dropna(subset=["__cmp_ts__"]).reset_index(drop=True)
+    if sorted_overlap.empty:
+        return False
+
+    # 与逐行逻辑保持一致：同一时点若存在重复，使用最后一条旧快照记录。
+    if overlap_snapshot.index.has_duplicates:
+        overlap_snapshot = overlap_snapshot[~overlap_snapshot.index.duplicated(keep="last")]
+
+    raw_ts = pd.DatetimeIndex(sorted_overlap["__cmp_ts__"])
+    if not pd.Index(raw_ts).isin(overlap_snapshot.index).all():
+        return False
+
+    existing_aligned = overlap_snapshot.reindex(raw_ts).reset_index(drop=True)
+    row_compared = pd.Series(0, index=sorted_overlap.index, dtype="int64")
+    for raw_col, old_col in compare_pairs:
+        if raw_col not in sorted_overlap.columns or old_col not in existing_aligned.columns:
             continue
-        ts = pd.Timestamp(timestamp)
-        if ts not in overlap_snapshot.index:
+
+        raw_values = pd.to_numeric(sorted_overlap[raw_col], errors="coerce")
+        valid_mask = raw_values.notna()
+        if not valid_mask.any():
+            continue
+
+        old_values = pd.to_numeric(existing_aligned[old_col], errors="coerce")
+        if old_values[valid_mask].isna().any():
             return False
 
-        existing = overlap_snapshot.loc[ts]
-        if isinstance(existing, pd.DataFrame):
-            existing = existing.iloc[-1]
-
-        row_compared = 0
-        for raw_col, old_col in compare_pairs:
-            if raw_col not in row.index or old_col not in existing.index:
-                continue
-            raw_val = _safe_float(row.get(raw_col), fallback=float("nan"))
-            if pd.isna(raw_val):
-                continue
-            old_val = _safe_float(existing.get(old_col), fallback=float("nan"))
-            if pd.isna(old_val):
-                return False
-            row_compared += 1
-            if abs(raw_val - old_val) > 1e-12:
-                return False
-
-        # 当前行没有可比字段，无法证明一致性，保守回退重建。
-        if row_compared == 0:
+        if ((raw_values[valid_mask] - old_values[valid_mask]).abs() > 1e-12).any():
             return False
-        compared_points += row_compared
 
-    return compared_points > 0
+        row_compared.loc[valid_mask] += 1
+
+    # 当前行没有可比字段，无法证明一致性，保守回退重建。
+    if (row_compared == 0).any():
+        return False
+    return int(row_compared.sum()) > 0
 
 def _try_tail_append_symbol(
     source_file: Path,
@@ -269,8 +304,8 @@ def _try_tail_append_symbol(
 
     new_raw = tail_raw[pd.to_datetime(tail_raw["candle_begin_time"], errors="coerce") > last_time]
     if new_raw.empty:
-        # mtime 变化但无新增行：重叠区对比一致，判定为无需重算。
-        return True, set()
+        # mtime 变化但无新增行：保守回退单 symbol 全量重算，避免漏算。
+        return False, set()
 
     prev_close = _safe_float(active_frame["close"].iloc[-1], fallback=0.0)
     next_time = pd.Timestamp(pd.to_datetime(new_raw["candle_begin_time"].min(), errors="coerce"))
@@ -278,6 +313,9 @@ def _try_tail_append_symbol(
     next_open = _safe_float(next_open_raw, fallback=prev_close)
     if _has_relist_break(last_time, prev_close, next_time, next_open):
         # 边界触发 relist，必须全文件重算该 symbol 才能保证分段正确。
+        return False, set()
+    if _has_internal_relist_break(new_raw):
+        # 新增窗口内部触发 relist，同样必须全文件重算该 symbol。
         return False, set()
 
     appended_rows = _build_incremental_rows(
@@ -352,8 +390,12 @@ def _resolve_source_delta(
             if mtime_local > baseline_local:
                 changed_sources.add(symbol)
         except OSError as exc:
-            LOGGER.warning("读取文件时间失败，跳过该 symbol 变更探测: symbol=%s error=%s", symbol, exc)
-            continue
+            LOGGER.warning(
+                "读取文件时间失败，按变更处理以保证安全: symbol=%s error_type=%s",
+                symbol,
+                type(exc).__name__,
+            )
+            changed_sources.add(symbol)
     return changed_sources, removed_sources
 
 def _run_full_rebuild(spot_dir: Path, swap_dir: Path, output_dir: Path, mode: str) -> PreprocessSummary:

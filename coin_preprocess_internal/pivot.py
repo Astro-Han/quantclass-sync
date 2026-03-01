@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, IO, List, Set
 
 import pandas as pd
 
@@ -106,6 +107,23 @@ def _safe_unlink(path: Path) -> None:
     except FileNotFoundError:
         return
 
+def _acquire_output_locks(payloads: Dict[Path, object]) -> List[IO[str]]:
+    """按目录获取写锁，避免多进程并发写同一批产物。"""
+
+    lock_handles: List[IO[str]] = []
+    lock_dirs = sorted({target.parent for target in payloads}, key=lambda path: str(path))
+    for lock_dir in lock_dirs:
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = lock_dir / ".preprocess.lock"
+        lock_handle = lock_path.open("a+")
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        except Exception:
+            lock_handle.close()
+            raise
+        lock_handles.append(lock_handle)
+    return lock_handles
+
 def _write_pickles_atomically(payloads: Dict[Path, object]) -> None:
     """
     原子写入多个 pkl 文件。
@@ -117,6 +135,7 @@ def _write_pickles_atomically(payloads: Dict[Path, object]) -> None:
     temp_files: Dict[Path, Path] = {}
     backups: Dict[Path, Path] = {}
     created_targets: List[Path] = []
+    lock_handles = _acquire_output_locks(payloads)
 
     try:
         for target, obj in payloads.items():
@@ -157,6 +176,11 @@ def _write_pickles_atomically(payloads: Dict[Path, object]) -> None:
             _safe_unlink(temp_path)
         for backup in backups.values():
             _safe_unlink(backup)
+        for lock_handle in reversed(lock_handles):
+            try:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_handle.close()
 
 def _validate_integrity(
     spot_dir: Path,

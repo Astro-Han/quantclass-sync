@@ -356,6 +356,62 @@ class UpdateCatchUpTests(unittest.TestCase):
         ts_text = (self.root / self.product / qcs.TIMESTAMP_FILE_NAME).read_text(encoding="utf-8")
         self.assertTrue(ts_text.startswith("2026-02-10,"))
 
+    def test_execute_plans_catchup_empty_queue_records_skip_and_continues_next_product(self) -> None:
+        report = self._report()
+        ctx = self._ctx(dry_run=True)
+        plans = [
+            qcs.ProductPlan(name="stock-trading-data", strategy=qcs.STRATEGY_MERGE_KNOWN),
+            qcs.ProductPlan(name="stock-main-index-data", strategy=qcs.STRATEGY_MERGE_KNOWN),
+        ]
+        executed: list[tuple[str, str]] = []
+
+        def fake_resolve_requested_dates_for_plan(
+            plan: qcs.ProductPlan,
+            command_ctx: qcs.CommandContext,
+            hid: str,
+            headers: dict[str, str],
+            requested_date_time: str,
+            force_update: bool,
+            report: qcs.RunReport,
+            t_product_start: float,
+            catch_up_to_latest: bool = False,
+        ) -> tuple[list[str], bool]:
+            if plan.name == "stock-trading-data":
+                return ([], False)
+            return (["2026-02-10"], False)
+
+        def fake_process_product(
+            plan: qcs.ProductPlan,
+            date_time: str | None,
+            api_base: str,
+            hid: str,
+            headers: dict[str, str],
+            data_root: Path,
+            work_dir: Path,
+            dry_run: bool,
+        ):
+            executed.append((plan.name, date_time or ""))
+            return plan.name, date_time or "", qcs.SyncStats(updated_files=1), "/tmp/src", qcs.REASON_OK
+
+        with patch("quantclass_sync.build_headers_or_raise", return_value=({"api-key": "k"}, "hid")), patch(
+            "quantclass_sync._resolve_requested_dates_for_plan",
+            side_effect=fake_resolve_requested_dates_for_plan,
+        ), patch("quantclass_sync.process_product", side_effect=fake_process_product):
+            _total, has_error, _started_at = qcs._execute_plans(
+                plans=plans,
+                command_ctx=ctx,
+                report=report,
+                requested_date_time="",
+                conn=None,
+                force_update=False,
+                catch_up_to_latest=True,
+            )
+
+        self.assertFalse(has_error)
+        self.assertEqual([("stock-main-index-data", "2026-02-10")], executed)
+        self.assertEqual(["skipped", "ok"], [item.status for item in report.products])
+        self.assertEqual(qcs.REASON_NO_DATA_FOR_DATE, report.products[0].reason_code)
+
     def test_execute_plans_stop_on_error_stops_all_products(self) -> None:
         self._write_local_timestamp("2026-02-06")
         report = self._report()

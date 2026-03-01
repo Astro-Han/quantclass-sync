@@ -201,6 +201,33 @@ class CommandFlowTests(unittest.TestCase):
         self.assertEqual("env_api_key", command_ctx.api_key)
         self.assertEqual("env_hid", command_ctx.hid)
 
+    def test_cmd_update_mixed_file_api_and_env_hid_skips_strict_file_check(self) -> None:
+        self._write_user_config()
+        self.secrets_file.write_text("QUANTCLASS_API_KEY=file_api_key\n", encoding="utf-8")
+        ctx = _DummyTyperContext(self._base_ctx())
+
+        with patch.dict(
+            "os.environ",
+            {"QUANTCLASS_API_KEY": "", "QUANTCLASS_HID": "env_hid"},
+            clear=False,
+        ), patch("quantclass_sync_internal.cli.load_user_secrets_or_raise") as secrets_guard, patch(
+            "quantclass_sync.run_update_with_settings",
+            return_value=0,
+        ) as run_mock:
+            qcs.cmd_update(
+                ctx=ctx,
+                dry_run=False,
+                verbose=False,
+                products=[],
+                force_update=False,
+            )
+
+        secrets_guard.assert_not_called()
+        run_mock.assert_called_once()
+        command_ctx = run_mock.call_args.kwargs["command_ctx"]
+        self.assertEqual("file_api_key", command_ctx.api_key)
+        self.assertEqual("env_hid", command_ctx.hid)
+
     def test_cmd_update_all_credentials_missing_exits(self) -> None:
         self._write_user_config()
         ctx = _DummyTyperContext(self._base_ctx())

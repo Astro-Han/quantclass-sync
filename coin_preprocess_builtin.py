@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Dict
@@ -34,6 +35,8 @@ from coin_preprocess_internal.runner import (
     _run_full_rebuild,
 )
 from coin_preprocess_internal import runner as _runner
+
+LOGGER = logging.getLogger(__name__)
 
 # 兼容导出：测试会 patch 这两个符号。
 _rebuild_source_symbol = _runner._rebuild_source_symbol
@@ -82,7 +85,11 @@ def run_coin_preprocess_builtin(data_root: Path) -> PreprocessSummary:
 
     try:
         baseline = _load_existing_baseline(output_dir)
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning(
+            "读取历史 baseline 失败，将回退 full_rebuild: error_type=%s",
+            type(exc).__name__,
+        )
         baseline = None
     baseline_runtime = _read_baseline_runtime(output_dir)
     if baseline is None or baseline_runtime is None:

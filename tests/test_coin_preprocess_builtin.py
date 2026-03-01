@@ -2,7 +2,7 @@ import os
 import tempfile
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Tuple
 from unittest.mock import patch
@@ -11,7 +11,7 @@ import pandas as pd
 
 from coin_preprocess_internal.constants import FRAME_COLUMNS
 from coin_preprocess_internal.csv_source import _prepare_symbol_frame
-from coin_preprocess_internal.runner import _resolve_source_delta
+from coin_preprocess_internal.runner import _overlap_matches_existing, _resolve_source_delta
 from coin_preprocess_builtin import (
     OUTPUT_PIVOT_SPOT,
     OUTPUT_PIVOT_SWAP,
@@ -22,6 +22,7 @@ from coin_preprocess_builtin import (
     SWAP_PRODUCT,
     TIMESTAMP_FILE_NAME,
     _patch_market_pivot,
+    _rebuild_source_symbol,
     _run_incremental_patch,
     run_coin_preprocess_builtin,
 )
@@ -150,18 +151,20 @@ class CoinPreprocessBuiltinTests(unittest.TestCase):
         self.assertIn("AAA-USDT", spot_dict)
         self.assertEqual(pd.Timestamp("2026-02-09 02:00:00"), pd.to_datetime(spot_dict["AAA-USDT"]["candle_begin_time"].max()))
 
-    def test_mtime_changed_without_new_rows_skips_rebuild_when_overlap_same(self) -> None:
+    def test_mtime_changed_without_new_rows_rebuilds_symbol(self) -> None:
         self._prepare_basic_dual_side()
         run_coin_preprocess_builtin(self.root)
 
-        self._write_runtime_timestamp(datetime.now())
+        self._write_runtime_timestamp(datetime.now() + timedelta(hours=1))
         target = self.root / SPOT_PRODUCT / "AAA-USDT.csv"
-        os.utime(target, (time.time() + 2, time.time() + 2))
+        os.utime(target, (time.time() + 7200, time.time() + 7200))
 
-        with patch("coin_preprocess_builtin._rebuild_source_symbol", side_effect=AssertionError("should_not_rebuild")):
+        with patch("coin_preprocess_builtin._rebuild_source_symbol", wraps=_rebuild_source_symbol) as rebuild_mock:
             summary = run_coin_preprocess_builtin(self.root)
 
         self.assertEqual("incremental_patch", summary.mode)
+        rebuild_mock.assert_called_once()
+        self.assertEqual("AAA-USDT", rebuild_mock.call_args.kwargs["source_symbol"])
 
     def test_mtime_changed_without_new_rows_rebuilds_on_overlap_diff(self) -> None:
         self._prepare_basic_dual_side()
@@ -285,6 +288,37 @@ class CoinPreprocessBuiltinTests(unittest.TestCase):
         self.assertIn("AAA_SP0-USDT", spot_dict)
         self.assertIn("AAA-USDT", spot_dict)
 
+    def test_internal_relist_break_in_new_raw_triggers_single_symbol_rebuild(self) -> None:
+        self._prepare_basic_dual_side()
+        run_coin_preprocess_builtin(self.root)
+
+        self._write_runtime_timestamp(datetime.now() + timedelta(hours=1))
+        self._append_symbol_row(
+            SPOT_PRODUCT,
+            "AAA-USDT",
+            ("2026-02-09 02:00:00", 2.0, 2.2, 1.9, 2.0, 18),
+            is_swap=False,
+        )
+        self._append_symbol_row(
+            SPOT_PRODUCT,
+            "AAA-USDT",
+            ("2026-02-11 03:00:00", 3.2, 3.4, 3.1, 3.3, 18),
+            is_swap=False,
+        )
+        target = self.root / SPOT_PRODUCT / "AAA-USDT.csv"
+        os.utime(target, (time.time() + 7200, time.time() + 7200))
+
+        with patch("coin_preprocess_builtin._rebuild_source_symbol", wraps=_rebuild_source_symbol) as rebuild_mock:
+            summary = run_coin_preprocess_builtin(self.root)
+
+        self.assertEqual("incremental_patch", summary.mode)
+        rebuild_mock.assert_called_once()
+        self.assertEqual("AAA-USDT", rebuild_mock.call_args.kwargs["source_symbol"])
+
+        spot_dict = pd.read_pickle(self.root / PREPROCESS_PRODUCT / OUTPUT_SPOT_DICT)
+        self.assertIn("AAA_SP0-USDT", spot_dict)
+        self.assertIn("AAA-USDT", spot_dict)
+
     def test_incremental_failure_fallback_to_full_rebuild(self) -> None:
         self._prepare_basic_dual_side()
         run_coin_preprocess_builtin(self.root)
@@ -321,9 +355,68 @@ class CoinPreprocessBuiltinTests(unittest.TestCase):
                 baseline_runtime=baseline_runtime,
                 baseline_sources={"AAA-USDT"},
             )
-        self.assertEqual(set(), changed)
+        self.assertEqual({"AAA-USDT"}, changed)
         self.assertEqual(set(), removed)
         warn_mock.assert_called_once()
+
+    def test_baseline_read_exception_logs_warning_then_full_rebuild(self) -> None:
+        self._prepare_basic_dual_side()
+
+        with patch("coin_preprocess_builtin._load_existing_baseline", side_effect=RuntimeError("boom")), patch(
+            "coin_preprocess_builtin.LOGGER.warning"
+        ) as warn_mock:
+            summary = run_coin_preprocess_builtin(self.root)
+
+        self.assertEqual("full_rebuild", summary.mode)
+        warn_mock.assert_called_once()
+        self.assertEqual("RuntimeError", warn_mock.call_args.args[1])
+
+    def test_overlap_matches_existing_true_for_identical_rows(self) -> None:
+        overlap_raw = pd.DataFrame(
+            {
+                "candle_begin_time": [
+                    "bad-time",
+                    "2026-02-09 00:00:00",
+                    "2026-02-09 01:00:00",
+                    "2026-02-09 01:00:00",
+                ],
+                "open": [1.0, 1.0, 2.0, 2.0],
+                "close": [1.5, 1.5, 2.5, 2.5],
+                "avg_price_1m": [1.2, 1.2, 2.2, 2.2],
+            }
+        )
+        overlap_snapshot = pd.DataFrame(
+            {
+                "open": [1.0, 2.0],
+                "close": [1.5, 2.5],
+                "avg_price_1m": [1.2, 2.2],
+            },
+            index=pd.to_datetime(["2026-02-09 00:00:00", "2026-02-09 01:00:00"]),
+        )
+
+        matched = _overlap_matches_existing(overlap_raw=overlap_raw, overlap_snapshot=overlap_snapshot, is_swap=False)
+        self.assertTrue(matched)
+
+    def test_overlap_matches_existing_false_when_row_has_no_comparable_values(self) -> None:
+        overlap_raw = pd.DataFrame(
+            {
+                "candle_begin_time": ["2026-02-09 00:00:00", "2026-02-09 01:00:00"],
+                "open": [1.0, float("nan")],
+                "close": [1.5, float("nan")],
+                "avg_price_1m": [1.2, float("nan")],
+            }
+        )
+        overlap_snapshot = pd.DataFrame(
+            {
+                "open": [1.0, 2.0],
+                "close": [1.5, 2.5],
+                "avg_price_1m": [1.2, 2.2],
+            },
+            index=pd.to_datetime(["2026-02-09 00:00:00", "2026-02-09 01:00:00"]),
+        )
+
+        matched = _overlap_matches_existing(overlap_raw=overlap_raw, overlap_snapshot=overlap_snapshot, is_swap=False)
+        self.assertFalse(matched)
 
     def test_corrupted_baseline_pickle_falls_back_to_full_rebuild(self) -> None:
         self._prepare_basic_dual_side()

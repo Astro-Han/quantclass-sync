@@ -356,21 +356,18 @@ def resolve_credentials(cli_api_key: str, cli_hid: str, secrets_file: Path) -> T
     """
     凭证优先级（高 -> 低，兼容命令）：
     1) 命令行参数
-    2) 环境变量
-    3) 本地 secrets 文件
+    2) setup 写入的 secrets 文件
+    3) 环境变量
     """
 
-    api_key = (cli_api_key or os.environ.get("QUANTCLASS_API_KEY", "")).strip()
-    hid = (cli_hid or os.environ.get("QUANTCLASS_HID", "")).strip()
+    cli_api = cli_api_key.strip()
+    cli_hid_value = cli_hid.strip()
+    file_api, file_hid = load_secrets_from_file(secrets_file)
+    env_api = os.environ.get("QUANTCLASS_API_KEY", "").strip()
+    env_hid = os.environ.get("QUANTCLASS_HID", "").strip()
 
-    if api_key and hid:
-        return api_key, hid
-
-    file_api_key, file_hid = load_secrets_from_file(secrets_file)
-    if not api_key:
-        api_key = file_api_key
-    if not hid:
-        hid = file_hid
+    api_key = cli_api or file_api or env_api
+    hid = cli_hid_value or file_hid or env_hid
 
     return api_key, hid
 

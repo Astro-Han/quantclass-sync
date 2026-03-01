@@ -93,7 +93,7 @@ def global_options(
         None, "--report-file", help="报告输出路径（JSON，高级参数）。", hidden=True
     ),
     stop_on_error: bool = typer.Option(False, "--stop-on-error", help="遇错即停（高级参数）。", hidden=True),
-    verbose: bool = typer.Option(True, "--verbose/--no-verbose", help="显示调试日志（默认开启，可用 --no-verbose 关闭）。"),
+    verbose: bool = typer.Option(False, "--verbose/--no-verbose", help="显示调试日志（默认关闭，可用 --verbose 开启）。"),
 ) -> None:
     """
     全局参数（所有子命令共享）。
@@ -491,7 +491,7 @@ def cmd_update(
         cli_hid=run_ctx.hid,
         secrets_file=run_ctx.secrets_file.resolve(),
     )
-    if "setup_secrets" in credential_source:
+    if credential_source == "setup_secrets":
         # 仅在最终凭证确实依赖 setup secrets 时，才强校验文件完整性。
         load_user_secrets_or_raise(run_ctx.secrets_file)
     missing_fields: List[str] = []

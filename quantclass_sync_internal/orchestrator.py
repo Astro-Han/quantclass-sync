@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import shutil
 import sqlite3
@@ -73,6 +74,7 @@ from .reporting import (
     _finalize_and_write_report,
     _new_report,
     _record_discovery_skips,
+    decide_exit_code,
     resolve_report_path,
     write_run_report,
 )
@@ -97,6 +99,7 @@ def process_product(
     data_root: Path,
     work_dir: Path,
     dry_run: bool,
+    run_id: str = "",
 ) -> Tuple[str, str, SyncStats, str, str]:
     """
     处理单个产品完整流程。
@@ -132,6 +135,7 @@ def process_product(
         hid=hid,
         headers=headers,
         work_dir=work_dir,
+        run_id=run_id,
     )
     # 第 3 步：解压下载文件（支持 zip/tar/rar/7z）。
     _extract_product_archive(product=product, download_path=download_path, extract_path=extract_path)
@@ -247,6 +251,7 @@ def _download_and_prepare_extract(
     hid: str,
     headers: Dict[str, str],
     work_dir: Path,
+    run_id: str = "",
 ) -> Tuple[Path, Path]:
     """下载单产品文件并准备 extract 目录。"""
 
@@ -258,7 +263,11 @@ def _download_and_prepare_extract(
     except Exception as exc:
         _raise_download_stage_error(product=product, exc=exc)
 
-    product_work = work_dir / product / actual_time
+    run_scope = (run_id or "").strip()
+    if run_scope:
+        product_work = work_dir / run_scope / product / actual_time
+    else:
+        product_work = work_dir / product / actual_time
     download_path = product_work / file_name
     extract_path = product_work / "extract"
 
@@ -619,6 +628,24 @@ def _upsert_product_status_after_success(
     upsert_product_status(conn, status)
     write_local_timestamp(command_ctx.data_root, product, actual_time)
 
+
+def _callable_accepts_run_id(func: object) -> bool:
+    """判断可调用对象是否可接收 run_id 参数（兼容历史测试桩）。"""
+
+    target = func
+    side_effect = getattr(func, "side_effect", None)
+    if callable(side_effect):
+        target = side_effect
+
+    try:
+        signature = inspect.signature(target)
+    except (TypeError, ValueError):
+        return False
+
+    if "run_id" in signature.parameters:
+        return True
+    return any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+
 def _collect_preprocess_source_successes(report: RunReport) -> List[ProductRunResult]:
     """
     收集本轮已成功更新的“预处理依赖源产品”。
@@ -864,6 +891,26 @@ def _execute_plans(
             continue
 
         if not requested_dates_for_plan:
+            if catch_up_to_latest:
+                elapsed = time.time() - t_product_start
+                _append_result(
+                    report,
+                    product=plan.name,
+                    status="skipped",
+                    strategy=plan.strategy,
+                    reason_code=REASON_NO_DATA_FOR_DATE,
+                    elapsed=elapsed,
+                    mode="gate",
+                    error="catch-up 日期队列为空，已跳过本产品。",
+                    stage="PLAN",
+                    event_detail="catchup_dates=0",
+                )
+                log_info(
+                    f"[{plan.name}] catch-up 日期队列为空，已跳过。",
+                    event="SYNC_SKIP",
+                    reason_code=REASON_NO_DATA_FOR_DATE,
+                )
+                continue
             requested_dates_for_plan = [""]
 
         # B. 按日期队列执行单产品同步（网络 + 解压 + 文件同步）。
@@ -871,18 +918,30 @@ def _execute_plans(
             debug_trace = ""
             t_sync_phase = time.time()
             try:
+                process_kwargs = {
+                    "plan": plan,
+                    "date_time": requested_date_for_plan or None,
+                    "api_base": command_ctx.api_base.rstrip("/"),
+                    "hid": hid,
+                    "headers": headers,
+                    "data_root": command_ctx.data_root,
+                    "work_dir": command_ctx.work_dir,
+                    "dry_run": command_ctx.dry_run,
+                }
+                if _callable_accepts_run_id(process_product):
+                    process_kwargs["run_id"] = command_ctx.run_id
                 product, actual_time, stats, source_path, reason_code = process_product(
-                    plan=plan,
-                    date_time=requested_date_for_plan or None,
-                    api_base=command_ctx.api_base.rstrip("/"),
-                    hid=hid,
-                    headers=headers,
-                    data_root=command_ctx.data_root,
-                    work_dir=command_ctx.work_dir,
-                    dry_run=command_ctx.dry_run,
+                    **process_kwargs,
                 )
                 elapsed = time.time() - t_product_start
                 total.merge(stats)
+                # 先完成状态落盘，再记录 ok，避免状态写失败时出现 ok/error 双记录。
+                _upsert_product_status_after_success(
+                    conn=conn,
+                    command_ctx=command_ctx,
+                    product=product,
+                    actual_time=actual_time,
+                )
                 _append_result(
                     report,
                     product=product,
@@ -893,13 +952,6 @@ def _execute_plans(
                     elapsed=elapsed,
                     stats=stats,
                     source_path=source_path,
-                )
-                # C. 成功后统一回写状态库与 timestamp（dry-run 下不会写）。
-                _upsert_product_status_after_success(
-                    conn=conn,
-                    command_ctx=command_ctx,
-                    product=product,
-                    actual_time=actual_time,
                 )
                 report.phase_sync_seconds += max(0.0, time.time() - t_sync_phase)
                 continue
@@ -1017,6 +1069,7 @@ def run_update_with_settings(
 
     if mode == "local" and not planned_products and not product_args:
         report.failed_total = 1
+        report.reason_code_counts = {REASON_NO_LOCAL_PRODUCTS: 1}
         report.ended_at = utc_now_iso()
         report.duration_seconds = 0.0
         write_run_report(report_path, report)
@@ -1025,16 +1078,26 @@ def run_update_with_settings(
             event="RUN_SUMMARY",
             reason_code=REASON_NO_LOCAL_PRODUCTS,
         )
-        return 1
+        return decide_exit_code(
+            report=report,
+            has_error=True,
+            no_executable_products=True,
+        )
 
     plans = build_product_plan(planned_products)
     report.planned_total = len(plans)
     if not plans:
+        report.failed_total = 1
+        report.reason_code_counts = {REASON_NO_LOCAL_PRODUCTS: 1}
         report.ended_at = utc_now_iso()
         report.duration_seconds = 0.0
         write_run_report(report_path, report)
-        log_error("执行清单为空，任务结束。", event="RUN_SUMMARY")
-        return 1
+        log_error("执行清单为空，任务结束。", event="RUN_SUMMARY", reason_code=REASON_NO_LOCAL_PRODUCTS)
+        return decide_exit_code(
+            report=report,
+            has_error=True,
+            no_executable_products=True,
+        )
 
     conn: Optional[sqlite3.Connection] = None
     if not command_ctx.dry_run:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import stat
 import tarfile
 import zipfile
 from pathlib import Path
@@ -37,15 +38,21 @@ def safe_extract_zip(path: Path, save_path: Path) -> None:
 
     with zipfile.ZipFile(path) as zf:
         for member in zf.infolist():
-            target = save_path / member.filename
+            member_name = _normalize_member_name(member.filename)
+            target = save_path / member_name
             _ensure_within(save_path, target)
+            if _is_zip_symlink(member):
+                raise RuntimeError(f"zip 包含不安全的链接文件，已拒绝: {member.filename}")
         zf.extractall(save_path)
+    _scan_extracted_dangerous_nodes(save_path)
 
 def safe_extract_tar(path: Path, save_path: Path) -> None:
     """安全解压 tar。"""
 
     with tarfile.open(path) as tf:
         for member in tf.getmembers():
+            if member.isfifo():
+                raise RuntimeError(f"tar 包含不安全的特殊文件类型，已拒绝: {member.name}")
             if member.isdev():
                 raise RuntimeError(f"tar 包含不安全的特殊文件类型，已拒绝: {member.name}")
 
@@ -69,6 +76,42 @@ def _normalize_member_name(name: str) -> str:
 
     return name.replace("\\", "/")
 
+def _is_zip_symlink(member: zipfile.ZipInfo) -> bool:
+    """
+    判断 zip 成员是否是符号链接。
+
+    zip 在 Unix 下会把文件模式写在 external_attr 的高 16 位。
+    """
+
+    mode = (member.external_attr >> 16) & 0xFFFF
+    return stat.S_ISLNK(mode)
+
+def _scan_extracted_dangerous_nodes(save_path: Path) -> None:
+    """
+    解压后统一扫描危险节点类型。
+
+    防止解压库在不同格式下生成符号链接、设备节点或 FIFO。
+    """
+
+    for node in save_path.rglob("*"):
+        try:
+            mode = node.lstat().st_mode
+        except FileNotFoundError:
+            continue
+
+        if stat.S_ISLNK(mode):
+            kind = "symlink"
+        elif stat.S_ISBLK(mode):
+            kind = "block"
+        elif stat.S_ISCHR(mode):
+            kind = "char"
+        elif stat.S_ISFIFO(mode):
+            kind = "fifo"
+        else:
+            continue
+
+        raise RuntimeError(f"解压结果包含不安全的特殊文件类型，已拒绝: {node} ({kind})")
+
 def safe_extract_rar(path: Path, save_path: Path) -> None:
     """
     安全解压 rar。
@@ -88,6 +131,7 @@ def safe_extract_rar(path: Path, save_path: Path) -> None:
             _ensure_within(save_path, save_path / member_name)
         for member in members:
             rf.extract(member, path=save_path)
+    _scan_extracted_dangerous_nodes(save_path)
 
 def safe_extract_7z(path: Path, save_path: Path) -> None:
     """
@@ -110,6 +154,7 @@ def safe_extract_7z(path: Path, save_path: Path) -> None:
 
     with py7zr.SevenZipFile(path, "r") as sf:
         sf.extractall(path=save_path)
+    _scan_extracted_dangerous_nodes(save_path)
 
 def extract_archive(path: Path, save_path: Path) -> None:
     """

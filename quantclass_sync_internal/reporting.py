@@ -9,7 +9,13 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional, Protocol, Sequence
 
 from .constants import (
+    EXIT_CODE_GENERAL_FAILURE,
+    EXIT_CODE_NETWORK_OR_REMOTE_DATA_FAILURE,
+    EXIT_CODE_NO_EXECUTABLE_PRODUCTS,
+    EXIT_CODE_SUCCESS,
     REASON_INVALID_EXPLICIT_PRODUCT,
+    REASON_NETWORK_ERROR,
+    REASON_NO_DATA_FOR_DATE,
     REASON_OK,
     REASON_UNKNOWN_LOCAL_PRODUCT,
 )
@@ -20,6 +26,12 @@ from .status_store import report_dir_path
 
 class HasReasonCode(Protocol):
     reason_code: str
+
+
+NETWORK_OR_REMOTE_FAILURE_REASONS = {
+    REASON_NETWORK_ERROR,
+    REASON_NO_DATA_FOR_DATE,
+}
 
 
 def build_reason_code_counts(items: Iterable[HasReasonCode]) -> Dict[str, int]:
@@ -127,6 +139,29 @@ def resolve_report_path(ctx: CommandContext, command: str) -> Path:
         return ctx.report_file.resolve()
     return (report_dir_path(ctx.data_root) / f"run_report_{ctx.run_id}_{command}.json").resolve()
 
+
+def decide_exit_code(
+    *,
+    report: Optional[RunReport],
+    has_error: bool,
+    no_executable_products: bool = False,
+) -> int:
+    """统一决策进程退出码。"""
+
+    if no_executable_products:
+        return EXIT_CODE_NO_EXECUTABLE_PRODUCTS
+    if not has_error:
+        return EXIT_CODE_SUCCESS
+
+    failed_reason_codes = {
+        item.reason_code
+        for item in report.products
+        if item.status == "error" and item.reason_code
+    } if report is not None else set()
+    if failed_reason_codes and failed_reason_codes.issubset(NETWORK_OR_REMOTE_FAILURE_REASONS):
+        return EXIT_CODE_NETWORK_OR_REMOTE_DATA_FAILURE
+    return EXIT_CODE_GENERAL_FAILURE
+
 def _finalize_and_write_report(
     report: RunReport,
     total: SyncStats,
@@ -175,8 +210,7 @@ def _finalize_and_write_report(
 
     write_run_report(report_path, report)
     log_info("运行报告已写入。", event="RUN_SUMMARY", report_file=str(report_path))
-    return 1 if has_error else 0
+    return decide_exit_code(report=report, has_error=has_error)
 
 def _new_report(run_id: str, mode: str) -> RunReport:
     return RunReport(schema_version="3.1", run_id=run_id, started_at=utc_now_iso(), mode=mode)
-

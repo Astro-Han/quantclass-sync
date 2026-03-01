@@ -1,13 +1,17 @@
 import io
 import os
 import shutil
+import stat
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from quantclass_sync_internal.archive import safe_extract_tar
+import quantclass_sync_internal.archive as archive_module
+from quantclass_sync_internal.archive import safe_extract_7z, safe_extract_rar, safe_extract_tar, safe_extract_zip
 from quantclass_sync_internal.csv_engine import read_csv_payload
 from quantclass_sync_internal.file_sync import sync_raw_file
 from quantclass_sync_internal.status_store import cleanup_work_cache_aggressive, normalize_data_date
@@ -52,6 +56,165 @@ class SafeExtractTarTests(unittest.TestCase):
                     safe_extract_tar(tar_path, extract_dir)
 
                 self.assertFalse((extract_dir / "ok.txt").exists())
+
+    def test_safe_extract_tar_rejects_fifo_when_isdev_returns_false(self) -> None:
+        tar_path = self.root / "fifo-only.tar"
+        extract_dir = self.root / "extract-fifo-only"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        self._build_tar_with_special_member(tar_path, tarfile.FIFOTYPE)
+
+        with patch("quantclass_sync_internal.archive.tarfile.TarInfo.isdev", return_value=False):
+            with self.assertRaises(RuntimeError):
+                safe_extract_tar(tar_path, extract_dir)
+
+        self.assertFalse((extract_dir / "ok.txt").exists())
+
+
+class SafeExtractArchiveDangerousNodesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _ensure_symlink_supported(self) -> None:
+        probe_target = self.root / "symlink-probe-target.txt"
+        probe_target.write_text("probe", encoding="utf-8")
+        probe_link = self.root / "symlink-probe-link"
+        try:
+            probe_link.symlink_to(probe_target)
+        except (NotImplementedError, OSError):
+            self.skipTest("current platform does not support symlink in this environment")
+        finally:
+            if probe_link.exists() or probe_link.is_symlink():
+                probe_link.unlink()
+
+    def test_safe_extract_zip_rejects_symlink_member_by_external_attr(self) -> None:
+        zip_path = self.root / "zip-symlink-entry.zip"
+        extract_dir = self.root / "zip-symlink-entry-extract"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("ok.txt", "ok")
+            symlink_member = zipfile.ZipInfo("bad-link")
+            symlink_member.create_system = 3
+            symlink_member.external_attr = (stat.S_IFLNK | 0o777) << 16
+            zf.writestr(symlink_member, "../outside")
+
+        with self.assertRaises(RuntimeError):
+            safe_extract_zip(zip_path, extract_dir)
+
+        self.assertFalse((extract_dir / "ok.txt").exists())
+
+    def test_safe_extract_zip_post_scan_rejects_symlink(self) -> None:
+        self._ensure_symlink_supported()
+        zip_path = self.root / "zip-post-scan.zip"
+        extract_dir = self.root / "zip-post-scan-extract"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        outside = self.root / "outside-zip.txt"
+        outside.write_text("outside", encoding="utf-8")
+
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("ok.txt", "ok")
+
+        original_extractall = archive_module.zipfile.ZipFile.extractall
+
+        def extractall_with_symlink(zip_obj, path, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            original_extractall(zip_obj, path, *args, **kwargs)
+            bad_link = Path(path) / "bad-zip-link"
+            bad_link.symlink_to(outside)
+
+        with patch("quantclass_sync_internal.archive.zipfile.ZipFile.extractall", new=extractall_with_symlink):
+            with self.assertRaises(RuntimeError):
+                safe_extract_zip(zip_path, extract_dir)
+
+    def test_safe_extract_rar_post_scan_rejects_symlink(self) -> None:
+        self._ensure_symlink_supported()
+        extract_dir = self.root / "rar-post-scan-extract"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        outside = self.root / "outside-rar.txt"
+        outside.write_text("outside", encoding="utf-8")
+
+        class FakeRarInfo:
+            def __init__(self, filename: str) -> None:
+                self.filename = filename
+
+        class FakeRarFile:
+            def __init__(self, _path: Path) -> None:
+                self._members = [FakeRarInfo("ok.txt")]
+
+            def __enter__(self) -> "FakeRarFile":
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb) -> bool:
+                return False
+
+            def infolist(self) -> list[FakeRarInfo]:
+                return self._members
+
+            def extract(self, member: FakeRarInfo, path: Path) -> None:
+                extracted = Path(path) / member.filename
+                extracted.parent.mkdir(parents=True, exist_ok=True)
+                extracted.write_text("ok", encoding="utf-8")
+                bad_link = Path(path) / "bad-rar-link"
+                if not bad_link.exists():
+                    bad_link.symlink_to(outside)
+
+        with patch.object(archive_module, "rarfile", SimpleNamespace(RarFile=FakeRarFile)):
+            with self.assertRaises(RuntimeError):
+                safe_extract_rar(self.root / "fake.rar", extract_dir)
+
+    def test_safe_extract_7z_post_scan_rejects_symlink(self) -> None:
+        self._ensure_symlink_supported()
+        extract_dir = self.root / "sevenzip-post-scan-extract"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        outside = self.root / "outside-7z.txt"
+        outside.write_text("outside", encoding="utf-8")
+
+        class FakeSevenZipFile:
+            def __init__(self, _path: Path, _mode: str) -> None:
+                pass
+
+            def __enter__(self) -> "FakeSevenZipFile":
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb) -> bool:
+                return False
+
+            def getnames(self) -> list[str]:
+                return ["ok.txt"]
+
+            def extractall(self, path: Path) -> None:
+                extracted = Path(path) / "ok.txt"
+                extracted.parent.mkdir(parents=True, exist_ok=True)
+                extracted.write_text("ok", encoding="utf-8")
+                bad_link = Path(path) / "bad-7z-link"
+                bad_link.symlink_to(outside)
+
+        with patch.object(archive_module, "py7zr", SimpleNamespace(SevenZipFile=FakeSevenZipFile)):
+            with self.assertRaises(RuntimeError):
+                safe_extract_7z(self.root / "fake.7z", extract_dir)
+
+    def test_scan_extracted_dangerous_nodes_rejects_block_char_and_fifo(self) -> None:
+        extract_dir = self.root / "scan-extract"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+
+        for node_name, mode, kind in [
+            ("bad-block", stat.S_IFBLK | 0o600, "block"),
+            ("bad-char", stat.S_IFCHR | 0o600, "char"),
+            ("bad-fifo", stat.S_IFIFO | 0o600, "fifo"),
+        ]:
+            with self.subTest(kind=kind):
+                fake_node = extract_dir / node_name
+                fake_node.write_text("placeholder", encoding="utf-8")
+                with patch("pathlib.Path.rglob", return_value=[fake_node]), patch(
+                    "pathlib.Path.lstat",
+                    return_value=SimpleNamespace(st_mode=mode),
+                ):
+                    with self.assertRaises(RuntimeError) as cm:
+                        archive_module._scan_extracted_dangerous_nodes(extract_dir)
+                self.assertIn(kind, str(cm.exception))
 
 
 class ReadCsvPayloadMultilineTests(unittest.TestCase):

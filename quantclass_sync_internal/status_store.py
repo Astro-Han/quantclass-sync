@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -124,7 +125,16 @@ def write_local_timestamp(data_root: Path, product: str, data_date: str) -> None
     path = data_root / product / TIMESTAMP_FILE_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     local_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    path.write_text(f"{normalized},{local_now}\n", encoding="utf-8")
+    tmp_path = path.parent / f".{path.name}.tmp-{os.getpid()}-{time.time_ns()}"
+    try:
+        tmp_path.write_text(f"{normalized},{local_now}\n", encoding="utf-8")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
 
 def should_skip_by_timestamp(local_date: Optional[str], api_latest_date: Optional[str]) -> bool:
     """判断本地是否已是最新版本。"""

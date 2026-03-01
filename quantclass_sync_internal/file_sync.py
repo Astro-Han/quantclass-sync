@@ -89,10 +89,10 @@ def infer_target_relpath(src_rel_path: Path, product: str) -> Optional[Path]:
 
     src_rel_path = normalize_source_relpath(src_rel_path, product)
 
-    if src_rel_path.name == "period_offset.csv":
-        return Path("period_offset.csv")
-    if src_rel_path.name == "period_offset.ts":
-        return Path("period_offset.ts")
+    if src_rel_path.name in {"period_offset.csv", "period_offset.ts"}:
+        if product == "period_offset":
+            return Path(src_rel_path.name)
+        return Path(product) / src_rel_path
 
     if product in TRADING_PRODUCTS or product in INDEX_PRODUCTS:
         if re.fullmatch(r"[a-z]{2}\d{6}\.csv", src_rel_path.name):
@@ -109,9 +109,9 @@ def infer_target_relpath(src_rel_path: Path, product: str) -> Optional[Path]:
         return None
 
     if product == "period_offset":
-        if src_rel_path.suffix.lower() == ".csv":
+        if src_rel_path.name == "period_offset.csv":
             return Path("period_offset.csv")
-        if src_rel_path.suffix.lower() == ".ts":
+        if src_rel_path.name == "period_offset.ts":
             return Path("period_offset.ts")
 
     # 通用兜底：未知产品按原相对路径镜像
