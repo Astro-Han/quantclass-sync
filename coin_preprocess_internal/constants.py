@@ -29,6 +29,8 @@ TAIL_READ_MAX_LINES = 4096
 
 TAIL_READ_MAX_BYTES = 8 * 1024 * 1024
 
+TAIL_APPEND_SAFE_MAX_DATA_ROWS = TAIL_READ_MAX_LINES
+
 PIVOT_DEFRAG_THRESHOLD = 32
 
 SPECIAL_SPOT_TO_SWAP_ALIAS = {
@@ -98,4 +100,3 @@ class PreprocessSummary:
     output_dir: str
     mode: str
     changed_symbols: int
-

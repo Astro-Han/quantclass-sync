@@ -9,8 +9,14 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from coin_preprocess_internal.constants import FRAME_COLUMNS
-from coin_preprocess_internal.csv_source import _prepare_symbol_frame
+from coin_preprocess_internal.constants import FRAME_COLUMNS, TAIL_READ_MAX_LINES
+from coin_preprocess_internal.csv_source import (
+    _build_incremental_rows,
+    _detect_relist_segments,
+    _prepare_symbol_frame,
+    _read_symbol_csv,
+    _sanitize_candle_time_rows,
+)
 from coin_preprocess_internal.runner import _overlap_matches_existing, _resolve_source_delta
 from coin_preprocess_builtin import (
     OUTPUT_PIVOT_SPOT,
@@ -113,6 +119,29 @@ class CoinPreprocessBuiltinTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _build_hourly_rows(
+        self,
+        start: str,
+        count: int,
+        start_open: float,
+        volume: float,
+    ) -> List[Tuple[str, float, float, float, float, float]]:
+        base = pd.Timestamp(start)
+        rows: List[Tuple[str, float, float, float, float, float]] = []
+        for idx in range(count):
+            open_p = start_open + idx * 0.01
+            rows.append(
+                (
+                    (base + pd.Timedelta(hours=idx)).strftime("%Y-%m-%d %H:%M:%S"),
+                    open_p,
+                    open_p + 0.2,
+                    open_p - 0.2,
+                    open_p + 0.1,
+                    volume,
+                )
+            )
+        return rows
+
     def test_baseline_missing_runs_full_rebuild(self) -> None:
         self._prepare_basic_dual_side()
 
@@ -193,6 +222,37 @@ class CoinPreprocessBuiltinTests(unittest.TestCase):
             .loc[pd.Timestamp("2026-02-09 01:00:00"), "close"]
         )
         self.assertEqual(9.9, float(close_at_0100))
+
+    def test_incremental_tail_duplicate_timestamp_keeps_last_row(self) -> None:
+        self._prepare_basic_dual_side()
+        run_coin_preprocess_builtin(self.root)
+
+        self._write_runtime_timestamp(datetime.now())
+        self._append_symbol_row(
+            SPOT_PRODUCT,
+            "AAA-USDT",
+            ("2026-02-09 02:00:00", 2.0, 2.4, 1.9, 2.2, 30),
+            is_swap=False,
+        )
+        self._append_symbol_row(
+            SPOT_PRODUCT,
+            "AAA-USDT",
+            ("2026-02-09 02:00:00", 8.0, 8.4, 7.9, 8.2, 33),
+            is_swap=False,
+        )
+        target = self.root / SPOT_PRODUCT / "AAA-USDT.csv"
+        os.utime(target, (time.time() + 2, time.time() + 2))
+
+        summary = run_coin_preprocess_builtin(self.root)
+        self.assertEqual("incremental_patch", summary.mode)
+
+        spot_dict = pd.read_pickle(self.root / PREPROCESS_PRODUCT / OUTPUT_SPOT_DICT)
+        close_at_0200 = (
+            spot_dict["AAA-USDT"]
+            .set_index("candle_begin_time")
+            .loc[pd.Timestamp("2026-02-09 02:00:00"), "close"]
+        )
+        self.assertEqual(8.2, float(close_at_0200))
 
     def test_symbol_deletion_removes_keys(self) -> None:
         self._prepare_basic_dual_side()
@@ -323,10 +383,156 @@ class CoinPreprocessBuiltinTests(unittest.TestCase):
         self._prepare_basic_dual_side()
         run_coin_preprocess_builtin(self.root)
         self._write_runtime_timestamp(datetime.now())
+        self._write_symbol_csv(
+            SPOT_PRODUCT,
+            "AAA-USDT",
+            [
+                ("2026-02-09 00:00:00", 1.0, 2.0, 0.9, 1.5, 10),
+                ("2026-02-09 01:00:00", 1.5, 2.2, 1.4, 9.9, 20),
+                ("2026-02-09 02:00:00", 2.0, 2.4, 1.9, 2.2, 30),
+            ],
+            is_swap=False,
+        )
+        os.utime(
+            self.root / SPOT_PRODUCT / "AAA-USDT.csv",
+            (time.time() + 2, time.time() + 2),
+        )
 
         with patch("coin_preprocess_builtin._run_incremental_patch", side_effect=RuntimeError("inject_fail")):
             summary = run_coin_preprocess_builtin(self.root)
         self.assertEqual("fallback_full_rebuild", summary.mode)
+
+        expected_raw = _read_symbol_csv(self.root / SPOT_PRODUCT / "AAA-USDT.csv")
+        expected_frame = _prepare_symbol_frame(expected_raw, symbol="AAA-USDT", is_swap=False)
+        spot_dict = pd.read_pickle(self.root / PREPROCESS_PRODUCT / OUTPUT_SPOT_DICT)
+        pd.testing.assert_frame_equal(
+            expected_frame[FRAME_COLUMNS].reset_index(drop=True),
+            spot_dict["AAA-USDT"][FRAME_COLUMNS].reset_index(drop=True),
+        )
+
+    def test_large_history_revision_with_new_tail_row_is_not_missed(self) -> None:
+        self._write_symbol_csv(
+            SPOT_PRODUCT,
+            "AAA-USDT",
+            rows=self._build_hourly_rows(
+                start="2025-01-01 00:00:00",
+                count=TAIL_READ_MAX_LINES + 8,
+                start_open=100.0,
+                volume=10.0,
+            ),
+            is_swap=False,
+        )
+        self._write_symbol_csv(
+            SWAP_PRODUCT,
+            "BBB-USDT",
+            [("2026-02-09 00:00:00", 3.0, 3.2, 2.8, 3.1, 50)],
+            is_swap=True,
+        )
+        run_coin_preprocess_builtin(self.root)
+        self._write_runtime_timestamp(datetime.now())
+
+        revised_rows = self._build_hourly_rows(
+            start="2025-01-01 00:00:00",
+            count=TAIL_READ_MAX_LINES + 8,
+            start_open=100.0,
+            volume=10.0,
+        )
+        first = revised_rows[0]
+        revised_rows[0] = (first[0], first[1], first[2], first[3], first[4] + 7.7, first[5])
+        next_ts = (
+            pd.Timestamp("2025-01-01 00:00:00") + pd.Timedelta(hours=TAIL_READ_MAX_LINES + 8)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        revised_rows.append((next_ts, 200.0, 200.2, 199.8, 200.1, 10.0))
+
+        self._write_symbol_csv(SPOT_PRODUCT, "AAA-USDT", revised_rows, is_swap=False)
+        target = self.root / SPOT_PRODUCT / "AAA-USDT.csv"
+        os.utime(target, (time.time() + 2, time.time() + 2))
+
+        summary = run_coin_preprocess_builtin(self.root)
+        self.assertEqual("incremental_patch", summary.mode)
+
+        spot_dict = pd.read_pickle(self.root / PREPROCESS_PRODUCT / OUTPUT_SPOT_DICT)
+        frame = spot_dict["AAA-USDT"].set_index("candle_begin_time")
+        self.assertEqual(first[4] + 7.7, float(frame.loc[pd.Timestamp(first[0]), "close"]))
+        self.assertEqual(pd.Timestamp(next_ts), pd.to_datetime(frame.index.max()))
+
+    def test_incremental_rows_fill_hour_gap(self) -> None:
+        existing_raw = pd.DataFrame(
+            {
+                "candle_begin_time": ["2026-02-09 00:00:00"],
+                "open": [1.0],
+                "high": [1.1],
+                "low": [0.9],
+                "close": [1.5],
+                "volume": [10],
+            }
+        )
+        existing_frame = _prepare_symbol_frame(existing_raw, symbol="AAA-USDT", is_swap=False)
+        new_raw = pd.DataFrame(
+            {
+                "candle_begin_time": ["2026-02-09 03:00:00"],
+                "open": [2.0],
+                "high": [2.4],
+                "low": [1.9],
+                "close": [2.2],
+                "volume": [30],
+            }
+        )
+
+        incremental_rows = _build_incremental_rows(
+            new_raw=new_raw,
+            existing_frame=existing_frame,
+            source_symbol="AAA-USDT",
+            is_swap=False,
+        )
+
+        self.assertEqual(
+            [
+                pd.Timestamp("2026-02-09 01:00:00"),
+                pd.Timestamp("2026-02-09 02:00:00"),
+                pd.Timestamp("2026-02-09 03:00:00"),
+            ],
+            list(pd.to_datetime(incremental_rows["candle_begin_time"])),
+        )
+        self.assertEqual(1.5, float(incremental_rows.iloc[0]["close"]))
+        self.assertEqual(1.5, float(incremental_rows.iloc[1]["close"]))
+        self.assertEqual(2.2, float(incremental_rows.iloc[2]["close"]))
+
+    def test_stable_dedupe_keeps_last_duplicate_row(self) -> None:
+        raw_df = pd.DataFrame(
+            {
+                "candle_begin_time": [
+                    "2026-02-09 01:00:00",
+                    "2026-02-09 01:00:00",
+                    "2026-02-09 00:00:00",
+                ],
+                "open": [1.0, 9.0, 0.8],
+                "close": [1.1, 9.9, 0.9],
+            }
+        )
+        sanitized = _sanitize_candle_time_rows(raw_df, symbol_name="AAA-USDT")
+        close_at_dup = (
+            sanitized.set_index("candle_begin_time").loc[pd.Timestamp("2026-02-09 01:00:00"), "close"]
+        )
+        self.assertEqual(9.9, float(close_at_dup))
+
+    def test_detect_relist_segments_tolerates_dirty_price_value(self) -> None:
+        raw_df = pd.DataFrame(
+            {
+                "candle_begin_time": [
+                    "2026-02-09 00:00:00",
+                    "2026-02-11 00:00:00",
+                    "2026-02-12 00:00:00",
+                ],
+                "close": ["dirty-close", 2.0, 2.1],
+                "open": [1.0, "dirty-open", 2.2],
+            }
+        )
+        segments = _detect_relist_segments(raw_df)
+        self.assertEqual(
+            [(pd.Timestamp("2026-02-09 00:00:00"), pd.Timestamp("2026-02-12 00:00:00"))],
+            segments,
+        )
 
     def test_incremental_and_rebuild_fail_keeps_incremental_as_cause(self) -> None:
         self._prepare_basic_dual_side()

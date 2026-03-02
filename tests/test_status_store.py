@@ -6,7 +6,12 @@ from unittest.mock import patch
 
 from quantclass_sync_internal.constants import TIMESTAMP_FILE_NAME
 from quantclass_sync_internal.models import ProductStatus
-from quantclass_sync_internal.status_store import ensure_status_table, read_local_timestamp_date, upsert_product_status
+from quantclass_sync_internal.status_store import (
+    ensure_status_table,
+    export_status_json,
+    read_local_timestamp_date,
+    upsert_product_status,
+)
 
 
 class StatusStoreTests(unittest.TestCase):
@@ -20,6 +25,7 @@ class StatusStoreTests(unittest.TestCase):
 
     def _new_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
         ensure_status_table(conn)
         return conn
 
@@ -72,6 +78,22 @@ class StatusStoreTests(unittest.TestCase):
         with patch("pathlib.Path.read_text", side_effect=ValueError("boom")):
             with self.assertRaises(ValueError):
                 read_local_timestamp_date(data_root, "demo")
+
+    def test_export_status_json_replace_failure_keeps_original_file_and_cleans_temp(self) -> None:
+        conn = self._new_conn()
+        output_path = self.root / "products-status.json"
+        output_path.write_text('{"old":"value"}', encoding="utf-8")
+        try:
+            upsert_product_status(conn, ProductStatus(name="demo", display_name="demo"))
+            before = output_path.read_text(encoding="utf-8")
+            with patch("quantclass_sync_internal.status_store.os.replace", side_effect=RuntimeError("replace failed")):
+                with self.assertRaises(RuntimeError):
+                    export_status_json(conn, output_path)
+        finally:
+            conn.close()
+
+        self.assertEqual(before, output_path.read_text(encoding="utf-8"))
+        self.assertEqual([], list(output_path.parent.glob(f".{output_path.name}.tmp-*")))
 
 
 if __name__ == "__main__":

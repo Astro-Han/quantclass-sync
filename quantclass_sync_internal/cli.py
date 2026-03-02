@@ -14,6 +14,7 @@ from typing import List, Optional, Tuple
 
 import typer
 
+from . import models as models_module
 from .config import (
     build_product_plan,
     discover_local_products,
@@ -80,6 +81,32 @@ app = typer.Typer(
     pretty_exceptions_enable=False,
 )
 
+def _new_run_id() -> str:
+    """生成高冲突安全的 run_id（微秒 + pid + 短随机后缀）。"""
+
+    now = datetime.now()
+    nonce = time.time_ns() % 1_000_000
+    return f"{now.strftime('%Y%m%d-%H%M%S-%f')}-p{os.getpid()}-{nonce:06d}"
+
+def _sync_logger_runtime(logger: ConsoleLogger, progress_every: Optional[int] = None) -> None:
+    """同步 CLI 层与 models 层的日志运行时上下文。"""
+
+    global LOGGER, PROGRESS_EVERY
+    LOGGER = logger
+    models_module.LOGGER = logger
+    if progress_every is not None:
+        normalized = max(1, progress_every)
+        PROGRESS_EVERY = normalized
+        models_module.PROGRESS_EVERY = normalized
+
+def _resolve_path_from_config(raw_path: Path, *, config_file: Path) -> Path:
+    """把配置里的路径统一解析为绝对路径（相对路径按配置文件目录解析）。"""
+
+    expanded = raw_path.expanduser()
+    if expanded.is_absolute():
+        return expanded.resolve()
+    return (config_file.parent / expanded).resolve()
+
 @app.callback(invoke_without_command=True)
 def global_options(
     ctx: typer.Context,
@@ -105,10 +132,11 @@ def global_options(
     3) 把运行上下文写入 ctx.obj，供后续子命令复用
     """
 
-    run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-    global LOGGER, PROGRESS_EVERY
-    LOGGER = ConsoleLogger(level="DEBUG" if verbose else "INFO", run_id=run_id)
-    PROGRESS_EVERY = max(1, DEFAULT_PROGRESS_EVERY)
+    run_id = _new_run_id()
+    _sync_logger_runtime(
+        ConsoleLogger(level="DEBUG" if verbose else "INFO", run_id=run_id),
+        progress_every=DEFAULT_PROGRESS_EVERY,
+    )
 
     resolved_data_root = data_root.resolve() if data_root else DEFAULT_DATA_ROOT.resolve()
     resolved_secrets_file = secrets_file.resolve() if secrets_file else DEFAULT_SECRETS_FILE.resolve()
@@ -225,8 +253,9 @@ def _cleanup_after_command(command_ctx: Optional[CommandContext]) -> None:
 
     work_dir = command_ctx.work_dir if command_ctx is not None else DEFAULT_WORK_DIR.resolve()
     data_root = command_ctx.data_root if command_ctx is not None else DEFAULT_DATA_ROOT.resolve()
+    run_id = command_ctx.run_id if command_ctx is not None else ""
     try:
-        cleanup_work_cache_aggressive(work_dir)
+        cleanup_work_cache_aggressive(work_dir, run_id=run_id)
         log_debug("工作缓存已清理。", event="CACHE_CLEANUP", work_dir=str(work_dir))
     except Exception as exc:
         log_debug(f"工作缓存清理失败（已忽略）: {exc}", event="CACHE_CLEANUP")
@@ -325,10 +354,10 @@ def _resolve_command_paths(
 
     if user_config is not None:
         if not base_ctx.data_root_from_cli:
-            data_root = user_config.data_root.resolve()
+            data_root = _resolve_path_from_config(user_config.data_root, config_file=base_ctx.config_file)
             data_root_source = "config"
         if not base_ctx.secrets_file_from_cli:
-            secrets_file = user_config.secrets_file.resolve()
+            secrets_file = _resolve_path_from_config(user_config.secrets_file, config_file=base_ctx.config_file)
             secrets_source = "config"
 
     return data_root.resolve(), secrets_file.resolve(), user_config, data_root_source, secrets_source
@@ -420,7 +449,7 @@ def cmd_setup(
     if base_ctx.secrets_file_from_cli:
         secrets_path = base_ctx.secrets_file
     elif existing_config is not None:
-        secrets_path = existing_config.secrets_file.resolve()
+        secrets_path = _resolve_path_from_config(existing_config.secrets_file, config_file=base_ctx.config_file)
     else:
         secrets_path = DEFAULT_USER_SECRETS_FILE.resolve()
 
@@ -483,6 +512,7 @@ def cmd_update(
 
     effective_verbose = base_ctx.verbose if verbose is None else verbose
     LOGGER.level = "DEBUG" if effective_verbose else "INFO"
+    _sync_logger_runtime(LOGGER)
     run_ctx = _build_command_ctx_with_overrides(base_ctx, data_root=data_root, secrets_file=secrets_file)
     # update 明确固定优先级：CLI > setup secrets > ENV，
     # 解析后写回 run_ctx，避免后续流程再次按“旧优先级”重算。

@@ -187,11 +187,12 @@ def run_update_with_settings(*args, **kwargs):
 
 def global_options(*args, **kwargs):
     _bind_cli_runtime()
-    result = _global_options_impl(*args, **kwargs)
-    # CLI 层会重设 LOGGER，这里回写到 models，保证全局日志函数看到最新实例。
-    _models.LOGGER = _cli.LOGGER
-    _models.PROGRESS_EVERY = _cli.PROGRESS_EVERY
-    return result
+    try:
+        return _global_options_impl(*args, **kwargs)
+    finally:
+        # CLI 层会重设 LOGGER，这里回写到 models，保证全局日志函数看到最新实例。
+        _models.LOGGER = _cli.LOGGER
+        _models.PROGRESS_EVERY = _cli.PROGRESS_EVERY
 
 
 def cmd_setup(*args, **kwargs):

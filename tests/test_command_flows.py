@@ -1,17 +1,35 @@
 import os
 import tempfile
 import unittest
+import json
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
 import typer
 
 import quantclass_sync as qcs
+from quantclass_sync_internal import models as models_module
 
 
 class _DummyTyperContext:
     def __init__(self, obj: qcs.CommandContext) -> None:
         self.obj = obj
+
+
+class _FakeGlobalContext:
+    def __init__(self, invoked_subcommand: str | None = None) -> None:
+        self.obj = None
+        self.invoked_subcommand = invoked_subcommand
+        self.resilient_parsing = False
+        self.invocations: list[tuple[object, dict]] = []
+
+    def invoke(self, func, **kwargs):
+        self.invocations.append((func, kwargs))
+        return None
+
+    def get_help(self) -> str:
+        return "help"
 
 
 class _FakeConn:
@@ -80,6 +98,15 @@ class CommandFlowTests(unittest.TestCase):
         )
         self.assertTrue(self.config_file.exists())
         self.assertTrue(self.secrets_file.exists())
+        config = qcs.load_user_config_or_raise(self.config_file)
+        self.assertEqual(self.data_root.resolve(), config.data_root.resolve())
+        self.assertEqual(qcs.PRODUCT_MODE_LOCAL_SCAN, config.product_mode)
+        self.assertEqual([], config.default_products)
+        self.assertEqual(self.secrets_file.resolve(), config.secrets_file.resolve())
+        secrets_text = self.secrets_file.read_text(encoding="utf-8")
+        self.assertIn("QUANTCLASS_API_KEY=api_key_x", secrets_text)
+        self.assertIn("QUANTCLASS_HID=hid_x", secrets_text)
+        self.assertEqual(0o600, self.secrets_file.stat().st_mode & 0o777)
 
     def test_cmd_setup_non_interactive_missing_hid_exits(self) -> None:
         ctx = _DummyTyperContext(self._base_ctx())
@@ -290,6 +317,147 @@ class CommandFlowTests(unittest.TestCase):
         run_mock.assert_called_once()
         command_ctx = run_mock.call_args.kwargs["command_ctx"]
         self.assertFalse(command_ctx.verbose)
+
+    def test_cmd_update_resolves_relative_paths_against_config_file_dir(self) -> None:
+        config_dir = self.root / "config-home"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_file = config_dir / "user_config.json"
+        relative_data_root = Path("relative-data")
+        relative_secrets_file = Path("secrets/user_secrets.env")
+        expected_data_root = (config_dir / relative_data_root).resolve()
+        expected_data_root.mkdir(parents=True, exist_ok=True)
+        expected_secrets_file = (config_dir / relative_secrets_file).resolve()
+        expected_secrets_file.parent.mkdir(parents=True, exist_ok=True)
+        qcs.save_user_secrets_atomic(expected_secrets_file, api_key="k", hid="h")
+        qcs.save_user_config_atomic(
+            config_file,
+            qcs.UserConfig(
+                data_root=relative_data_root,
+                product_mode=qcs.PRODUCT_MODE_LOCAL_SCAN,
+                default_products=["stock-trading-data"],
+                secrets_file=relative_secrets_file,
+            ),
+        )
+        ctx = _DummyTyperContext(
+            self._base_ctx().model_copy(
+                update={
+                    "config_file": config_file,
+                    "data_root_from_cli": False,
+                    "secrets_file_from_cli": False,
+                    "data_root": self.root / "unused-data-root",
+                    "secrets_file": self.root / "unused-secrets-file",
+                }
+            )
+        )
+
+        with patch(
+            "quantclass_sync.resolve_credentials_for_update",
+            return_value=("k", "h", "setup_secrets"),
+        ) as resolve_mock, patch("quantclass_sync.run_update_with_settings", return_value=0) as run_mock:
+            qcs.cmd_update(
+                ctx=ctx,
+                dry_run=False,
+                verbose=False,
+                products=[],
+                force_update=False,
+            )
+
+        self.assertEqual(expected_secrets_file, resolve_mock.call_args.kwargs["secrets_file"])
+        run_ctx = run_mock.call_args.kwargs["command_ctx"]
+        self.assertEqual(expected_data_root, run_ctx.data_root)
+        self.assertEqual(expected_secrets_file, run_ctx.secrets_file)
+
+    def test_global_options_syncs_logger_runtime_even_when_exiting(self) -> None:
+        config_file = self.root / "exists.json"
+        config_file.write_text("{}", encoding="utf-8")
+        ctx = _FakeGlobalContext(invoked_subcommand=None)
+        models_module.LOGGER = models_module.ConsoleLogger(level="INFO", run_id="old-run-id")
+
+        with self.assertRaises(typer.Exit):
+            qcs.global_options(
+                ctx=ctx,
+                data_root=None,
+                api_key="",
+                hid="",
+                secrets_file=None,
+                config_file=config_file,
+                dry_run=False,
+                report_file=None,
+                stop_on_error=False,
+                verbose=True,
+            )
+
+        self.assertIsNotNone(ctx.obj)
+        self.assertEqual(ctx.obj.run_id, models_module.LOGGER.run_id)
+        self.assertEqual("DEBUG", models_module.LOGGER.level)
+
+    def test_global_options_run_id_has_subsecond_entropy(self) -> None:
+        ctx1 = _FakeGlobalContext(invoked_subcommand="update")
+        ctx2 = _FakeGlobalContext(invoked_subcommand="update")
+        dt1 = datetime(2026, 3, 2, 9, 30, 0, 111111)
+        dt2 = datetime(2026, 3, 2, 9, 30, 0, 222222)
+
+        with patch("quantclass_sync_internal.cli.datetime") as dt_mock:
+            dt_mock.now.side_effect = [dt1, dt2]
+            qcs.global_options(
+                ctx=ctx1,
+                data_root=None,
+                api_key="",
+                hid="",
+                secrets_file=None,
+                config_file=self.config_file,
+                dry_run=False,
+                report_file=None,
+                stop_on_error=False,
+                verbose=False,
+            )
+            qcs.global_options(
+                ctx=ctx2,
+                data_root=None,
+                api_key="",
+                hid="",
+                secrets_file=None,
+                config_file=self.config_file,
+                dry_run=False,
+                report_file=None,
+                stop_on_error=False,
+                verbose=False,
+            )
+
+        run_id_1 = ctx1.obj.run_id
+        run_id_2 = ctx2.obj.run_id
+        self.assertNotEqual(run_id_1, run_id_2)
+        self.assertTrue(run_id_1.startswith("20260302-093000-111111-p"))
+        self.assertTrue(run_id_2.startswith("20260302-093000-222222-p"))
+
+    def test_run_update_with_all_invalid_explicit_products_keeps_report_consistent(self) -> None:
+        report_path = self.root / "run_report_invalid_explicit.json"
+        ctx = self._base_ctx().model_copy(update={"dry_run": True})
+
+        with patch("quantclass_sync.resolve_report_path", return_value=report_path), patch(
+            "quantclass_sync.load_catalog_or_raise",
+            return_value=["stock-trading-data"],
+        ), patch(
+            "quantclass_sync_internal.orchestrator.discover_local_products",
+            return_value=[],
+        ), patch(
+            "quantclass_sync_internal.orchestrator.resolve_products_by_mode",
+            return_value=([], [], ["bad-product"]),
+        ):
+            exit_code = qcs.run_update_with_settings(
+                command_ctx=ctx,
+                mode="local",
+                products=["bad-product"],
+                force_update=False,
+                command_name="update",
+            )
+
+        self.assertEqual(qcs.EXIT_CODE_NO_EXECUTABLE_PRODUCTS, exit_code)
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(0, payload["failed_total"])
+        self.assertEqual(1, payload["skipped_total"])
+        self.assertEqual({"invalid_explicit_product": 1}, payload["reason_code_counts"])
+        self.assertEqual(["skipped"], [item["status"] for item in payload["products"]])
 
     def test_cmd_repair_sort_success(self) -> None:
         ctx = _DummyTyperContext(self._base_ctx())

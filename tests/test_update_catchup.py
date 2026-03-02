@@ -128,7 +128,14 @@ class UpdateCatchUpTests(unittest.TestCase):
 
         self.assertFalse(skipped)
         self.assertEqual(["2026-02-09", "2026-02-10", "2026-02-11"], queue)
-        probe_mock.assert_called_once()
+        probe_mock.assert_called_once_with(
+            api_base=ctx.api_base.rstrip("/"),
+            product=self.product,
+            hid="hid",
+            headers={"api-key": "k"},
+            local_date="2026-02-06",
+            latest_date="2026-02-11",
+        )
 
     def test_resolve_catchup_dates_calls_probe_when_latest_only_one_date(self) -> None:
         self._write_local_timestamp("2026-02-06")
@@ -154,7 +161,14 @@ class UpdateCatchUpTests(unittest.TestCase):
 
         self.assertFalse(skipped)
         self.assertEqual(["2026-02-10", "2026-02-11"], queue)
-        probe_mock.assert_called_once()
+        probe_mock.assert_called_once_with(
+            api_base=ctx.api_base.rstrip("/"),
+            product=self.product,
+            hid="hid",
+            headers={"api-key": "k"},
+            local_date="2026-02-06",
+            latest_date="2026-02-11",
+        )
 
     def test_resolve_catchup_dates_normalizes_queue_sorted_unique(self) -> None:
         self._write_local_timestamp("2026-02-06")

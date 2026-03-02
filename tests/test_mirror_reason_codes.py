@@ -89,6 +89,31 @@ class MirrorReasonCodeTests(unittest.TestCase):
 
             self.assertEqual(REASON_UNKNOWN_HEADER_MERGE, reason_code)
 
+    def test_unknown_header_merge_aligns_columns_with_normalized_header_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            extract_root = root / "extract"
+            data_root = root / "data"
+            extract_root.mkdir(parents=True, exist_ok=True)
+            data_root.mkdir(parents=True, exist_ok=True)
+
+            product = "demo-unknown-product"
+            _write_simple_csv(extract_root / "sample.csv", ["a,b", "2,3"])
+            _write_simple_csv(data_root / product / "sample.csv", ["\ufeffa ,b", "1,2"])
+
+            _stats, reason_code = sync_unknown_product(
+                product=product,
+                extract_path=extract_root,
+                data_root=data_root,
+                dry_run=False,
+            )
+
+            self.assertEqual(REASON_UNKNOWN_HEADER_MERGE, reason_code)
+            payload = qcs.read_csv_payload(data_root / product / "sample.csv")
+            self.assertEqual(2, len(payload.rows))
+            self.assertEqual(["1", "2"], payload.rows[0])
+            self.assertEqual(["2", "3"], payload.rows[1])
+
 
 if __name__ == "__main__":
     unittest.main()

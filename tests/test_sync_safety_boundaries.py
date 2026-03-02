@@ -1,20 +1,46 @@
 import io
+import multiprocessing
 import os
 import shutil
 import stat
 import tarfile
 import tempfile
+import time
 import unittest
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import quantclass_sync as qcs
 import quantclass_sync_internal.archive as archive_module
 from quantclass_sync_internal.archive import safe_extract_7z, safe_extract_rar, safe_extract_tar, safe_extract_zip
 from quantclass_sync_internal.csv_engine import read_csv_payload
 from quantclass_sync_internal.file_sync import sync_raw_file
 from quantclass_sync_internal.status_store import cleanup_work_cache_aggressive, normalize_data_date
+
+try:
+    import fcntl
+except Exception:  # pragma: no cover
+    fcntl = None
+
+
+def _sync_payload_lock_worker(target_path: str, started, finished) -> None:
+    payload = qcs.CsvPayload(
+        note=None,
+        header=["candle_end_time", "open", "high", "low", "close", "amount", "volume", "index_code"],
+        rows=[["2024-01-01", "1", "1", "1", "1", "10", "10", "sh000300"]],
+        encoding="utf-8",
+        delimiter=",",
+    )
+    started.set()
+    qcs.sync_payload_to_target(
+        incoming=payload,
+        target=Path(target_path),
+        rule=qcs.RULES["stock-main-index-data"],
+        dry_run=False,
+    )
+    finished.set()
 
 
 class SafeExtractTarTests(unittest.TestCase):
@@ -290,6 +316,36 @@ class CleanupWorkCacheAggressiveTests(unittest.TestCase):
         self.assertTrue(outside_file.exists())
         self.assertEqual("do-not-touch", outside_file.read_text(encoding="utf-8"))
 
+    def test_cleanup_work_cache_aggressive_preserves_run_scoped_dirs_by_default(self) -> None:
+        work_dir = self.root / "work"
+        run_a = work_dir / "20260302-101010"
+        run_b = work_dir / "20260302-101011"
+        run_a.mkdir(parents=True, exist_ok=True)
+        run_b.mkdir(parents=True, exist_ok=True)
+        (run_a / "a.txt").write_text("a", encoding="utf-8")
+        (run_b / "b.txt").write_text("b", encoding="utf-8")
+        (work_dir / "loose.tmp").write_text("tmp", encoding="utf-8")
+
+        cleanup_work_cache_aggressive(work_dir)
+
+        self.assertTrue((run_a / "a.txt").exists())
+        self.assertTrue((run_b / "b.txt").exists())
+        self.assertFalse((work_dir / "loose.tmp").exists())
+
+    def test_cleanup_work_cache_aggressive_can_cleanup_specific_run_scope(self) -> None:
+        work_dir = self.root / "work"
+        run_a = work_dir / "20260302-101010"
+        run_b = work_dir / "20260302-101011"
+        run_a.mkdir(parents=True, exist_ok=True)
+        run_b.mkdir(parents=True, exist_ok=True)
+        (run_a / "a.txt").write_text("a", encoding="utf-8")
+        (run_b / "b.txt").write_text("b", encoding="utf-8")
+
+        cleanup_work_cache_aggressive(work_dir, run_id=run_a.name)
+
+        self.assertFalse(run_a.exists())
+        self.assertTrue((run_b / "b.txt").exists())
+
 
 class SyncRawFileChunkCompareTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -362,6 +418,57 @@ class SyncRawFileChunkCompareTests(unittest.TestCase):
 
         self.assertEqual("old", target.read_text(encoding="utf-8"))
         self.assertEqual([], list(target.parent.glob(f".{target.name}.tmp-raw-*")))
+
+    def test_sync_raw_file_file_not_found_during_compare_continues_with_update(self) -> None:
+        src = self.root / "src-race.txt"
+        target = self.root / "target-race.txt"
+        src.write_text("new", encoding="utf-8")
+        target.write_text("old", encoding="utf-8")
+
+        with patch("quantclass_sync_internal.file_sync._files_equal_by_chunk", side_effect=FileNotFoundError):
+            result = sync_raw_file(src=src, target=target, dry_run=False)
+
+        self.assertEqual("updated", result)
+        self.assertEqual("new", target.read_text(encoding="utf-8"))
+
+
+class SyncPayloadLockTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_sync_payload_waits_for_file_lock_before_writing(self) -> None:
+        if fcntl is None:
+            self.skipTest("fcntl is unavailable on this platform")
+
+        target = self.root / "locked.csv"
+        lock_path = target.parent / f".{target.name}.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        ctx = multiprocessing.get_context("spawn")
+        started = ctx.Event()
+        finished = ctx.Event()
+        process = ctx.Process(target=_sync_payload_lock_worker, args=(str(target), started, finished))
+
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            process.start()
+            self.assertTrue(started.wait(timeout=5))
+            time.sleep(0.3)
+            self.assertFalse(finished.is_set())
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+        process.join(timeout=10)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+            self.fail("sync payload worker did not exit after lock release")
+
+        self.assertEqual(0, process.exitcode)
+        payload = qcs.read_csv_payload(target, preferred_encoding="utf-8")
+        self.assertEqual(1, len(payload.rows))
 
 
 if __name__ == "__main__":

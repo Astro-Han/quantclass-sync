@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -47,7 +48,16 @@ def write_run_report(path: Path, report: RunReport) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = run_report_to_dict(report)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path = path.parent / f".{path.name}.tmp-{os.getpid()}-{time.time_ns()}"
+    try:
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
 
 def _append_run_event(report: RunReport, product: str, stage: str, status: str, reason_code: str, detail: str) -> None:
     report.events.append(

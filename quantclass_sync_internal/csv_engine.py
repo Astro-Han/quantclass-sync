@@ -4,13 +4,21 @@ from __future__ import annotations
 
 import csv
 import math
+import os
 import re
+import time
+from contextlib import contextmanager, nullcontext
 from io import StringIO
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from .constants import ENCODING_CANDIDATES, UTF8_BOM
 from .models import CsvPayload, DatasetRule, SortAudit, log_debug, log_info
+
+try:
+    import fcntl
+except Exception:  # pragma: no cover
+    fcntl = None
 
 def decode_text(path: Path, preferred_encoding: Optional[str]) -> Tuple[str, str]:
     """尝试多个编码读取文本，返回 (文本, 实际编码)。"""
@@ -140,7 +148,23 @@ def read_csv_payload(path: Path, preferred_encoding: Optional[str] = None) -> Cs
 def _normalize_header_cells(header: Sequence[str]) -> List[str]:
     """统一表头比较口径：去首尾空白并移除 BOM。"""
 
-    return [col.strip().lstrip("\ufeff") for col in header]
+    return [_normalize_header_cell(col) for col in header]
+
+def _normalize_header_cell(col: str) -> str:
+    """标准化单个列名。"""
+
+    return col.strip().lstrip("\ufeff")
+
+def _build_normalized_header_index(header: Sequence[str]) -> Dict[str, int]:
+    """构建“归一化列名 -> 原始下标”索引，并校验归一化后无重名。"""
+
+    mapping: Dict[str, int] = {}
+    for idx, raw_col in enumerate(header):
+        normalized = _normalize_header_cell(raw_col)
+        if normalized in mapping:
+            raise RuntimeError(f"归一化后存在重复列名: {normalized}")
+        mapping[normalized] = idx
+    return mapping
 
 def _headers_equal(left: Sequence[str], right: Sequence[str]) -> bool:
     """判断两份表头是否一致。"""
@@ -152,13 +176,13 @@ def align_rows(rows: Iterable[Sequence[str]], source_header: Sequence[str], targ
     按列名对齐行数据，避免新旧 CSV 列顺序不同导致字段错位。
     """
 
-    source_index = {col: idx for idx, col in enumerate(source_header)}
+    source_index = _build_normalized_header_index(source_header)
     target_rows: List[List[str]] = []
     for row in rows:
         row_list = list(row)
         new_row = [""] * len(target_header)
         for target_idx, col in enumerate(target_header):
-            source_idx = source_index.get(col)
+            source_idx = source_index.get(_normalize_header_cell(col))
             if source_idx is not None and source_idx < len(row_list):
                 new_row[target_idx] = row_list[source_idx]
         target_rows.append(new_row)
@@ -202,14 +226,20 @@ SORT_TIE_BREAKER_COLS: Dict[str, Tuple[str, ...]] = {
 def resolve_sort_indices(header: Sequence[str], rule: DatasetRule) -> List[int]:
     """根据规则解析可用排序列下标（含 tie-breaker）。"""
 
-    cols: List[str] = []
+    header_index = _build_normalized_header_index(header)
+    indices: List[int] = []
+    seen = set()
     for col in rule.sort_cols:
-        if col in header and col not in cols:
-            cols.append(col)
+        idx = header_index.get(_normalize_header_cell(col))
+        if idx is not None and idx not in seen:
+            seen.add(idx)
+            indices.append(idx)
     for col in SORT_TIE_BREAKER_COLS.get(rule.name, ()):
-        if col in header and col not in cols:
-            cols.append(col)
-    return [header.index(col) for col in cols]
+        idx = header_index.get(_normalize_header_cell(col))
+        if idx is not None and idx not in seen:
+            seen.add(idx)
+            indices.append(idx)
+    return indices
 
 def row_sort_key(row: Sequence[str], sort_indices: Sequence[int]) -> Tuple[Tuple[int, object], ...]:
     """生成稳定排序键。"""
@@ -253,6 +283,11 @@ def merge_payload(existing: Optional[CsvPayload], incoming: CsvPayload, rule: Da
             0,
         )
 
+    target_index = _build_normalized_header_index(target_header)
+    _build_normalized_header_index(incoming.header)
+    if existing and existing.header:
+        _build_normalized_header_index(existing.header)
+
     existing_rows: List[List[str]] = []
     if existing:
         if _headers_equal(existing.header, target_header):
@@ -261,8 +296,11 @@ def merge_payload(existing: Optional[CsvPayload], incoming: CsvPayload, rule: Da
             existing_rows = align_rows(existing.rows, existing.header, target_header)
     incoming_rows = align_rows(incoming.rows, incoming.header, target_header)
 
-    key_cols = [col for col in rule.key_cols if col in target_header]
-    key_indices = [target_header.index(col) for col in key_cols]
+    key_indices: List[int] = []
+    for key_col in rule.key_cols:
+        idx = target_index.get(_normalize_header_cell(key_col))
+        if idx is not None:
+            key_indices.append(idx)
 
     merged_map: Dict[Tuple[str, ...], List[str]] = {}
     for row in existing_rows:
@@ -300,13 +338,36 @@ def write_csv_payload(path: Path, payload: CsvPayload, rule: DatasetRule, dry_ru
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     delimiter = payload.delimiter or ","
-    with path.open("w", encoding=payload.encoding or rule.encoding, newline="") as f:
-        if rule.has_note and payload.note is not None:
-            f.write(payload.note.rstrip("\r\n"))
-            f.write("\n")
-        writer = csv.writer(f, delimiter=delimiter, lineterminator="\n")
-        writer.writerow(payload.header)
-        writer.writerows(payload.rows)
+    tmp_path = path.parent / f".{path.name}.tmp-csv-{os.getpid()}-{time.time_ns()}"
+    try:
+        with tmp_path.open("w", encoding=payload.encoding or rule.encoding, newline="") as f:
+            if rule.has_note and payload.note is not None:
+                f.write(payload.note.rstrip("\r\n"))
+                f.write("\n")
+            writer = csv.writer(f, delimiter=delimiter, lineterminator="\n")
+            writer.writerow(payload.header)
+            writer.writerows(payload.rows)
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+
+@contextmanager
+def _locked_target(lock_path: Path) -> Iterator[None]:
+    """为目标文件加互斥锁，避免并发 read-merge-write 互相覆盖。"""
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 def sync_payload_to_target(incoming: CsvPayload, target: Path, rule: DatasetRule, dry_run: bool) -> Tuple[str, int, SortAudit]:
     """
@@ -318,37 +379,40 @@ def sync_payload_to_target(incoming: CsvPayload, target: Path, rule: DatasetRule
     if not incoming.header:
         return "skipped", 0, audit
 
-    existing = read_csv_payload(target, preferred_encoding=incoming.encoding or rule.encoding) if target.exists() else None
-    output_encoding = choose_output_encoding(existing=existing, incoming=incoming, rule=rule)
-    merged, added_rows = merge_payload(existing, incoming, rule)
-    merged.encoding = output_encoding
+    lock_path = target.parent / f".{target.name}.lock"
+    lock_ctx = _locked_target(lock_path) if not dry_run else nullcontext()
+    with lock_ctx:
+        existing = read_csv_payload(target, preferred_encoding=incoming.encoding or rule.encoding) if target.exists() else None
+        output_encoding = choose_output_encoding(existing=existing, incoming=incoming, rule=rule)
+        merged, added_rows = merge_payload(existing, incoming, rule)
+        merged.encoding = output_encoding
 
-    sort_indices = resolve_sort_indices(merged.header, rule)
-    if sort_indices:
-        audit.checked_files = 1
-        if not is_rows_sorted(merged.rows, sort_indices):
-            audit.violation_files = 1
-            merged.rows = sorted(merged.rows, key=lambda row: row_sort_key(row, sort_indices))
-            audit.auto_repaired_files = 1
-            log_info(
-                f"[{rule.name}] 检测到排序异常，已自动修复: {target}",
-                event="SYNC_OK",
-                repaired=True,
+        sort_indices = resolve_sort_indices(merged.header, rule)
+        if sort_indices:
+            audit.checked_files = 1
+            if not is_rows_sorted(merged.rows, sort_indices):
+                audit.violation_files = 1
+                merged.rows = sorted(merged.rows, key=lambda row: row_sort_key(row, sort_indices))
+                audit.auto_repaired_files = 1
+                log_info(
+                    f"[{rule.name}] 检测到排序异常，已自动修复: {target}",
+                    event="SYNC_OK",
+                    repaired=True,
+                )
+
+        if existing and merged.note == existing.note and merged.header == existing.header and merged.rows == existing.rows:
+            if merged.encoding == existing.encoding:
+                return "unchanged", 0, audit
+            log_debug(
+                f"[{rule.name}] 内容未变化，但检测到编码漂移，触发重写: {target}",
+                from_encoding=existing.encoding,
+                to_encoding=merged.encoding,
             )
 
-    if existing and merged.note == existing.note and merged.header == existing.header and merged.rows == existing.rows:
-        if merged.encoding == existing.encoding:
-            return "unchanged", 0, audit
-        log_debug(
-            f"[{rule.name}] 内容未变化，但检测到编码漂移，触发重写: {target}",
-            from_encoding=existing.encoding,
-            to_encoding=merged.encoding,
-        )
-
-    write_csv_payload(target, merged, rule, dry_run=dry_run)
-    if existing:
-        return "updated", added_rows, audit
-    return "created", len(merged.rows), audit
+        write_csv_payload(target, merged, rule, dry_run=dry_run)
+        if existing:
+            return "updated", added_rows, audit
+        return "created", len(merged.rows), audit
 
 def sync_csv_file(src: Path, target: Path, rule: DatasetRule, dry_run: bool) -> Tuple[str, int, SortAudit]:
     """同步单个 CSV（读取 -> 合并 -> 写回）。"""

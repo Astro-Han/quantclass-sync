@@ -83,6 +83,60 @@ class HttpErrorMappingTests(unittest.TestCase):
 
         self.assertEqual(["2026-02-08"], result)
 
+    def test_probe_downloadable_dates_401_is_not_silently_skipped(self) -> None:
+        def fake_get_download_link(
+            api_base: str,
+            product: str,
+            date_time: str,
+            hid: str,
+            headers: dict[str, str],
+        ) -> str:
+            raise qcs.FatalRequestError(
+                "unauthorized",
+                status_code=401,
+                request_url=f"{api_base}/get-download-link/{product}-daily/{date_time}",
+            )
+
+        with patch("quantclass_sync.get_download_link", side_effect=fake_get_download_link):
+            with self.assertRaises(qcs.FatalRequestError) as cm:
+                qcs._probe_downloadable_dates(
+                    api_base="https://api.quantclass.cn/api/data",
+                    product="stock-fin-data-xbx",
+                    hid="hid",
+                    headers={"api-key": "k"},
+                    local_date="2026-02-06",
+                    latest_date="2026-02-08",
+                )
+
+        self.assertEqual(401, cm.exception.status_code)
+
+    def test_probe_downloadable_dates_500_is_not_silently_skipped(self) -> None:
+        def fake_get_download_link(
+            api_base: str,
+            product: str,
+            date_time: str,
+            hid: str,
+            headers: dict[str, str],
+        ) -> str:
+            raise qcs.FatalRequestError(
+                "server error",
+                status_code=500,
+                request_url=f"{api_base}/get-download-link/{product}-daily/{date_time}",
+            )
+
+        with patch("quantclass_sync.get_download_link", side_effect=fake_get_download_link):
+            with self.assertRaises(qcs.FatalRequestError) as cm:
+                qcs._probe_downloadable_dates(
+                    api_base="https://api.quantclass.cn/api/data",
+                    product="stock-fin-data-xbx",
+                    hid="hid",
+                    headers={"api-key": "k"},
+                    local_date="2026-02-06",
+                    latest_date="2026-02-08",
+                )
+
+        self.assertEqual(500, cm.exception.status_code)
+
     def test_request_data_latest_uses_short_policy(self) -> None:
         with patch("quantclass_sync.time.sleep"), patch(
             "quantclass_sync.requests.request",

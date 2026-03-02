@@ -76,7 +76,6 @@ from .reporting import (
     _record_discovery_skips,
     decide_exit_code,
     resolve_report_path,
-    write_run_report,
 )
 from .status_store import (
     connect_status_db,
@@ -1029,6 +1028,7 @@ def run_update_with_settings(
     ensure_data_root_ready(command_ctx.data_root, create_if_missing=False)
 
     mode = validate_run_mode(mode)
+    t_run_start = time.time()
 
     product_args = list(products or [])
     fallback_args = list(fallback_products or [])
@@ -1068,15 +1068,17 @@ def run_update_with_settings(
             )
 
     if mode == "local" and not planned_products and not product_args:
-        report.failed_total = 1
-        report.reason_code_counts = {REASON_NO_LOCAL_PRODUCTS: 1}
-        report.ended_at = utc_now_iso()
-        report.duration_seconds = 0.0
-        write_run_report(report_path, report)
         log_error(
             "未发现可更新产品；可先执行 setup 配置默认产品清单。",
             event="RUN_SUMMARY",
             reason_code=REASON_NO_LOCAL_PRODUCTS,
+        )
+        _finalize_and_write_report(
+            report=report,
+            total=SyncStats(),
+            has_error=True,
+            t_run_start=t_run_start,
+            report_path=report_path,
         )
         return decide_exit_code(
             report=report,
@@ -1087,12 +1089,14 @@ def run_update_with_settings(
     plans = build_product_plan(planned_products)
     report.planned_total = len(plans)
     if not plans:
-        report.failed_total = 1
-        report.reason_code_counts = {REASON_NO_LOCAL_PRODUCTS: 1}
-        report.ended_at = utc_now_iso()
-        report.duration_seconds = 0.0
-        write_run_report(report_path, report)
         log_error("执行清单为空，任务结束。", event="RUN_SUMMARY", reason_code=REASON_NO_LOCAL_PRODUCTS)
+        _finalize_and_write_report(
+            report=report,
+            total=SyncStats(),
+            has_error=True,
+            t_run_start=t_run_start,
+            report_path=report_path,
+        )
         return decide_exit_code(
             report=report,
             has_error=True,

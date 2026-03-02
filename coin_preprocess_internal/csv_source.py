@@ -94,6 +94,26 @@ def _read_tail_lines(path: Path, encoding: str, max_lines: int, max_bytes: int) 
         return []
     return lines[-max_lines:]
 
+def _symbol_csv_exceeds_data_row_limit(path: Path, row_limit: int) -> bool:
+    """近似统计数据行数；超过 row_limit 返回 True。"""
+
+    if row_limit <= 0:
+        return True
+
+    non_empty_lines = 0
+    try:
+        with path.open("rb") as fp:
+            for raw_line in fp:
+                if raw_line.strip():
+                    non_empty_lines += 1
+                    if non_empty_lines > row_limit + 2:
+                        return True
+    except OSError:
+        return True
+
+    data_lines = max(0, non_empty_lines - 2)
+    return data_lines > row_limit
+
 def _read_symbol_csv_tail(path: Path, max_lines: int = TAIL_READ_MAX_LINES) -> pd.DataFrame:
     """
     读取 symbol CSV 尾部窗口。
@@ -149,7 +169,10 @@ def _sanitize_candle_time_rows(raw_df: pd.DataFrame, symbol_name: str) -> pd.Dat
     data = data.dropna(subset=["candle_begin_time"])
     if data.empty:
         return data
-    return data.sort_values("candle_begin_time").drop_duplicates(subset=["candle_begin_time"], keep="last")
+    return data.sort_values("candle_begin_time", kind="mergesort").drop_duplicates(
+        subset=["candle_begin_time"],
+        keep="last",
+    )
 
 def _detect_relist_segments(raw_df: pd.DataFrame) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
     """
@@ -174,8 +197,8 @@ def _detect_relist_segments(raw_df: pd.DataFrame) -> List[Tuple[pd.Timestamp, pd
         if time_delta <= RELIST_GAP_THRESHOLD:
             continue
 
-        prev_close = prev_row.get("close")
-        curr_open = curr_row.get("open")
+        prev_close = pd.to_numeric(pd.Series([prev_row.get("close")]), errors="coerce").iloc[0]
+        curr_open = pd.to_numeric(pd.Series([curr_row.get("open")]), errors="coerce").iloc[0]
         if pd.isna(prev_close) or pd.isna(curr_open) or float(prev_close) == 0.0:
             continue
         price_change = float(curr_open) / float(prev_close) - 1.0
@@ -273,28 +296,58 @@ def _build_incremental_rows(
     if new_raw.empty:
         return pd.DataFrame(columns=FRAME_COLUMNS)
 
-    data = new_raw.sort_values("candle_begin_time").drop_duplicates(subset=["candle_begin_time"], keep="last").copy()
+    data = (
+        new_raw.sort_values("candle_begin_time", kind="mergesort")
+        .drop_duplicates(subset=["candle_begin_time"], keep="last")
+        .copy()
+    )
     data["candle_begin_time"] = pd.to_datetime(data["candle_begin_time"], errors="coerce", format="mixed")
     data = data.dropna(subset=["candle_begin_time"])
     if data.empty:
         return pd.DataFrame(columns=FRAME_COLUMNS)
 
-    prev_close = float(existing_frame["close"].iloc[-1]) if not existing_frame.empty else 0.0
-    if "close" not in data.columns:
-        data["close"] = prev_close
-    data["close"] = data["close"].ffill()
-    if pd.isna(data["close"].iloc[0]):
-        data.loc[data.index[0], "close"] = prev_close
-    data["close"] = data["close"].ffill().fillna(prev_close)
+    existing_last_time: Optional[pd.Timestamp] = None
+    if not existing_frame.empty and "candle_begin_time" in existing_frame.columns:
+        existing_times = pd.to_datetime(existing_frame["candle_begin_time"], errors="coerce", format="mixed").dropna()
+        if not existing_times.empty:
+            existing_last_time = pd.Timestamp(existing_times.max())
 
-    _fill_standard_columns(data, symbol_name=source_symbol, is_swap=is_swap)
+    start_time = pd.Timestamp(data["candle_begin_time"].min())
+    if existing_last_time is not None:
+        expected_next = existing_last_time + pd.Timedelta(hours=1)
+        start_time = min(expected_next, start_time)
+    end_time = pd.Timestamp(data["candle_begin_time"].max())
+
+    benchmark = pd.DataFrame(
+        {
+            "candle_begin_time": pd.date_range(
+                start=start_time,
+                end=end_time,
+                freq="1h",
+            )
+        }
+    )
+    merged = benchmark.merge(data, how="left", on="candle_begin_time", sort=True)
+
+    prev_close = 0.0
+    if not existing_frame.empty and "close" in existing_frame.columns:
+        existing_close = pd.to_numeric(existing_frame["close"], errors="coerce").dropna()
+        if not existing_close.empty:
+            prev_close = float(existing_close.iloc[-1])
+
+    merged["close"] = pd.to_numeric(_aligned_series(merged, "close", "float64"), errors="coerce")
+    if pd.isna(merged["close"].iloc[0]):
+        merged.loc[merged.index[0], "close"] = prev_close
+    merged["close"] = merged["close"].ffill().fillna(prev_close)
+
+    _fill_standard_columns(merged, symbol_name=source_symbol, is_swap=is_swap)
     base_first = pd.to_datetime(existing_frame["first_candle_time"].iloc[0])
-    data["first_candle_time"] = base_first
-    data["last_candle_time"] = data["candle_begin_time"].max()
-    data["symbol_spot"] = source_symbol if not is_swap else ""
-    data["symbol_swap"] = source_symbol if is_swap else ""
-    data["is_spot"] = 0 if is_swap else 1
-    return data[FRAME_COLUMNS].reset_index(drop=True)
+    merged["first_candle_time"] = base_first
+    merged["last_candle_time"] = merged["candle_begin_time"].max()
+    merged["symbol_spot"] = source_symbol if not is_swap else ""
+    merged["symbol_swap"] = source_symbol if is_swap else ""
+    merged["is_spot"] = 0 if is_swap else 1
+    return merged[FRAME_COLUMNS].reset_index(drop=True)
 
 def _split_symbol_frames(raw_df: pd.DataFrame, source_symbol: str, is_swap: bool) -> Dict[str, pd.DataFrame]:
     """按 relist 规则拆分单币种，并返回 symbol->DataFrame。"""

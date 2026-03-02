@@ -306,8 +306,13 @@ def sync_raw_file(src: Path, target: Path, dry_run: bool) -> str:
     """
 
     existed_before = target.exists()
-    if existed_before and _files_equal_by_chunk(src, target):
-        return "unchanged"
+    if existed_before:
+        try:
+            if _files_equal_by_chunk(src, target):
+                return "unchanged"
+        except FileNotFoundError:
+            # TOCTOU：比较阶段目标文件被并发删除/替换时，按“发生变化”继续覆盖写入。
+            existed_before = target.exists()
 
     if not dry_run:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -327,17 +332,20 @@ def sync_raw_file(src: Path, target: Path, dry_run: bool) -> str:
 def _files_equal_by_chunk(src: Path, target: Path, chunk_size: int = 1024 * 1024) -> bool:
     """按块比较两个文件内容是否一致，避免整文件读入内存。"""
 
-    if src.stat().st_size != target.stat().st_size:
-        return False
+    try:
+        if src.stat().st_size != target.stat().st_size:
+            return False
 
-    with src.open("rb") as src_file, target.open("rb") as target_file:
-        while True:
-            src_chunk = src_file.read(chunk_size)
-            target_chunk = target_file.read(chunk_size)
-            if src_chunk != target_chunk:
-                return False
-            if not src_chunk:
-                return True
+        with src.open("rb") as src_file, target.open("rb") as target_file:
+            while True:
+                src_chunk = src_file.read(chunk_size)
+                target_chunk = target_file.read(chunk_size)
+                if src_chunk != target_chunk:
+                    return False
+                if not src_chunk:
+                    return True
+    except FileNotFoundError:
+        return False
 
 def apply_file_result(stats: SyncStats, result: str, added_rows: int = 0, sort_audit: Optional[SortAudit] = None) -> None:
     """把单文件结果累加到统计对象。"""

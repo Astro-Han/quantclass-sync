@@ -112,6 +112,19 @@ class ReportSchemaTests(unittest.TestCase):
         )
         self.assertEqual(qcs.EXIT_CODE_GENERAL_FAILURE, exit_code)
 
+    def test_write_run_report_replace_failure_keeps_original_file_and_cleans_temp(self) -> None:
+        report_path = self.root / "run_report_atomic.json"
+        report_path.write_text('{"old":"value"}', encoding="utf-8")
+        before = report_path.read_text(encoding="utf-8")
+        report = qcs._new_report("rid-atomic", mode="network")
+
+        with patch("quantclass_sync_internal.reporting.os.replace", side_effect=RuntimeError("replace failed")):
+            with self.assertRaises(RuntimeError):
+                qcs.write_run_report(report_path, report)
+
+        self.assertEqual(before, report_path.read_text(encoding="utf-8"))
+        self.assertEqual([], list(report_path.parent.glob(f".{report_path.name}.tmp-*")))
+
     def test_run_update_returns_no_executable_exit_code_when_no_local_products(self) -> None:
         ctx = self._ctx()
         with patch("quantclass_sync.load_catalog_or_raise", return_value=["stock-trading-data"]), patch(

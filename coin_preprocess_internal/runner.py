@@ -16,6 +16,7 @@ from .constants import (
     OUTPUT_SWAP_DICT,
     RELIST_CHANGE_THRESHOLD,
     RELIST_GAP_THRESHOLD,
+    TAIL_APPEND_SAFE_MAX_DATA_ROWS,
     PreprocessSummary,
     TIMESTAMP_FILE_NAME,
 )
@@ -25,6 +26,7 @@ from .csv_source import (
     _load_symbol_dict,
     _read_symbol_csv,
     _read_symbol_csv_tail,
+    _symbol_csv_exceeds_data_row_limit,
     _split_symbol_frames,
 )
 from .pivot import _make_market_pivot, _patch_market_pivot, _validate_integrity, _write_pickles_atomically
@@ -107,7 +109,7 @@ def _has_internal_relist_break(new_raw: pd.DataFrame) -> bool:
     if new_raw.empty or len(new_raw) < 2:
         return False
 
-    ordered = new_raw.sort_values("candle_begin_time")
+    ordered = new_raw.sort_values("candle_begin_time", kind="mergesort")
     for idx in range(1, len(ordered)):
         prev_row = ordered.iloc[idx - 1]
         curr_row = ordered.iloc[idx]
@@ -170,7 +172,10 @@ def _build_overlap_snapshot(data_dict: Dict[str, pd.DataFrame], keys: Sequence[s
         return pd.DataFrame()
 
     merged = pd.concat(frames, ignore_index=True)
-    merged = merged.sort_values("candle_begin_time").drop_duplicates(subset=["candle_begin_time"], keep="last")
+    merged = merged.sort_values("candle_begin_time", kind="mergesort").drop_duplicates(
+        subset=["candle_begin_time"],
+        keep="last",
+    )
     return merged.set_index("candle_begin_time")
 
 def _overlap_matches_existing(overlap_raw: pd.DataFrame, overlap_snapshot: pd.DataFrame, is_swap: bool) -> bool:
@@ -193,7 +198,7 @@ def _overlap_matches_existing(overlap_raw: pd.DataFrame, overlap_snapshot: pd.Da
     if is_swap:
         compare_pairs.append(("fundingRate", "funding_fee"))
 
-    sorted_overlap = overlap_raw.sort_values("candle_begin_time").copy()
+    sorted_overlap = overlap_raw.sort_values("candle_begin_time", kind="mergesort").copy()
     sorted_overlap["__cmp_ts__"] = pd.to_datetime(
         sorted_overlap["candle_begin_time"],
         errors="coerce",
@@ -278,6 +283,10 @@ def _try_tail_append_symbol(
     if active_frame.empty:
         return False, set()
 
+    if _symbol_csv_exceeds_data_row_limit(source_file, row_limit=TAIL_APPEND_SAFE_MAX_DATA_ROWS):
+        # 大文件只看尾窗无法证明“纯追加”，保守回退单 symbol 全量重算。
+        return False, set()
+
     tail_raw = _read_symbol_csv_tail(source_file)
     if tail_raw.empty or "candle_begin_time" not in tail_raw.columns:
         return False, set()
@@ -288,7 +297,10 @@ def _try_tail_append_symbol(
         format="mixed",
     )
     tail_raw = tail_raw.dropna(subset=["candle_begin_time"])
-    tail_raw = tail_raw.sort_values("candle_begin_time").drop_duplicates(subset=["candle_begin_time"], keep="last")
+    tail_raw = tail_raw.sort_values("candle_begin_time", kind="mergesort").drop_duplicates(
+        subset=["candle_begin_time"],
+        keep="last",
+    )
     if tail_raw.empty:
         return False, set()
 
@@ -328,7 +340,10 @@ def _try_tail_append_symbol(
         return True, set()
 
     merged = pd.concat([active_frame, appended_rows], ignore_index=True)
-    merged = merged.drop_duplicates(subset=["candle_begin_time"], keep="last").sort_values("candle_begin_time")
+    merged = merged.drop_duplicates(subset=["candle_begin_time"], keep="last").sort_values(
+        "candle_begin_time",
+        kind="mergesort",
+    )
     merged = merged.reset_index(drop=True)
 
     first_time = pd.to_datetime(merged["first_candle_time"].iloc[0], errors="coerce")

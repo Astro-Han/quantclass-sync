@@ -24,6 +24,8 @@ from .constants import (
 )
 from .models import ProductStatus, RuntimePaths, utc_now_iso
 
+_RUN_SCOPE_PATTERN = re.compile(r"^\d{8}-\d{6}(?:[-_].+)?$")
+
 def resolve_runtime_paths(data_root: Path) -> RuntimePaths:
     """
     解析运行期状态/日志路径。
@@ -143,12 +145,29 @@ def should_skip_by_timestamp(local_date: Optional[str], api_latest_date: Optiona
         return False
     return local_date >= api_latest_date
 
-def cleanup_work_cache_aggressive(work_dir: Path) -> None:
-    """激进清理工作缓存目录。"""
+def cleanup_work_cache_aggressive(work_dir: Path, run_id: str = "") -> None:
+    """激进清理工作缓存目录（默认保留 run 作用域目录，避免并发互删）。"""
 
     if not work_dir.exists():
         return
-    for child in work_dir.iterdir():
+
+    scoped_run_id = (run_id or "").strip()
+    if scoped_run_id:
+        run_scope = work_dir / scoped_run_id
+        if run_scope.exists():
+            shutil.rmtree(run_scope, ignore_errors=True)
+        work_dir.mkdir(parents=True, exist_ok=True)
+        return
+
+    children = list(work_dir.iterdir())
+    has_run_scoped_dirs = any(
+        child.is_dir()
+        and not child.is_symlink()
+        and _RUN_SCOPE_PATTERN.fullmatch(child.name)
+        for child in children
+    )
+
+    for child in children:
         if child.is_symlink():
             try:
                 child.unlink()
@@ -156,6 +175,9 @@ def cleanup_work_cache_aggressive(work_dir: Path) -> None:
                 pass
             continue
         if child.is_dir():
+            # 目录中出现 run_id 分层时，默认不删 run 作用域目录，防止并发任务互相清缓存。
+            if has_run_scoped_dirs and _RUN_SCOPE_PATTERN.fullmatch(child.name):
+                continue
             shutil.rmtree(child, ignore_errors=True)
             continue
         try:
@@ -280,4 +302,13 @@ def export_status_json(conn: sqlite3.Connection, output_path: Path) -> None:
     payload: Dict[str, object] = {}
     for item in list_product_status(conn):
         payload[item.name] = item.to_json_record()
-    output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path = output_path.parent / f".{output_path.name}.tmp-{os.getpid()}-{time.time_ns()}"
+    try:
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp_path, output_path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
