@@ -10,7 +10,7 @@ import traceback
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, NoReturn, Optional, Sequence, Tuple
 
 from .archive import extract_archive
 from .config import (
@@ -55,6 +55,7 @@ from .http_client import (
 from .file_sync import sync_from_extract
 from .models import (
     CommandContext,
+    EmptyDownloadLinkError,
     FatalRequestError,
     ProductPlan,
     ProductRunResult,
@@ -209,21 +210,12 @@ def _is_no_data_request_error(exc: Exception, *, allow_legacy_no_status: bool = 
 
 
 def _is_empty_download_link_error(exc: Exception) -> bool:
-    """判断是否是 get_download_link 内部抛出的“空下载链接”错误。"""
+    """判断是否是"空下载链接"错误。"""
 
-    if not isinstance(exc, RuntimeError) or isinstance(exc, FatalRequestError):
-        return False
-    tb = exc.__traceback__
-    if tb is None:
-        return False
-    while tb.tb_next is not None:
-        tb = tb.tb_next
-    module_name = str(tb.tb_frame.f_globals.get("__name__", ""))
-    function_name = tb.tb_frame.f_code.co_name
-    return module_name == "quantclass_sync_internal.http_client" and function_name == "get_download_link"
+    return isinstance(exc, EmptyDownloadLinkError)
 
 
-def _raise_download_stage_error(product: str, exc: Exception) -> None:
+def _raise_download_stage_error(product: str, exc: Exception) -> NoReturn:
     """把下载阶段底层异常统一映射为 ProductSyncError。"""
 
     if _is_no_data_request_error(exc):

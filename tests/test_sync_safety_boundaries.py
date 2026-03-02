@@ -95,6 +95,28 @@ class SafeExtractTarTests(unittest.TestCase):
 
         self.assertFalse((extract_dir / "ok.txt").exists())
 
+    def test_tar_path_traversal_is_rejected(self) -> None:
+        """tar 成员名包含 ../ 路径遍历时应被拒绝提取。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tar_path = Path(tmp) / "evil.tar"
+            extract_dir = Path(tmp) / "extract"
+            extract_dir.mkdir()
+
+            payload = b"malicious content"
+            with tarfile.open(tar_path, "w") as tf:
+                info = tarfile.TarInfo(name="../../etc/evil.txt")
+                info.size = len(payload)
+                tf.addfile(info, fileobj=io.BytesIO(payload))
+
+            from quantclass_sync_internal.archive import extract_archive
+
+            with self.assertRaises(Exception):
+                extract_archive(tar_path, extract_dir)
+
+            self.assertFalse((Path(tmp) / "etc" / "evil.txt").exists())
+            self.assertFalse((extract_dir / ".." / ".." / "etc" / "evil.txt").exists())
+
 
 class SafeExtractArchiveDangerousNodesTests(unittest.TestCase):
     def setUp(self) -> None:

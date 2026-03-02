@@ -2,7 +2,7 @@ import unittest
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import requests
 
@@ -136,6 +136,20 @@ class HttpErrorMappingTests(unittest.TestCase):
                 )
 
         self.assertEqual(500, cm.exception.status_code)
+
+    def test_empty_download_link_raises_specific_exception(self) -> None:
+        """get_download_link 返回空链接时抛出 EmptyDownloadLinkError。"""
+
+        with patch("quantclass_sync_internal.http_client.request_data") as mock_req:
+            mock_req.return_value = MagicMock(text="  ")
+            with self.assertRaises(qcs.EmptyDownloadLinkError):
+                qcs.get_download_link(
+                    api_base="http://test",
+                    product="test-product",
+                    date_time="2026-01-01",
+                    hid="fake",
+                    headers={},
+                )
 
     def test_request_data_latest_uses_short_policy(self) -> None:
         with patch("quantclass_sync.time.sleep"), patch(

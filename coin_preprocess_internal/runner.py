@@ -142,13 +142,15 @@ def _frame_max_candle_time(frame: pd.DataFrame) -> Optional[pd.Timestamp]:
 def _safe_float(value: object, fallback: float) -> float:
     """把值安全转换成 float，失败时返回 fallback。"""
 
+    if value is None:
+        return fallback
     try:
-        parsed = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
-    except Exception:
+        result = float(value)
+    except (TypeError, ValueError):
         return fallback
-    if pd.isna(parsed):
+    if pd.isna(result):
         return fallback
-    return float(parsed)
+    return result
 
 def _build_overlap_snapshot(data_dict: Dict[str, pd.DataFrame], keys: Sequence[str]) -> pd.DataFrame:
     """把同源 split symbol 合并成按时间索引的快照，便于重叠区对比。"""

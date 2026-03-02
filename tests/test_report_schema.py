@@ -125,6 +125,19 @@ class ReportSchemaTests(unittest.TestCase):
         self.assertEqual(before, report_path.read_text(encoding="utf-8"))
         self.assertEqual([], list(report_path.parent.glob(f".{report_path.name}.tmp-*")))
 
+    def test_decide_exit_code_report_none_with_error_returns_general_failure(self) -> None:
+        """report=None + has_error=True 时应返回通用错误码（1），而非网络错误码（2）。"""
+
+        from quantclass_sync_internal.reporting import (
+            EXIT_CODE_GENERAL_FAILURE,
+            EXIT_CODE_NETWORK_OR_REMOTE_DATA_FAILURE,
+            decide_exit_code,
+        )
+
+        code = decide_exit_code(report=None, has_error=True)
+        self.assertEqual(code, EXIT_CODE_GENERAL_FAILURE)
+        self.assertNotEqual(code, EXIT_CODE_NETWORK_OR_REMOTE_DATA_FAILURE)
+
     def test_run_update_returns_no_executable_exit_code_when_no_local_products(self) -> None:
         ctx = self._ctx()
         with patch("quantclass_sync.load_catalog_or_raise", return_value=["stock-trading-data"]), patch(

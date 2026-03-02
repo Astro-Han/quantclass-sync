@@ -112,16 +112,26 @@ def _acquire_output_locks(payloads: Dict[Path, object]) -> List[IO[str]]:
 
     lock_handles: List[IO[str]] = []
     lock_dirs = sorted({target.parent for target in payloads}, key=lambda path: str(path))
-    for lock_dir in lock_dirs:
-        lock_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = lock_dir / ".preprocess.lock"
-        lock_handle = lock_path.open("a+")
-        try:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-        except Exception:
-            lock_handle.close()
-            raise
-        lock_handles.append(lock_handle)
+    try:
+        for lock_dir in lock_dirs:
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = lock_dir / ".preprocess.lock"
+            lock_handle = lock_path.open("a+")
+            try:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            except Exception:
+                lock_handle.close()
+                raise
+            lock_handles.append(lock_handle)
+    except Exception:
+        # 释放已获取的锁，避免资源泄漏
+        for handle in lock_handles:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                handle.close()
+            except Exception:
+                pass
+        raise
     return lock_handles
 
 def _write_pickles_atomically(payloads: Dict[Path, object]) -> None:

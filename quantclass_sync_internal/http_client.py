@@ -12,7 +12,7 @@ from urllib.parse import unquote, urlparse
 import requests
 
 from .constants import REQUEST_POLICIES
-from .models import FatalRequestError, log_debug, normalize_product_name
+from .models import EmptyDownloadLinkError, FatalRequestError, log_debug, normalize_product_name
 from .status_store import normalize_data_date
 
 
@@ -166,7 +166,7 @@ def get_download_link(api_base: str, product: str, date_time: str, hid: str, hea
     )
     download_link = res.text.strip()
     if not download_link:
-        raise RuntimeError(f"{product} {date_time} 未返回下载链接。")
+        raise EmptyDownloadLinkError(f"{product} {date_time} 未返回下载链接。")
     return download_link
 
 def build_file_name(file_url: str, product: str, date_time: str) -> str:
@@ -192,8 +192,10 @@ def save_file(file_url: str, file_path: Path, headers: Dict[str, str], product: 
         product=product,
         request_profile="file_download",
     )
-    with file_path.open("wb") as f:
-        for chunk in res.iter_content(chunk_size=8192):
-            if chunk:
-                f.write(chunk)
-
+    try:
+        with file_path.open("wb") as f:
+            for chunk in res.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+    finally:
+        res.close()

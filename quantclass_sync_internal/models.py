@@ -96,6 +96,12 @@ class ProductSyncError(RuntimeError):
         super().__init__(message)
         self.reason_code = reason_code
 
+
+class EmptyDownloadLinkError(RuntimeError):
+    """API 返回了空的下载链接。"""
+
+    pass
+
 @dataclass(frozen=True)
 class DatasetRule:
     """已知产品统一规则。"""
@@ -277,6 +283,11 @@ class CommandContext(BaseModel):
     work_dir: Path = DEFAULT_WORK_DIR
     http_attempts_by_product: Dict[str, int] = Field(default_factory=dict)
     http_failures_by_product: Dict[str, int] = Field(default_factory=dict)
+
+    def __repr__(self) -> str:
+        # 隐藏敏感字段，防止日志或异常堆栈泄露凭证
+        safe = {k: ("***" if k in ("api_key", "hid") else v) for k, v in self.__dict__.items()}
+        return f"CommandContext({safe})"
 
 class ProductStatus(BaseModel):
     """产品状态模型（仅保留更新链路所需字段）。"""

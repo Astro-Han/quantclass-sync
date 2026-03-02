@@ -53,6 +53,7 @@ from quantclass_sync_internal.file_sync import repair_sort_product_files, sortab
 from quantclass_sync_internal.models import (
     CommandContext,
     CsvPayload,
+    EmptyDownloadLinkError,
     FatalRequestError,
     ProductPlan,
     ProductRunResult,
@@ -255,6 +256,7 @@ __all__ = [
     # models/types
     "CommandContext",
     "CsvPayload",
+    "EmptyDownloadLinkError",
     "FatalRequestError",
     "ProductPlan",
     "ProductRunResult",

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from coin_preprocess_internal.pivot import _write_pickles_atomically
+from coin_preprocess_internal.pivot import _acquire_output_locks, _write_pickles_atomically
 
 
 def _atomic_write_worker(output_dir: str, started, results) -> None:
@@ -64,6 +64,35 @@ class PreprocessAtomicLockTests(unittest.TestCase):
             self.assertEqual("ok", status)
             self.assertIsNone(payload)
             self.assertEqual({"worker": "ok"}, pd.read_pickle(output_dir / "spot_dict.pkl"))
+
+    def test_acquire_locks_releases_all_on_partial_failure(self) -> None:
+        """多目录加锁时第二个目录失败，验证第一个目录的锁被正确释放。"""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dir_a = Path(tmpdir) / "a"
+            dir_b = Path(tmpdir) / "b"
+            dir_a.mkdir()
+            dir_b.mkdir()
+            payloads = {dir_a / "out.pkl": "data_a", dir_b / "out.pkl": "data_b"}
+
+            original_flock = fcntl.flock
+            call_count = 0
+
+            def flock_bomb(fd, op):  # type: ignore[no-untyped-def]
+                nonlocal call_count
+                call_count += 1
+                if call_count >= 2 and op == fcntl.LOCK_EX:
+                    raise OSError("模拟加锁失败")
+                return original_flock(fd, op)
+
+            with patch("coin_preprocess_internal.pivot.fcntl.flock", side_effect=flock_bomb):
+                with self.assertRaises(OSError):
+                    _acquire_output_locks(payloads)
+
+            lock_file = (dir_a / ".preprocess.lock").open("a+")
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            lock_file.close()
 
 
 if __name__ == "__main__":
