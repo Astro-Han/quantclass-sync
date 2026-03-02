@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目简介
 
-QuantClass 数据同步工具（当前 v0.8.0），从 QuantClass API 自动下载、解析、合并金融数据（股票/币圈）。核心特性：本地落后多日时单次命令自动回补所有缺口。
+QuantClass 数据同步工具，从 QuantClass API 自动下载、解析、合并金融数据（股票/币圈）。核心特性：本地落后多日时单次命令自动回补所有缺口。
 
 ## 常用命令
 
@@ -87,7 +87,7 @@ python3 quantclass_sync.py
 
 - 中文注释和日志；HTTP 错误码有中文映射（404→资源不存在、403→无下载权限等）
 - 新增已知产品规则时需更新 `AGGREGATE_SPLIT_COLS` 和 `RULES` 字典（含排序键配置）
-- v0.8.0+ 已完成主链路模块化重构，保持 CLI 兼容
+- 已完成主链路模块化重构，保持 CLI 兼容
 - **禁止弯引号**：Python 字符串只能用 ASCII 直引号（`'` `"`），弯引号只允许出现在中文注释里
 - 每次改动代码后，运行测试验证：`python3 -m unittest discover -s tests -p 'test_*.py' -v`
 
