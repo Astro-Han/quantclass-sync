@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import quantclass_sync as qcs
-from quantclass_sync_internal.constants import REASON_MERGE_ERROR, REASON_OK, STRATEGY_MERGE_KNOWN, TIMESTAMP_FILE_NAME
+from quantclass_sync_internal.constants import REASON_OK, STRATEGY_MERGE_KNOWN, TIMESTAMP_FILE_NAME
 from quantclass_sync_internal.models import CommandContext, ProductPlan, SyncStats
 from quantclass_sync_internal import orchestrator
 from quantclass_sync_internal.reporting import _new_report
@@ -29,7 +29,7 @@ class StateConsistencyAndWorkdirIsolationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def test_execute_plans_does_not_record_ok_before_status_write(self) -> None:
+    def test_execute_plans_keeps_business_success_when_status_write_fails(self) -> None:
         report = _new_report(self.ctx.run_id, mode="network")
 
         def fake_process_product(
@@ -63,9 +63,9 @@ class StateConsistencyAndWorkdirIsolationTests(unittest.TestCase):
                 catch_up_to_latest=False,
             )
 
-        self.assertTrue(has_error)
-        self.assertEqual(["error"], [item.status for item in report.products])
-        self.assertEqual(REASON_MERGE_ERROR, report.products[0].reason_code)
+        self.assertFalse(has_error)
+        self.assertEqual(["ok"], [item.status for item in report.products])
+        self.assertEqual(REASON_OK, report.products[0].reason_code)
 
     def test_download_and_prepare_extract_scopes_workdir_by_run_id(self) -> None:
         work_dir = self.root / ".cache"

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-import sqlite3
+import secrets
 import sys
 import time
 import traceback
@@ -40,6 +40,7 @@ from .constants import (
     PRODUCT_MODES,
     REASON_MERGE_ERROR,
     REASON_OK,
+    REASON_UNEXPECTED_ERROR,
 )
 from .file_sync import repair_sort_product_files, sortable_products
 from .http_client import get_latest_time
@@ -65,9 +66,9 @@ from .reporting import resolve_report_path
 from .status_store import (
     cleanup_report_logs,
     cleanup_work_cache_aggressive,
-    connect_status_db,
     export_status_json,
     load_product_status,
+    open_status_db,
     report_dir_path,
     resolve_runtime_paths,
     status_json_path,
@@ -85,8 +86,7 @@ def _new_run_id() -> str:
     """生成高冲突安全的 run_id（微秒 + pid + 短随机后缀）。"""
 
     now = datetime.now()
-    nonce = time.time_ns() % 1_000_000
-    return f"{now.strftime('%Y%m%d-%H%M%S-%f')}-p{os.getpid()}-{nonce:06d}"
+    return f"{now.strftime('%Y%m%d-%H%M%S-%f')}-p{os.getpid()}-{secrets.token_hex(4)}"
 
 def _sync_logger_runtime(logger: ConsoleLogger, progress_every: Optional[int] = None) -> None:
     """同步 CLI 层与 models 层的日志运行时上下文。"""
@@ -289,8 +289,8 @@ def command_guard(command_name: str):
                 _handle_command_exception(command_name, exc, exc.reason_code, args, kwargs)
                 raise typer.Exit(code=1)
             except Exception as exc:
-                # 兜底未知错误：统一映射为 merge_error，避免漏报。
-                _handle_command_exception(command_name, exc, REASON_MERGE_ERROR, args, kwargs)
+                # 兜底未知错误：统一映射为 unexpected_error，避免误标为 merge_error。
+                _handle_command_exception(command_name, exc, REASON_UNEXPECTED_ERROR, args, kwargs)
                 raise typer.Exit(code=1)
             finally:
                 # 无论成功/失败，都会执行清理（finally 总会执行）。
@@ -426,9 +426,6 @@ def cmd_setup(
 
     if not raw_data_root:
         raise RuntimeError("setup 缺少 data_root；请提供数据目录。")
-    data_root_path = ensure_data_root_ready(Path(raw_data_root), create_if_missing=True)
-    setup_ctx = _build_command_ctx_with_overrides(base_ctx, data_root=data_root_path, secrets_file=base_ctx.secrets_file)
-    ctx.obj = setup_ctx
 
     if mode not in PRODUCT_MODES:
         raise RuntimeError("product_mode 仅支持 local_scan 或 explicit_list。")
@@ -452,6 +449,11 @@ def cmd_setup(
         secrets_path = _resolve_path_from_config(existing_config.secrets_file, config_file=base_ctx.config_file)
     else:
         secrets_path = DEFAULT_USER_SECRETS_FILE.resolve()
+
+    # 参数校验全部通过后，再执行带副作用的目录创建。
+    data_root_path = ensure_data_root_ready(Path(raw_data_root), create_if_missing=True)
+    setup_ctx = _build_command_ctx_with_overrides(base_ctx, data_root=data_root_path, secrets_file=base_ctx.secrets_file)
+    ctx.obj = setup_ctx
 
     # 默认先做连通性检查，再写文件：
     # 这样检查失败时不会留下“新配置写了一半”的状态。
@@ -713,8 +715,7 @@ def cmd_init(ctx: typer.Context) -> None:
         )
         return
 
-    conn = connect_status_db(command_ctx.data_root)
-    try:
+    with open_status_db(command_ctx.data_root) as conn:
         for product in catalog:
             old = load_product_status(conn, product)
             status = old or ProductStatus(name=product, display_name=product)
@@ -726,8 +727,6 @@ def cmd_init(ctx: typer.Context) -> None:
             upsert_product_status(conn, status, commit_immediately=False)
         conn.commit()
         export_status_json(conn, status_json_path(command_ctx.data_root))
-    finally:
-        conn.close()
 
     elapsed = time.time() - t0
     log_info("init 执行完成。", event="CMD_DONE", products=len(catalog), elapsed=round(elapsed, 2))
@@ -755,25 +754,28 @@ def cmd_one_data(
     report.planned_total = len(plan)
 
     log_info("开始执行 one_data。", event="CMD_START", product=product)
-    conn: Optional[sqlite3.Connection] = None
-    if not command_ctx.dry_run:
-        conn = connect_status_db(command_ctx.data_root)
-    try:
-        # 实际执行（含门控、下载、解压、落库、结果记录）。
+    if command_ctx.dry_run:
         total, has_error, t_run_start = _execute_plans(
             plans=plan,
             command_ctx=command_ctx,
             report=report,
             requested_date_time=date_time.strip(),
-            conn=conn,
+            conn=None,
             force_update=force_update,
             catch_up_to_latest=False,
         )
-        if conn is not None:
+    else:
+        with open_status_db(command_ctx.data_root) as conn:
+            total, has_error, t_run_start = _execute_plans(
+                plans=plan,
+                command_ctx=command_ctx,
+                report=report,
+                requested_date_time=date_time.strip(),
+                conn=conn,
+                force_update=force_update,
+                catch_up_to_latest=False,
+            )
             export_status_json(conn, status_json_path(command_ctx.data_root))
-    finally:
-        if conn is not None:
-            conn.close()
     exit_code = _finalize_and_write_report(report, total, has_error, t_run_start, report_path)
     log_info("one_data 执行完成。", event="CMD_DONE", exit_code=exit_code)
     if exit_code != 0:

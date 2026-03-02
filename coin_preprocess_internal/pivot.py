@@ -145,6 +145,8 @@ def _write_pickles_atomically(payloads: Dict[Path, object]) -> None:
     temp_files: Dict[Path, Path] = {}
     backups: Dict[Path, Path] = {}
     created_targets: List[Path] = []
+    restored_backups: Set[Path] = set()
+    success = False
     lock_handles = _acquire_output_locks(payloads)
 
     try:
@@ -167,6 +169,7 @@ def _write_pickles_atomically(payloads: Dict[Path, object]) -> None:
 
         for backup in backups.values():
             _safe_unlink(backup)
+        success = True
     except Exception:
         # 清理未消费的临时文件
         for temp_path in temp_files.values():
@@ -177,15 +180,24 @@ def _write_pickles_atomically(payloads: Dict[Path, object]) -> None:
             _safe_unlink(target)
         for target, backup in backups.items():
             if backup.exists():
-                _safe_unlink(target)
-                os.replace(backup, target)
+                try:
+                    _safe_unlink(target)
+                    os.replace(backup, target)
+                    restored_backups.add(backup)
+                except Exception:
+                    # 回滚恢复失败时保留 backup，避免 finally 再删除导致无法人工恢复。
+                    pass
 
         raise
     finally:
         for temp_path in temp_files.values():
             _safe_unlink(temp_path)
-        for backup in backups.values():
-            _safe_unlink(backup)
+        if success:
+            for backup in backups.values():
+                _safe_unlink(backup)
+        else:
+            for backup in restored_backups:
+                _safe_unlink(backup)
         for lock_handle in reversed(lock_handles):
             try:
                 fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)

@@ -6,6 +6,7 @@ import quantclass_sync as qcs
 from quantclass_sync_internal.constants import (
     REASON_MIRROR_FALLBACK,
     REASON_MIRROR_UNKNOWN,
+    REASON_NO_VALID_OUTPUT,
     REASON_UNKNOWN_HEADER_MERGE,
 )
 from quantclass_sync_internal.file_sync import sync_unknown_product
@@ -27,6 +28,54 @@ def _write_simple_csv(path: Path, rows: list[str]) -> None:
 
 
 class MirrorReasonCodeTests(unittest.TestCase):
+    def test_known_product_reason_keeps_worst_severity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            extract_root = root / "extract"
+            data_root = root / "data"
+            extract_root.mkdir(parents=True, exist_ok=True)
+            data_root.mkdir(parents=True, exist_ok=True)
+
+            # 按天聚合文件缺少拆分列 -> merge_error
+            _write_simple_csv(
+                extract_root / "2026-03-01.csv",
+                [
+                    "note",
+                    "bad_col,another_col",
+                    "1,2",
+                ],
+            )
+            # 无法映射路径 -> mirror_fallback
+            _write_simple_csv(extract_root / "unmapped.csv", ["a,b", "1,2"])
+
+            _stats, reason_code = qcs.sync_known_product(
+                product="stock-trading-data",
+                extract_path=extract_root,
+                data_root=data_root,
+                dry_run=False,
+            )
+
+            self.assertEqual(qcs.REASON_MERGE_ERROR, reason_code)
+
+    def test_known_product_all_skipped_returns_no_valid_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            extract_root = root / "extract"
+            data_root = root / "data"
+            extract_root.mkdir(parents=True, exist_ok=True)
+            data_root.mkdir(parents=True, exist_ok=True)
+
+            _write_simple_csv(extract_root / "not_a_symbol.csv", ["a,b", "1,2"])
+
+            _stats, reason_code = qcs.sync_known_product(
+                product="stock-main-index-data",
+                extract_path=extract_root,
+                data_root=data_root,
+                dry_run=False,
+            )
+
+            self.assertEqual(REASON_NO_VALID_OUTPUT, reason_code)
+
     def test_ts_file_in_known_product_does_not_mark_mirror_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

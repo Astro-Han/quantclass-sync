@@ -52,6 +52,20 @@ class EncodingStrategyTests(unittest.TestCase):
         self.assertEqual("utf-8-sig", encoding)
         self.assertTrue(text.startswith("candle_end_time,open"))
 
+    def test_read_csv_payload_avoids_misclassifying_symbol_note_as_header(self) -> None:
+        path = self.root / "symbol-note.csv"
+        path.write_text(
+            "sz000001,下载备注\ncandle_end_time,open\n2024-01-01,1\n",
+            encoding="utf-8",
+            newline="",
+        )
+
+        payload = qcs.read_csv_payload(path, preferred_encoding="utf-8")
+
+        self.assertEqual("sz000001,下载备注", payload.note)
+        self.assertEqual(["candle_end_time", "open"], payload.header)
+        self.assertEqual([["2024-01-01", "1"]], payload.rows)
+
     def test_sync_keeps_existing_encoding_when_only_encoding_differs(self) -> None:
         target = self.root / "sh000300.csv"
         self._write_csv_text(target, encoding="gb18030", with_bom=False)

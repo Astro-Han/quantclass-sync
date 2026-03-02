@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 import json
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -9,6 +10,8 @@ from unittest.mock import patch
 import typer
 
 import quantclass_sync as qcs
+from quantclass_sync_internal import cli as cli_module
+from quantclass_sync_internal import config as config_module
 from quantclass_sync_internal import models as models_module
 
 
@@ -123,6 +126,23 @@ class CommandFlowTests(unittest.TestCase):
             )
         self.assertEqual(1, cm.exception.exit_code)
 
+    def test_cmd_setup_missing_hid_does_not_create_data_root(self) -> None:
+        missing_root = self.root / "new-data-root"
+        self.assertFalse(missing_root.exists())
+        ctx = _DummyTyperContext(self._base_ctx())
+        with self.assertRaises(typer.Exit):
+            qcs.cmd_setup(
+                ctx=ctx,
+                non_interactive=True,
+                skip_check=True,
+                data_root=str(missing_root),
+                api_key="api_key_x",
+                hid="",
+                product_mode=qcs.PRODUCT_MODE_LOCAL_SCAN,
+                products=[],
+            )
+        self.assertFalse(missing_root.exists())
+
     def test_save_user_secrets_atomic_creates_temp_with_mode_600(self) -> None:
         with patch("quantclass_sync_internal.config.os.open", wraps=os.open) as open_mock:
             qcs.save_user_secrets_atomic(self.secrets_file, api_key="k", hid="h")
@@ -135,6 +155,43 @@ class CommandFlowTests(unittest.TestCase):
         with patch("quantclass_sync_internal.config.os.chmod", side_effect=PermissionError("chmod denied")):
             with self.assertRaises(PermissionError):
                 qcs.save_user_secrets_atomic(self.secrets_file, api_key="k", hid="h")
+
+    def test_save_setup_artifacts_atomic_rollback_chmod_failure_bubbles_up(self) -> None:
+        config_path = self.root / "existing_config.json"
+        secrets_path = self.root / "existing_secrets.env"
+        config_path.write_text("{\"old\":\"config\"}\n", encoding="utf-8")
+        secrets_path.write_text("QUANTCLASS_API_KEY=old\nQUANTCLASS_HID=old\n", encoding="utf-8")
+        os.chmod(config_path, 0o600)
+        os.chmod(secrets_path, 0o600)
+
+        user_config = qcs.UserConfig(
+            data_root=self.data_root,
+            product_mode=qcs.PRODUCT_MODE_LOCAL_SCAN,
+            default_products=[],
+            secrets_file=secrets_path,
+        )
+        original_chmod = os.chmod
+        chmod_calls = {"count": 0}
+
+        def _chmod_side_effect(*args, **kwargs):
+            chmod_calls["count"] += 1
+            if chmod_calls["count"] == 2:
+                raise PermissionError("restore chmod denied")
+            return original_chmod(*args, **kwargs)
+
+        with patch("quantclass_sync_internal.config.save_user_config_atomic", side_effect=RuntimeError("config write failed")):
+            with patch("quantclass_sync_internal.config.os.chmod", side_effect=_chmod_side_effect):
+                with self.assertRaises(RuntimeError) as cm:
+                    config_module.save_setup_artifacts_atomic(
+                        config_path=config_path,
+                        config=user_config,
+                        secrets_path=secrets_path,
+                        api_key="new_api",
+                        hid="new_hid",
+                    )
+        self.assertIn("回滚不完整", str(cm.exception))
+        self.assertEqual("{\"old\":\"config\"}\n", config_path.read_text(encoding="utf-8"))
+        self.assertIn("QUANTCLASS_API_KEY=old", secrets_path.read_text(encoding="utf-8"))
 
     def test_cmd_update_success_calls_run_update_with_settings(self) -> None:
         self._write_user_config()
@@ -367,6 +424,19 @@ class CommandFlowTests(unittest.TestCase):
         self.assertEqual(expected_data_root, run_ctx.data_root)
         self.assertEqual(expected_secrets_file, run_ctx.secrets_file)
 
+    def test_command_guard_marks_unknown_exception_as_unexpected_error(self) -> None:
+        @cli_module.command_guard("dummy")
+        def _boom(ctx):
+            raise RuntimeError("boom")
+
+        ctx = _DummyTyperContext(self._base_ctx())
+        with patch("quantclass_sync_internal.cli._handle_command_exception") as handler_mock:
+            with self.assertRaises(typer.Exit) as cm:
+                _boom(ctx=ctx)
+
+        self.assertEqual(1, cm.exception.exit_code)
+        self.assertEqual(cli_module.REASON_UNEXPECTED_ERROR, handler_mock.call_args.args[2])
+
     def test_global_options_syncs_logger_runtime_even_when_exiting(self) -> None:
         config_file = self.root / "exists.json"
         config_file.write_text("{}", encoding="utf-8")
@@ -429,6 +499,37 @@ class CommandFlowTests(unittest.TestCase):
         self.assertNotEqual(run_id_1, run_id_2)
         self.assertTrue(run_id_1.startswith("20260302-093000-111111-p"))
         self.assertTrue(run_id_2.startswith("20260302-093000-222222-p"))
+
+    def test_global_options_run_id_uses_random_hex_suffix(self) -> None:
+        ctx = _FakeGlobalContext(invoked_subcommand="update")
+        dt = datetime(2026, 3, 2, 9, 30, 0, 123456)
+        with patch("quantclass_sync_internal.cli.datetime") as dt_mock, patch(
+            "quantclass_sync_internal.cli.secrets.token_hex",
+            return_value="deadbeef",
+        ):
+            dt_mock.now.return_value = dt
+            qcs.global_options(
+                ctx=ctx,
+                data_root=None,
+                api_key="",
+                hid="",
+                secrets_file=None,
+                config_file=self.config_file,
+                dry_run=False,
+                report_file=None,
+                stop_on_error=False,
+                verbose=False,
+            )
+
+        self.assertTrue(ctx.obj.run_id.endswith("-deadbeef"))
+
+    def test_bind_orchestrator_runtime_rebinds_after_external_override(self) -> None:
+        qcs._bind_orchestrator_runtime(probe_callable=qcs._probe_downloadable_dates)
+        qcs._orchestrator.get_latest_times = lambda *args, **kwargs: []
+
+        qcs._bind_orchestrator_runtime(probe_callable=qcs._probe_downloadable_dates)
+
+        self.assertIs(qcs.get_latest_times, qcs._orchestrator.get_latest_times)
 
     def test_run_update_with_all_invalid_explicit_products_keeps_report_consistent(self) -> None:
         report_path = self.root / "run_report_invalid_explicit.json"
@@ -506,12 +607,20 @@ class CommandFlowTests(unittest.TestCase):
     def test_cmd_init_writes_with_single_commit(self) -> None:
         ctx = _DummyTyperContext(self._base_ctx().model_copy(update={"dry_run": False}))
         conn = _FakeConn()
+
+        @contextmanager
+        def _open_status_db():
+            try:
+                yield conn
+            finally:
+                conn.close()
+
         with patch("quantclass_sync.load_catalog_or_raise", return_value=["p1", "p2"]), patch(
             "quantclass_sync_internal.cli.discover_local_products",
             return_value=[],
         ), patch(
-            "quantclass_sync_internal.cli.connect_status_db",
-            return_value=conn,
+            "quantclass_sync_internal.cli.open_status_db",
+            return_value=_open_status_db(),
         ), patch(
             "quantclass_sync_internal.cli.load_product_status",
             return_value=None,

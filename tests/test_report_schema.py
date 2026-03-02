@@ -112,6 +112,21 @@ class ReportSchemaTests(unittest.TestCase):
         )
         self.assertEqual(qcs.EXIT_CODE_GENERAL_FAILURE, exit_code)
 
+    def test_finalize_rounds_duration_seconds_to_two_decimals(self) -> None:
+        report = qcs._new_report("rid-round", mode="network")
+        report_path = self.root / "run_report_rounding.json"
+        with patch("quantclass_sync_internal.reporting.time.time", return_value=100.127):
+            qcs._finalize_and_write_report(
+                report=report,
+                total=qcs.SyncStats(),
+                has_error=False,
+                t_run_start=100.0,
+                report_path=report_path,
+            )
+
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(0.13, payload["duration_seconds"])
+
     def test_write_run_report_replace_failure_keeps_original_file_and_cleans_temp(self) -> None:
         report_path = self.root / "run_report_atomic.json"
         report_path.write_text('{"old":"value"}', encoding="utf-8")
@@ -178,6 +193,39 @@ class ReportSchemaTests(unittest.TestCase):
             )
 
         self.assertEqual(qcs.EXIT_CODE_NO_EXECUTABLE_PRODUCTS, exit_code)
+
+    def test_run_update_exports_status_json_in_finally_when_postprocess_raises(self) -> None:
+        ctx = self._ctx().model_copy(update={"dry_run": False})
+        plan = qcs.ProductPlan(name="stock-trading-data", strategy=qcs.STRATEGY_MERGE_KNOWN)
+
+        with patch("quantclass_sync.load_catalog_or_raise", return_value=["stock-trading-data"]), patch(
+            "quantclass_sync_internal.orchestrator.discover_local_products",
+            return_value=["stock-trading-data"],
+        ), patch(
+            "quantclass_sync_internal.orchestrator.resolve_products_by_mode",
+            return_value=(["stock-trading-data"], [], []),
+        ), patch(
+            "quantclass_sync_internal.orchestrator.build_product_plan",
+            return_value=[plan],
+        ), patch(
+            "quantclass_sync_internal.orchestrator._execute_plans",
+            return_value=(qcs.SyncStats(), False, time.time() - 1.0),
+        ), patch(
+            "quantclass_sync_internal.orchestrator._maybe_run_coin_preprocess",
+            side_effect=RuntimeError("postprocess boom"),
+        ), patch(
+            "quantclass_sync_internal.orchestrator.export_status_json",
+        ) as export_mock:
+            with self.assertRaises(RuntimeError):
+                qcs.run_update_with_settings(
+                    command_ctx=ctx,
+                    mode="local",
+                    products=[],
+                    force_update=False,
+                    command_name="update",
+                )
+
+        export_mock.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -86,6 +86,8 @@ REASON_INVALID_EXPLICIT_PRODUCT = "invalid_explicit_product"
 
 REASON_NO_LOCAL_PRODUCTS = "no_local_products"
 
+REASON_NO_VALID_OUTPUT = "no_valid_output"
+
 REASON_NETWORK_ERROR = "network_error"
 
 REASON_NO_DATA_FOR_DATE = "no_data_for_date"
@@ -93,6 +95,8 @@ REASON_NO_DATA_FOR_DATE = "no_data_for_date"
 REASON_EXTRACT_ERROR = "extract_error"
 
 REASON_MERGE_ERROR = "merge_error"
+
+REASON_UNEXPECTED_ERROR = "unexpected_error"
 
 REASON_MIRROR_FALLBACK = "mirror_fallback"
 

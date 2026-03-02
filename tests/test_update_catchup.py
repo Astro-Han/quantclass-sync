@@ -246,6 +246,38 @@ class UpdateCatchUpTests(unittest.TestCase):
         self.assertFalse(skipped)
         self.assertEqual(["2026-02-07"], queue)
 
+    def test_empty_download_link_maps_to_no_data_reason(self) -> None:
+        from quantclass_sync_internal.orchestrator import _raise_download_stage_error
+
+        with self.assertRaises(qcs.ProductSyncError) as cm:
+            _raise_download_stage_error("stock-trading-data", qcs.EmptyDownloadLinkError("empty"))
+
+        self.assertEqual(qcs.REASON_NO_DATA_FOR_DATE, cm.exception.reason_code)
+
+    def test_resolve_catchup_dates_gate_error_falls_back_to_latest(self) -> None:
+        plan = self._plan()[0]
+        report = self._report()
+        ctx = self._ctx(dry_run=True)
+
+        with patch("quantclass_sync.get_latest_times", return_value=["2026-02-11"]), patch(
+            "quantclass_sync_internal.orchestrator.read_local_timestamp_date",
+            side_effect=RuntimeError("broken timestamp"),
+        ):
+            queue, skipped = qcs._resolve_requested_dates_for_plan(
+                plan=plan,
+                command_ctx=ctx,
+                hid="hid",
+                headers={"api-key": "k"},
+                requested_date_time="",
+                force_update=False,
+                report=report,
+                t_product_start=time.time(),
+                catch_up_to_latest=True,
+            )
+
+        self.assertFalse(skipped)
+        self.assertEqual(["2026-02-11"], queue)
+
     def test_large_gap_with_sparse_multi_latest_payload_calls_probe(self) -> None:
         self._write_local_timestamp("2025-01-01")
         plan = self._plan()[0]
@@ -273,6 +305,108 @@ class UpdateCatchUpTests(unittest.TestCase):
         self.assertEqual(["2025-12-01", "2025-12-02", "2025-12-15", "2025-12-16", "2025-12-30", "2025-12-31"], queue)
         probe_mock.assert_called_once()
 
+    def test_execute_plans_status_write_failure_keeps_ok_result(self) -> None:
+        self._write_local_timestamp("2026-02-06")
+        report = self._report()
+        ctx = self._ctx(dry_run=False)
+        plans = self._plan()
+        conn = qcs.connect_status_db(self.root)
+
+        def fake_process_product(
+            plan: qcs.ProductPlan,
+            date_time: str | None,
+            api_base: str,
+            hid: str,
+            headers: dict[str, str],
+            data_root: Path,
+            work_dir: Path,
+            dry_run: bool,
+            run_id: str = "",
+        ):
+            return plan.name, date_time or "", qcs.SyncStats(updated_files=1), "/tmp/src", qcs.REASON_OK
+
+        try:
+            with patch("quantclass_sync.build_headers_or_raise", return_value=({"api-key": "k"}, "hid")), patch(
+                "quantclass_sync._resolve_requested_dates_for_plan",
+                return_value=(["2026-02-09"], False),
+            ), patch(
+                "quantclass_sync.process_product",
+                side_effect=fake_process_product,
+            ), patch(
+                "quantclass_sync_internal.orchestrator._upsert_product_status_after_success",
+                side_effect=RuntimeError("status write failed"),
+            ):
+                total, has_error, _started_at = qcs._execute_plans(
+                    plans=plans,
+                    command_ctx=ctx,
+                    report=report,
+                    requested_date_time="",
+                    conn=conn,
+                    force_update=False,
+                    catch_up_to_latest=True,
+                )
+        finally:
+            conn.close()
+
+        self.assertFalse(has_error)
+        self.assertEqual(1, total.updated_files)
+        self.assertEqual(["ok"], [item.status for item in report.products])
+        ts_text = (self.root / self.product / qcs.TIMESTAMP_FILE_NAME).read_text(encoding="utf-8")
+        self.assertTrue(ts_text.startswith("2026-02-06,"))
+
+    def test_execute_plans_no_valid_output_does_not_advance_timestamp(self) -> None:
+        self._write_local_timestamp("2026-02-06")
+        report = self._report()
+        ctx = self._ctx(dry_run=False)
+        plans = self._plan()
+        conn = qcs.connect_status_db(self.root)
+
+        def fake_process_product(
+            plan: qcs.ProductPlan,
+            date_time: str | None,
+            api_base: str,
+            hid: str,
+            headers: dict[str, str],
+            data_root: Path,
+            work_dir: Path,
+            dry_run: bool,
+            run_id: str = "",
+        ):
+            return (
+                plan.name,
+                date_time or "",
+                qcs.SyncStats(skipped_files=1),
+                "/tmp/src",
+                qcs.REASON_NO_VALID_OUTPUT,
+            )
+
+        try:
+            with patch("quantclass_sync.build_headers_or_raise", return_value=({"api-key": "k"}, "hid")), patch(
+                "quantclass_sync._resolve_requested_dates_for_plan",
+                return_value=(["2026-02-09"], False),
+            ), patch(
+                "quantclass_sync.process_product",
+                side_effect=fake_process_product,
+            ):
+                total, has_error, _started_at = qcs._execute_plans(
+                    plans=plans,
+                    command_ctx=ctx,
+                    report=report,
+                    requested_date_time="",
+                    conn=conn,
+                    force_update=False,
+                    catch_up_to_latest=True,
+                )
+        finally:
+            conn.close()
+
+        self.assertFalse(has_error)
+        self.assertEqual(1, total.skipped_files)
+        self.assertEqual(["skipped"], [item.status for item in report.products])
+        self.assertEqual(qcs.REASON_NO_VALID_OUTPUT, report.products[0].reason_code)
+        ts_text = (self.root / self.product / qcs.TIMESTAMP_FILE_NAME).read_text(encoding="utf-8")
+        self.assertTrue(ts_text.startswith("2026-02-06,"))
+
     def test_execute_plans_catchup_stops_on_first_hard_failure(self) -> None:
         self._write_local_timestamp("2026-02-06")
         report = self._report()
@@ -291,6 +425,7 @@ class UpdateCatchUpTests(unittest.TestCase):
             data_root: Path,
             work_dir: Path,
             dry_run: bool,
+            run_id: str = "",
         ):
             date = date_time or ""
             executed_dates.append(date)
@@ -339,6 +474,7 @@ class UpdateCatchUpTests(unittest.TestCase):
             data_root: Path,
             work_dir: Path,
             dry_run: bool,
+            run_id: str = "",
         ):
             date = date_time or ""
             executed_dates.append(date)
@@ -403,6 +539,7 @@ class UpdateCatchUpTests(unittest.TestCase):
             data_root: Path,
             work_dir: Path,
             dry_run: bool,
+            run_id: str = "",
         ):
             executed.append((plan.name, date_time or ""))
             return plan.name, date_time or "", qcs.SyncStats(updated_files=1), "/tmp/src", qcs.REASON_OK
@@ -458,6 +595,7 @@ class UpdateCatchUpTests(unittest.TestCase):
             data_root: Path,
             work_dir: Path,
             dry_run: bool,
+            run_id: str = "",
         ):
             called_products.append(plan.name)
             if plan.name == "stock-trading-data":

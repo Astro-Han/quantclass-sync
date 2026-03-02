@@ -5,6 +5,7 @@ import shutil
 import stat
 import tarfile
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
@@ -111,11 +112,30 @@ class SafeExtractTarTests(unittest.TestCase):
 
             from quantclass_sync_internal.archive import extract_archive
 
-            with self.assertRaises(Exception):
+            with self.assertRaisesRegex(RuntimeError, "解压路径越界"):
                 extract_archive(tar_path, extract_dir)
 
             self.assertFalse((Path(tmp) / "etc" / "evil.txt").exists())
             self.assertFalse((extract_dir / ".." / ".." / "etc" / "evil.txt").exists())
+
+    def test_safe_extract_tar_rejects_symlink_nodes_after_extract(self) -> None:
+        tar_path = self.root / "with-symlink.tar"
+        extract_dir = self.root / "extract-with-symlink"
+        extract_dir.mkdir(parents=True, exist_ok=True)
+
+        with tarfile.open(tar_path, "w") as tf:
+            payload = b"ok"
+            regular = tarfile.TarInfo("ok.txt")
+            regular.size = len(payload)
+            tf.addfile(regular, io.BytesIO(payload))
+
+            symlink = tarfile.TarInfo("link-to-ok")
+            symlink.type = tarfile.SYMTYPE
+            symlink.linkname = "ok.txt"
+            tf.addfile(symlink)
+
+        with self.assertRaises(RuntimeError):
+            safe_extract_tar(tar_path, extract_dir)
 
 
 class SafeExtractArchiveDangerousNodesTests(unittest.TestCase):
@@ -462,6 +482,15 @@ class SyncPayloadLockTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
+    def _payload(self) -> qcs.CsvPayload:
+        return qcs.CsvPayload(
+            note=None,
+            header=["candle_end_time", "open", "high", "low", "close", "amount", "volume", "index_code"],
+            rows=[["2024-01-01", "1", "1", "1", "1", "10", "10", "sh000300"]],
+            encoding="utf-8",
+            delimiter=",",
+        )
+
     def test_sync_payload_waits_for_file_lock_before_writing(self) -> None:
         if fcntl is None:
             self.skipTest("fcntl is unavailable on this platform")
@@ -491,6 +520,79 @@ class SyncPayloadLockTests(unittest.TestCase):
         self.assertEqual(0, process.exitcode)
         payload = qcs.read_csv_payload(target, preferred_encoding="utf-8")
         self.assertEqual(1, len(payload.rows))
+
+    def test_sync_payload_waits_for_fallback_lock_before_writing(self) -> None:
+        target = self.root / "fallback-locked.csv"
+        lock_path = target.parent / f".{target.name}.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        started = threading.Event()
+        finished = threading.Event()
+        errors: list[BaseException] = []
+
+        def worker() -> None:
+            started.set()
+            try:
+                qcs.sync_payload_to_target(
+                    incoming=self._payload(),
+                    target=target,
+                    rule=qcs.RULES["stock-main-index-data"],
+                    dry_run=False,
+                )
+            except BaseException as exc:  # pragma: no cover - 仅用于跨线程收集异常
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        with patch("quantclass_sync_internal.csv_engine.fcntl", None), patch("quantclass_sync_internal.csv_engine.msvcrt", None):
+            thread = threading.Thread(target=worker, daemon=True)
+            thread.start()
+            self.assertTrue(started.wait(timeout=5))
+            time.sleep(0.3)
+            self.assertFalse(finished.is_set())
+
+            os.close(lock_fd)
+            lock_path.unlink()
+
+            thread.join(timeout=10)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual([], errors)
+        payload = qcs.read_csv_payload(target, preferred_encoding="utf-8")
+        self.assertEqual(1, len(payload.rows))
+
+    def test_sync_payload_raises_when_lock_backend_unavailable(self) -> None:
+        target = self.root / "lock-open-fail.csv"
+
+        with patch("quantclass_sync_internal.csv_engine.fcntl", None), patch(
+            "quantclass_sync_internal.csv_engine.msvcrt", None
+        ), patch("quantclass_sync_internal.csv_engine.os.open", side_effect=OSError("open denied")):
+            with self.assertRaises(RuntimeError):
+                qcs.sync_payload_to_target(
+                    incoming=self._payload(),
+                    target=target,
+                    rule=qcs.RULES["stock-main-index-data"],
+                    dry_run=False,
+                )
+
+        self.assertFalse(target.exists())
+
+    def test_sync_payload_fallback_lock_file_is_cleaned_after_write(self) -> None:
+        target = self.root / "fallback-cleanup.csv"
+        lock_path = target.parent / f".{target.name}.lock"
+
+        with patch("quantclass_sync_internal.csv_engine.fcntl", None), patch("quantclass_sync_internal.csv_engine.msvcrt", None):
+            result, added, _audit = qcs.sync_payload_to_target(
+                incoming=self._payload(),
+                target=target,
+                rule=qcs.RULES["stock-main-index-data"],
+                dry_run=False,
+            )
+
+        self.assertEqual("created", result)
+        self.assertEqual(1, added)
+        self.assertFalse(lock_path.exists())
 
 
 if __name__ == "__main__":

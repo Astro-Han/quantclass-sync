@@ -1,5 +1,6 @@
 import fcntl
 import multiprocessing as mp
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -93,6 +94,44 @@ class PreprocessAtomicLockTests(unittest.TestCase):
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
             lock_file.close()
+
+    def test_write_pickles_atomically_keeps_backup_when_restore_fails(self) -> None:
+        """提交失败且回滚恢复失败时，backup 必须保留供人工恢复。"""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            spot_target = output_dir / "spot_dict.pkl"
+            swap_target = output_dir / "swap_dict.pkl"
+            pd.to_pickle({"old": "spot"}, spot_target)
+            pd.to_pickle({"old": "swap"}, swap_target)
+
+            real_replace = os.replace
+            temp_commit_failed = False
+
+            def flaky_replace(src: str, dst: str) -> None:
+                nonlocal temp_commit_failed
+                src_path = Path(src)
+                dst_path = Path(dst)
+                if dst_path == swap_target and ".tmp-" in src_path.name and not temp_commit_failed:
+                    temp_commit_failed = True
+                    raise RuntimeError("inject_temp_commit_failure")
+                if dst_path == swap_target and ".bak-" in src_path.name:
+                    raise RuntimeError("inject_restore_failure")
+                real_replace(src, dst)
+
+            with patch("coin_preprocess_internal.pivot.os.replace", side_effect=flaky_replace):
+                with self.assertRaises(RuntimeError):
+                    _write_pickles_atomically(
+                        {
+                            spot_target: {"new": "spot"},
+                            swap_target: {"new": "swap"},
+                        }
+                    )
+
+            backup_files = list(output_dir.glob(f".{swap_target.name}.bak-*"))
+            self.assertEqual(1, len(backup_files))
+            self.assertEqual({"old": "swap"}, pd.read_pickle(backup_files[0]))
+            self.assertEqual({"old": "spot"}, pd.read_pickle(spot_target))
 
 
 if __name__ == "__main__":

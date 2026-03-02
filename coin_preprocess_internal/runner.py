@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
@@ -44,7 +46,15 @@ def _read_baseline_runtime(output_dir: Path) -> Optional[pd.Timestamp]:
     ts_file = output_dir / TIMESTAMP_FILE_NAME
     if not ts_file.exists():
         return None
-    text = ts_file.read_text(encoding="utf-8", errors="ignore").strip()
+    try:
+        text = ts_file.read_text(encoding="utf-8", errors="ignore").strip()
+    except Exception as exc:
+        LOGGER.warning(
+            "读取预处理 runtime 时间失败，降级 full_rebuild: path=%s error_type=%s",
+            ts_file,
+            type(exc).__name__,
+        )
+        return None
     if not text:
         return None
     parts = [x.strip() for x in text.split(",", 1)]
@@ -93,11 +103,43 @@ def _max_candle_time(frames: Sequence[pd.DataFrame]) -> Optional[pd.Timestamp]:
         return None
     return max(candidates)
 
+def _resolve_output_data_date(spot_dict: Dict[str, pd.DataFrame], swap_dict: Dict[str, pd.DataFrame]) -> str:
+    """计算预处理产物对应的数据日期（YYYY-MM-DD）。"""
+
+    latest = _max_candle_time([*spot_dict.values(), *swap_dict.values()])
+    if latest is None:
+        return pd.Timestamp.now().strftime("%Y-%m-%d")
+    return pd.Timestamp(latest).strftime("%Y-%m-%d")
+
+def _write_runtime_timestamp(output_dir: Path, data_date: str) -> None:
+    """写入 timestamp.txt（格式：数据日期,本地运行时间）。"""
+
+    path = output_dir / TIMESTAMP_FILE_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    local_now = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+    tmp_path = path.parent / f".{path.name}.tmp-{os.getpid()}-{time.time_ns()}"
+    try:
+        tmp_path.write_text(f"{data_date},{local_now}\n", encoding="utf-8")
+        os.replace(tmp_path, path)
+    except Exception as exc:
+        # timestamp 写入失败不影响 pkl 产物可用性，保守记录告警。
+        LOGGER.warning(
+            "写入预处理 timestamp 失败，保留 pkl 产物: path=%s error_type=%s",
+            path,
+            type(exc).__name__,
+        )
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+
 def _has_relist_break(prev_time: pd.Timestamp, prev_close: float, next_time: pd.Timestamp, next_open: float) -> bool:
     """判断边界处是否触发 relist 切段。"""
 
     if prev_close == 0:
-        return False
+        return True
     if (next_time - prev_time) <= RELIST_GAP_THRESHOLD:
         return False
     change = next_open / prev_close - 1.0
@@ -398,13 +440,13 @@ def _resolve_source_delta(
     removed_sources = baseline_sources - current_sources
 
     changed_sources: Set[str] = set(added_sources)
-    # 注意：这里使用"本地时间戳"比较，避免 epoch/时区换算造成误判。
-    baseline_local = pd.Timestamp(baseline_runtime)
+    baseline_epoch = float(pd.Timestamp(baseline_runtime).to_pydatetime().timestamp())
     for symbol in current_sources - added_sources:
         path = source_files[symbol]
         try:
-            mtime_local = pd.Timestamp.fromtimestamp(path.stat().st_mtime)
-            if mtime_local > baseline_local:
+            mtime_epoch = float(path.stat().st_mtime)
+            # 文件系统 mtime 可能只有秒级精度；同秒按变更处理更安全。
+            if mtime_epoch >= baseline_epoch:
                 changed_sources.add(symbol)
         except OSError as exc:
             LOGGER.warning(
@@ -441,6 +483,10 @@ def _run_full_rebuild(spot_dir: Path, swap_dir: Path, output_dir: Path, mode: st
         output_dir / OUTPUT_PIVOT_SWAP: market_pivot_swap,
     }
     _write_pickles_atomically(payloads)
+    _write_runtime_timestamp(
+        output_dir=output_dir,
+        data_date=_resolve_output_data_date(spot_dict=spot_dict, swap_dict=swap_dict),
+    )
 
     return PreprocessSummary(
         spot_symbols=len(spot_dict),
@@ -577,6 +623,10 @@ def _run_incremental_patch(
         output_dir / OUTPUT_PIVOT_SWAP: market_pivot_swap,
     }
     _write_pickles_atomically(payloads)
+    _write_runtime_timestamp(
+        output_dir=output_dir,
+        data_date=_resolve_output_data_date(spot_dict=spot_dict, swap_dict=swap_dict),
+    )
 
     changed_count = (
         len(changed_spot_sources)

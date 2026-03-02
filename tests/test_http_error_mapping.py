@@ -30,6 +30,45 @@ class HttpErrorMappingTests(unittest.TestCase):
             "https://api.quantclass.cn/api/data/get-download-link/stock-fin-data-xbx-daily/2026-02-09",
             exc.request_url,
         )
+        self.assertEqual("", exc.response_body)
+
+    def test_request_data_fatal_error_keeps_response_body_preview(self) -> None:
+        response = MagicMock(status_code=401)
+        response.text = "quota exceeded, retry tomorrow"
+
+        with patch("quantclass_sync.requests.request", return_value=response):
+            with self.assertRaises(qcs.FatalRequestError) as ctx:
+                qcs.request_data(
+                    "GET",
+                    url="https://api.quantclass.cn/api/data/fetch/stock-trading-data-daily/latest?uuid=abc",
+                    headers={"api-key": "k"},
+                )
+
+        self.assertEqual(401, ctx.exception.status_code)
+        self.assertIn("quota exceeded", ctx.exception.response_body)
+        response.close.assert_called_once()
+
+    def test_request_data_non_200_retries_close_response_each_attempt(self) -> None:
+        responses = []
+        for _ in range(3):
+            item = MagicMock(status_code=500)
+            item.text = "server-error"
+            responses.append(item)
+
+        with patch("quantclass_sync.time.sleep"), patch(
+            "quantclass_sync.requests.request",
+            side_effect=responses,
+        ):
+            with self.assertRaises(RuntimeError):
+                qcs.request_data(
+                    "GET",
+                    url="https://api.quantclass.cn/api/data/fetch/stock-trading-data-daily/latest?uuid=abc",
+                    headers={"api-key": "k"},
+                    request_profile="latest",
+                )
+
+        for item in responses:
+            item.close.assert_called_once()
 
     def test_probe_downloadable_dates_skips_404_and_continues(self) -> None:
         def fake_get_download_link(

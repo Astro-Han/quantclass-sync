@@ -68,21 +68,27 @@ def _candidate_swap_symbols_for_spot(spot_symbol: str) -> List[str]:
     split_idx = _extract_split_index(normalized, expected_tag="SP")
 
     candidates: List[str] = [normalized, base_symbol]
+    alias = SPECIAL_SPOT_TO_SWAP_ALIAS.get(base_symbol, "")
 
     if split_idx is not None:
         base_no_suffix = base_symbol[:-5]
         candidates.append(f"{base_no_suffix}_SW{split_idx}-USDT")
-
-    alias = SPECIAL_SPOT_TO_SWAP_ALIAS.get(base_symbol, "")
-    if alias:
-        candidates.append(alias)
-        if split_idx is not None:
+        if alias:
             alias_no_suffix = alias[:-5]
             candidates.append(f"{alias_no_suffix}_SW{split_idx}-USDT")
+        if base_symbol.startswith("1000") and len(base_symbol) > 4:
+            unprefixed = base_symbol[4:]
+            unprefixed_no_suffix = unprefixed[:-5]
+            candidates.append(f"{unprefixed_no_suffix}_SW{split_idx}-USDT")
+
+    if alias:
+        candidates.append(alias)
 
     candidates.extend(SWAP_SPLIT_MAP.get(base_symbol, []))
 
-    if not base_symbol.startswith("1000"):
+    if base_symbol.startswith("1000") and len(base_symbol) > 4:
+        candidates.append(base_symbol[4:])
+    else:
         candidates.append(f"1000{base_symbol}")
 
     return candidates
@@ -95,26 +101,30 @@ def _candidate_spot_symbols_for_swap(swap_symbol: str) -> List[str]:
     split_idx = _extract_split_index(normalized, expected_tag="SW")
 
     candidates: List[str] = [normalized, base_symbol]
+    alias = SPECIAL_SWAP_TO_SPOT_ALIAS.get(base_symbol, "")
 
     if split_idx is not None:
         base_no_suffix = base_symbol[:-5]
         candidates.append(f"{base_no_suffix}_SP{split_idx}-USDT")
-
-    alias = SPECIAL_SWAP_TO_SPOT_ALIAS.get(base_symbol, "")
-    if alias:
-        candidates.append(alias)
-        if split_idx is not None:
+        if alias:
             alias_no_suffix = alias[:-5]
             candidates.append(f"{alias_no_suffix}_SP{split_idx}-USDT")
+    if alias:
+        candidates.append(alias)
 
     for spot_symbol, swap_symbols in SWAP_SPLIT_MAP.items():
         if base_symbol in swap_symbols:
-            candidates.append(spot_symbol)
             if split_idx is not None:
                 candidates.append(f"{spot_symbol[:-5]}_SP{split_idx}-USDT")
+            candidates.append(spot_symbol)
 
-    if base_symbol.startswith("1000"):
+    # 1000 前缀双向处理：
+    # swap 含前缀（如 1000SHIB-USDT）→ 尝试无前缀 spot（SHIB-USDT）
+    # swap 无前缀（如 BTC-USDT）→ 尝试含前缀 spot（1000BTC-USDT）
+    if base_symbol.startswith("1000") and len(base_symbol) > 4:
         candidates.append(base_symbol[4:])
+    else:
+        candidates.append(f"1000{base_symbol}")
 
     return candidates
 
@@ -149,4 +159,3 @@ def _group_split_symbols_by_source(data_dict: Dict[str, pd.DataFrame]) -> Dict[s
         base_symbol = _extract_base_symbol(symbol)
         grouped.setdefault(base_symbol, []).append(symbol)
     return grouped
-

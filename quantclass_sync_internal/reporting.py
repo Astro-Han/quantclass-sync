@@ -183,7 +183,7 @@ def _finalize_and_write_report(
 
     report.summary = total
     report.ended_at = utc_now_iso()
-    report.duration_seconds = time.time() - t_run_start
+    report.duration_seconds = round(time.time() - t_run_start, 2)
     report.success_total = sum(1 for x in report.products if x.status == "ok")
     report.failed_total = sum(1 for x in report.products if x.status == "error")
     report.skipped_total = sum(1 for x in report.products if x.status == "skipped")

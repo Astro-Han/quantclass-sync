@@ -97,10 +97,7 @@ def restore_text_file_snapshot(path: Path, snapshot: TextFileSnapshot) -> None:
     if snapshot.exists:
         _write_text_atomic(path, snapshot.content)
         if snapshot.mode is not None:
-            try:
-                os.chmod(path, snapshot.mode)
-            except Exception:
-                pass
+            os.chmod(path, snapshot.mode)
         return
     if path.exists():
         path.unlink()
@@ -345,8 +342,8 @@ def load_secrets_from_file(path: Path) -> Tuple[str, str]:
         if value:
             pairs[key] = value
 
-    api_key_candidates = ["xbx_api_key", "quantclass_api_key", "api_key", "apikey", "key"]
-    hid_candidates = ["xbx_id", "quantclass_hid", "hid", "uuid"]
+    api_key_candidates = ["quantclass_api_key", "api_key"]
+    hid_candidates = ["quantclass_hid", "hid"]
 
     api_key = next((pairs[k] for k in api_key_candidates if k in pairs), "")
     hid = next((pairs[k] for k in hid_candidates if k in pairs), "")

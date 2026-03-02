@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 from rich.console import Console
 
 from .constants import (
+    AGGREGATE_SPLIT_COLS,
     DEFAULT_API_BASE,
     DEFAULT_CATALOG_FILE,
     DEFAULT_PROGRESS_EVERY,
@@ -84,10 +85,17 @@ def log_debug(message: str, event: str = "DEBUG", **fields: object) -> None:
 class FatalRequestError(RuntimeError):
     """参数或权限问题，立即失败，不重试。"""
 
-    def __init__(self, message: str, status_code: Optional[int] = None, request_url: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        status_code: Optional[int] = None,
+        request_url: str = "",
+        response_body: str = "",
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.request_url = request_url
+        self.response_body = response_body
 
 class ProductSyncError(RuntimeError):
     """单产品执行错误（携带 reason_code）。"""
@@ -465,6 +473,18 @@ RULES: Dict[str, DatasetRule] = {
         sort_cols=("交易日期",),
     ),
 }
+
+# 拆分列配置与规则联动校验：避免 AGGREGATE_SPLIT_COLS 与 RULES 长期漂移。
+_SPLIT_COL_KEY_INDEX = {"coin-cap": 1}
+for _product_name, _split_col in AGGREGATE_SPLIT_COLS.items():
+    _rule = RULES.get(_product_name)
+    if _rule is None:
+        raise RuntimeError(f"拆分列配置引用了未知产品规则: {_product_name}")
+    _key_idx = _SPLIT_COL_KEY_INDEX.get(_product_name, 0)
+    if len(_rule.key_cols) <= _key_idx or _rule.key_cols[_key_idx] != _split_col:
+        raise RuntimeError(
+            f"拆分列配置与规则主键不一致: product={_product_name}, split_col={_split_col}, key_cols={_rule.key_cols}"
+        )
 
 def _deduplicate(items: Sequence[str]) -> List[str]:
     """保序去重: 保留第一次出现的元素, 丢弃后续重复项."""

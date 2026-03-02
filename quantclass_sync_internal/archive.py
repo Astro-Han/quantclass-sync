@@ -70,6 +70,7 @@ def safe_extract_tar(path: Path, save_path: Path) -> None:
                 link_target = save_path / Path(member_name).parent / link_name
                 _ensure_within(save_path, link_target)
         tf.extractall(save_path)
+    _scan_extracted_dangerous_nodes(save_path)
 
 def _normalize_member_name(name: str) -> str:
     """把压缩包成员名统一成 POSIX 风格，避免反斜杠绕过路径检查。"""

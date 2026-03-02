@@ -68,6 +68,29 @@ class CredentialPriorityTests(unittest.TestCase):
         self.assertEqual((compat_api_key, compat_hid), (update_api_key, update_hid))
         self.assertEqual("mixed(api=setup_secrets,hid=env)", credential_source)
 
+    def test_compat_resolve_credentials_ignores_overly_broad_key_names(self) -> None:
+        self.secrets_file.write_text("key=wrong_api\nuuid=wrong_hid\n", encoding="utf-8")
+
+        with patch.dict(
+            "os.environ",
+            {"QUANTCLASS_API_KEY": "", "QUANTCLASS_HID": ""},
+            clear=False,
+        ):
+            compat_api_key, compat_hid = resolve_credentials(
+                cli_api_key="",
+                cli_hid="",
+                secrets_file=self.secrets_file,
+            )
+            update_api_key, update_hid, credential_source = resolve_credentials_for_update(
+                cli_api_key="",
+                cli_hid="",
+                secrets_file=self.secrets_file,
+            )
+
+        self.assertEqual(("", ""), (compat_api_key, compat_hid))
+        self.assertEqual((compat_api_key, compat_hid), (update_api_key, update_hid))
+        self.assertEqual("missing", credential_source)
+
     def test_global_options_verbose_default_is_false(self) -> None:
         verbose_option = inspect.signature(cli_module.global_options).parameters["verbose"].default
         self.assertIsInstance(verbose_option, typer.models.OptionInfo)

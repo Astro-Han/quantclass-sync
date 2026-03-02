@@ -20,6 +20,31 @@ try:
 except Exception:  # pragma: no cover
     fcntl = None
 
+try:
+    import msvcrt
+except Exception:  # pragma: no cover
+    msvcrt = None
+
+LOCK_POLL_INTERVAL_SECONDS = 0.05
+
+
+def _is_data_like_cell(cell: str) -> bool:
+    """识别更像“数据值”而不是“列名”的内容。"""
+
+    value = cell.strip().lstrip("\ufeff")
+    if not value:
+        return False
+    if re.fullmatch(r"[+-]?\d+(?:\.\d+)?", value):
+        return True
+    if re.fullmatch(r"\d{4}[-/]\d{2}[-/]\d{2}(?:[ T].*)?", value):
+        return True
+    if re.fullmatch(r"\d{8}(?:[ T].*)?", value):
+        return True
+    if re.fullmatch(r"[A-Za-z]{1,4}\d{4,}", value):
+        return True
+    return False
+
+
 def decode_text(path: Path, preferred_encoding: Optional[str]) -> Tuple[str, str]:
     """尝试多个编码读取文本，返回 (文本, 实际编码)。"""
 
@@ -59,7 +84,8 @@ def looks_like_header(row: Sequence[str]) -> bool:
 
     if not row:
         return False
-    first = row[0].strip().lstrip("\ufeff")
+    normalized = [_normalize_header_cell(cell) for cell in row]
+    first = normalized[0]
     known_first_col = {
         "股票代码",
         "candle_end_time",
@@ -75,11 +101,19 @@ def looks_like_header(row: Sequence[str]) -> bool:
         return True
     if first.startswith(("股票代码", "candle_end_time", "candle_begin_time", "stock_code", "symbol")):
         return True
-    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", first):
+    non_empty = [cell for cell in normalized if cell]
+    if not non_empty:
+        return False
+
+    identifier_hits = sum(1 for cell in non_empty if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cell))
+    keyword_hits = sum(1 for cell in non_empty if re.search(r"(date|time|code|symbol|股票|交易|指数|日期)", cell, re.IGNORECASE))
+    data_like_hits = sum(1 for cell in non_empty if _is_data_like_cell(cell))
+
+    if keyword_hits >= 1 and identifier_hits >= max(1, len(non_empty) // 2):
         return True
-    if re.search(r"(date|time|code|symbol|股票|交易|指数|日期)", first, re.IGNORECASE):
+    if keyword_hits >= max(1, len(non_empty) // 3) and data_like_hits <= max(1, len(non_empty) // 4):
         return True
-    return False
+    return identifier_hits >= 2 and data_like_hits == 0
 
 def detect_delimiter(lines: Sequence[str]) -> str:
     """从样本文本推断分隔符。"""
@@ -284,6 +318,8 @@ def merge_payload(existing: Optional[CsvPayload], incoming: CsvPayload, rule: Da
         )
 
     target_index = _build_normalized_header_index(target_header)
+    # 以下两次调用仅用于校验：_build_normalized_header_index 发现重复列名时会抛 RuntimeError，
+    # 返回值不使用，副作用（提前报错）才是目的。
     _build_normalized_header_index(incoming.header)
     if existing and existing.header:
         _build_normalized_header_index(existing.header)
@@ -360,14 +396,51 @@ def _locked_target(lock_path: Path) -> Iterator[None]:
     """为目标文件加互斥锁，避免并发 read-merge-write 互相覆盖。"""
 
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
-        if fcntl is not None:
+    if fcntl is not None:
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            if fcntl is not None:
+            try:
+                yield
+            finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        return
+
+    if msvcrt is not None:
+        with lock_path.open("a+b") as lock_file:
+            # msvcrt.locking 需要锁定明确字节范围，这里固定锁第 1 个字节。
+            lock_file.seek(0)
+            lock_file.write(b"\0")
+            lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+
+    lock_fd: Optional[int] = None
+    while lock_fd is None:
+        try:
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        except FileExistsError:
+            time.sleep(LOCK_POLL_INTERVAL_SECONDS)
+        except Exception as exc:
+            raise RuntimeError(f"无法获取文件锁，已停止写入: {lock_path}") from exc
+
+    try:
+        try:
+            os.write(lock_fd, str(os.getpid()).encode("ascii", "ignore"))
+        except Exception:
+            pass
+        yield
+    finally:
+        os.close(lock_fd)
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
 def sync_payload_to_target(incoming: CsvPayload, target: Path, rule: DatasetRule, dry_run: bool) -> Tuple[str, int, SortAudit]:
     """

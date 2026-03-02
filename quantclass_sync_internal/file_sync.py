@@ -17,6 +17,7 @@ from .constants import (
     REASON_MERGE_ERROR,
     REASON_MIRROR_FALLBACK,
     REASON_MIRROR_UNKNOWN,
+    REASON_NO_VALID_OUTPUT,
     REASON_OK,
     REASON_UNKNOWN_HEADER_MERGE,
     STRATEGY_MIRROR_UNKNOWN,
@@ -72,6 +73,20 @@ def normalize_source_relpath(src_rel_path: Path, product: str) -> Path:
         return Path(src_rel_path.name)
     return Path(*parts)
 
+
+def _worst_reason(current: str, incoming: str) -> str:
+    """返回两个 reason_code 中更严重的一个。"""
+
+    severity = {
+        REASON_OK: 0,
+        REASON_MIRROR_FALLBACK: 10,
+        REASON_NO_VALID_OUTPUT: 20,
+        REASON_MERGE_ERROR: 30,
+    }
+    if severity.get(incoming, 0) > severity.get(current, 0):
+        return incoming
+    return current
+
 def is_daily_aggregate_file(src_rel_path: Path) -> bool:
     """判断是否为按天聚合文件（例如 2026-02-06.csv）。"""
 
@@ -107,12 +122,6 @@ def infer_target_relpath(src_rel_path: Path, product: str) -> Optional[Path]:
         if match:
             return Path(product) / match.group(1) / src_rel_path.name
         return None
-
-    if product == "period_offset":
-        if src_rel_path.name == "period_offset.csv":
-            return Path("period_offset.csv")
-        if src_rel_path.name == "period_offset.ts":
-            return Path("period_offset.ts")
 
     # 通用兜底：未知产品按原相对路径镜像
     if not src_rel_path.parts:
@@ -397,13 +406,13 @@ def sync_known_product(product: str, extract_path: Path, data_root: Path, dry_ru
             agg, agg_reason = sync_daily_aggregate_file(src=src, product=product, data_root=data_root, dry_run=dry_run)
             stats.merge(agg)
             if agg_reason != REASON_OK:
-                reason_code = agg_reason
+                reason_code = _worst_reason(reason_code, agg_reason)
             continue
 
         rel_path = infer_target_relpath(normalized_rel_path, product)
         if rel_path is None:
             stats.skipped_files += 1
-            reason_code = REASON_MIRROR_FALLBACK
+            reason_code = _worst_reason(reason_code, REASON_MIRROR_FALLBACK)
             log_info(f"[{product}] 无法映射路径，已跳过: {src_rel_path}", event="SYNC_FAIL")
             continue
 
@@ -419,13 +428,17 @@ def sync_known_product(product: str, extract_path: Path, data_root: Path, dry_ru
                 # 没命中规则时降级镜像，保持可用性优先。
                 result = sync_raw_file(src=src, target=target, dry_run=dry_run)
                 apply_file_result(stats, result=result)
-                reason_code = REASON_MIRROR_FALLBACK
+                reason_code = _worst_reason(reason_code, REASON_MIRROR_FALLBACK)
             else:
                 # 命中规则时做增量合并（可减少重复写入）。
                 result, added_rows, sort_audit = sync_csv_file(src=src, target=target, rule=rule, dry_run=dry_run)
                 apply_file_result(stats, result=result, added_rows=added_rows, sort_audit=sort_audit)
 
         _log_sync_progress(product, idx, total_files, stats)
+
+    effective_outputs = stats.created_files + stats.updated_files + stats.unchanged_files
+    if effective_outputs == 0:
+        reason_code = _worst_reason(reason_code, REASON_NO_VALID_OUTPUT)
 
     return stats, reason_code
 

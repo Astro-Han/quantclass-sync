@@ -6,7 +6,7 @@ import re
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
 import requests
@@ -27,6 +27,10 @@ def resolve_request_policy(request_profile: str, request_policies: Dict[str, Dic
 HTTP_ATTEMPTS_BY_PRODUCT: Dict[str, int] = defaultdict(int)
 
 HTTP_FAILURES_BY_PRODUCT: Dict[str, int] = defaultdict(int)
+
+_ORIGINAL_REQUEST_FUNC = requests.request
+_SESSION_SOURCE_ID = 0
+_SESSION: Optional[requests.Session] = None
 
 def _reset_http_metrics() -> None:
     """每次命令执行前重置 HTTP 统计，避免跨运行串数据。"""
@@ -57,6 +61,50 @@ def _http_metrics_for_product(product: str) -> Tuple[int, int]:
     if not name:
         return 0, 0
     return int(HTTP_ATTEMPTS_BY_PRODUCT.get(name, 0)), int(HTTP_FAILURES_BY_PRODUCT.get(name, 0))
+
+def _request_with_pool(method: str, url: str, headers: Dict[str, str], **kwargs) -> requests.Response:
+    """
+    统一请求分发：
+    - 默认走 Session 复用连接池
+    - 若 requests.request 被 monkey patch（测试桩），优先尊重 patch
+    """
+
+    global _SESSION, _SESSION_SOURCE_ID
+    request_func = getattr(requests, "request", None)
+    if not callable(request_func):
+        raise RuntimeError("requests 模块缺少 request 方法。")
+
+    if request_func is not _ORIGINAL_REQUEST_FUNC:
+        return request_func(method=method, url=url, headers=headers, **kwargs)
+
+    module_id = id(requests)
+    if _SESSION is None or _SESSION_SOURCE_ID != module_id:
+        session_factory = getattr(requests, "Session", None)
+        _SESSION = session_factory() if callable(session_factory) else None
+        _SESSION_SOURCE_ID = module_id
+
+    if _SESSION is not None:
+        return _SESSION.request(method=method, url=url, headers=headers, **kwargs)
+    return request_func(method=method, url=url, headers=headers, **kwargs)
+
+def _response_body_preview(response: requests.Response, limit: int = 500) -> str:
+    """提取响应体摘要，失败时返回空字符串。"""
+
+    try:
+        text = getattr(response, "text", "")
+    except Exception:
+        return ""
+    return str(text or "")[:limit]
+
+def _close_response_quietly(response: requests.Response) -> None:
+    """尽力关闭响应，避免重试链路连接泄漏。"""
+
+    close_fn = getattr(response, "close", None)
+    if callable(close_fn):
+        try:
+            close_fn()
+        except Exception:
+            pass
 
 def request_data(
     method: str,
@@ -100,7 +148,7 @@ def request_data(
         request_kwargs = dict(kwargs)
         request_kwargs.setdefault("timeout", timeout_seconds)
         try:
-            response = requests.request(method=method, url=url, headers=headers, **request_kwargs)
+            response = _request_with_pool(method=method, url=url, headers=headers, **request_kwargs)
         except requests.RequestException as exc:
             _record_http_failure(product)
             if attempt >= max_attempts:
@@ -117,8 +165,15 @@ def request_data(
 
         _record_http_failure(product)
         message = status_messages.get(response.status_code, f"未知错误（HTTP {response.status_code}）")
+        body_preview = _response_body_preview(response)
+        _close_response_quietly(response)
         if response.status_code in {400, 401, 403, 404}:
-            raise FatalRequestError(message, status_code=response.status_code, request_url=url.split("?")[0])
+            raise FatalRequestError(
+                message,
+                status_code=response.status_code,
+                request_url=url.split("?")[0],
+                response_body=body_preview,
+            )
         if attempt >= max_attempts:
             raise RuntimeError(message)
         time.sleep(min(2 ** (attempt - 1), backoff_cap_seconds))

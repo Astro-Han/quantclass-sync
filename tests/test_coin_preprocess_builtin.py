@@ -14,10 +14,12 @@ from coin_preprocess_internal.csv_source import (
     _build_incremental_rows,
     _detect_relist_segments,
     _prepare_symbol_frame,
+    _read_tail_lines,
     _read_symbol_csv,
     _sanitize_candle_time_rows,
 )
-from coin_preprocess_internal.runner import _overlap_matches_existing, _resolve_source_delta
+from coin_preprocess_internal.runner import _has_relist_break, _overlap_matches_existing, _resolve_source_delta
+from coin_preprocess_internal.symbol_mapper import _apply_special_symbol_mapping
 from coin_preprocess_builtin import (
     OUTPUT_PIVOT_SPOT,
     OUTPUT_PIVOT_SWAP,
@@ -156,6 +158,18 @@ class CoinPreprocessBuiltinTests(unittest.TestCase):
         self.assertTrue((output_dir / OUTPUT_PIVOT_SPOT).exists())
         self.assertTrue((output_dir / OUTPUT_PIVOT_SWAP).exists())
 
+    def test_full_rebuild_writes_timestamp_file(self) -> None:
+        self._prepare_basic_dual_side()
+
+        summary = run_coin_preprocess_builtin(self.root)
+        self.assertEqual("full_rebuild", summary.mode)
+
+        timestamp_path = self.root / PREPROCESS_PRODUCT / TIMESTAMP_FILE_NAME
+        self.assertTrue(timestamp_path.exists())
+        date_text, runtime_text = [part.strip() for part in timestamp_path.read_text(encoding="utf-8").split(",", 1)]
+        self.assertEqual("2026-02-09", date_text)
+        self.assertFalse(pd.isna(pd.to_datetime(runtime_text, errors="coerce")))
+
     def test_incremental_patch_appends_single_symbol(self) -> None:
         self._prepare_basic_dual_side()
         first = run_coin_preprocess_builtin(self.root)
@@ -179,6 +193,28 @@ class CoinPreprocessBuiltinTests(unittest.TestCase):
         spot_dict = pd.read_pickle(output_dir / OUTPUT_SPOT_DICT)
         self.assertIn("AAA-USDT", spot_dict)
         self.assertEqual(pd.Timestamp("2026-02-09 02:00:00"), pd.to_datetime(spot_dict["AAA-USDT"]["candle_begin_time"].max()))
+
+    def test_incremental_patch_updates_timestamp_file(self) -> None:
+        self._prepare_basic_dual_side()
+        run_coin_preprocess_builtin(self.root)
+
+        timestamp_path = self.root / PREPROCESS_PRODUCT / TIMESTAMP_FILE_NAME
+        timestamp_path.write_text("2000-01-01,2000-01-01 00:00:00\n", encoding="utf-8")
+        self._append_symbol_row(
+            SPOT_PRODUCT,
+            "AAA-USDT",
+            ("2026-02-09 02:00:00", 2.0, 2.4, 1.9, 2.2, 30),
+            is_swap=False,
+        )
+        target = self.root / SPOT_PRODUCT / "AAA-USDT.csv"
+        os.utime(target, (time.time() + 2, time.time() + 2))
+
+        summary = run_coin_preprocess_builtin(self.root)
+        self.assertEqual("incremental_patch", summary.mode)
+
+        date_text, runtime_text = [part.strip() for part in timestamp_path.read_text(encoding="utf-8").split(",", 1)]
+        self.assertEqual("2026-02-09", date_text)
+        self.assertNotEqual("2000-01-01 00:00:00", runtime_text)
 
     def test_mtime_changed_without_new_rows_rebuilds_symbol(self) -> None:
         self._prepare_basic_dual_side()
@@ -347,6 +383,40 @@ class CoinPreprocessBuiltinTests(unittest.TestCase):
         spot_dict = pd.read_pickle(self.root / PREPROCESS_PRODUCT / OUTPUT_SPOT_DICT)
         self.assertIn("AAA_SP0-USDT", spot_dict)
         self.assertIn("AAA-USDT", spot_dict)
+
+    def test_has_relist_break_returns_true_when_prev_close_is_zero(self) -> None:
+        triggered = _has_relist_break(
+            prev_time=pd.Timestamp("2026-02-09 00:00:00"),
+            prev_close=0.0,
+            next_time=pd.Timestamp("2026-02-11 00:00:00"),
+            next_open=3.0,
+        )
+        self.assertTrue(triggered)
+
+    def test_special_symbol_mapping_prefers_same_split_index_alias(self) -> None:
+        ts = pd.to_datetime(["2026-02-09 00:00:00"])
+        spot_dict = {
+            "LUNA_SP0-USDT": pd.DataFrame({"candle_begin_time": ts}),
+            "LUNA-USDT": pd.DataFrame({"candle_begin_time": ts}),
+        }
+        swap_dict = {
+            "LUNA2_SW0-USDT": pd.DataFrame({"candle_begin_time": ts}),
+            "LUNA2-USDT": pd.DataFrame({"candle_begin_time": ts}),
+        }
+
+        _apply_special_symbol_mapping(spot_dict=spot_dict, swap_dict=swap_dict)
+
+        self.assertEqual("LUNA2_SW0-USDT", spot_dict["LUNA_SP0-USDT"]["symbol_swap"].iloc[0])
+        self.assertEqual("LUNA_SP0-USDT", swap_dict["LUNA2_SW0-USDT"]["symbol_spot"].iloc[0])
+
+    def test_special_symbol_mapping_supports_unprefix_1000_spot_to_swap(self) -> None:
+        ts = pd.to_datetime(["2026-02-09 00:00:00"])
+        spot_dict = {"1000SHIB-USDT": pd.DataFrame({"candle_begin_time": ts})}
+        swap_dict = {"SHIB-USDT": pd.DataFrame({"candle_begin_time": ts})}
+
+        _apply_special_symbol_mapping(spot_dict=spot_dict, swap_dict=swap_dict)
+
+        self.assertEqual("SHIB-USDT", spot_dict["1000SHIB-USDT"]["symbol_swap"].iloc[0])
 
     def test_internal_relist_break_in_new_raw_triggers_single_symbol_rebuild(self) -> None:
         self._prepare_basic_dual_side()
@@ -534,6 +604,26 @@ class CoinPreprocessBuiltinTests(unittest.TestCase):
             segments,
         )
 
+    def test_read_tail_lines_drops_truncated_first_line(self) -> None:
+        csv_path = self.root / "tail-lines.csv"
+        csv_path.write_text(
+            "备注,,,,\n"
+            "c1,c2,c3\n"
+            "A,1,2\n"
+            "B,3,4\n"
+            "C,5,6\n",
+            encoding="utf-8",
+        )
+
+        lines = _read_tail_lines(
+            path=csv_path,
+            encoding="utf-8",
+            max_lines=5,
+            max_bytes=10,
+        )
+
+        self.assertEqual(["C,5,6"], lines)
+
     def test_incremental_and_rebuild_fail_keeps_incremental_as_cause(self) -> None:
         self._prepare_basic_dual_side()
         run_coin_preprocess_builtin(self.root)
@@ -565,6 +655,23 @@ class CoinPreprocessBuiltinTests(unittest.TestCase):
         self.assertEqual(set(), removed)
         warn_mock.assert_called_once()
 
+    def test_resolve_source_delta_marks_same_second_mtime_as_changed(self) -> None:
+        class _FixedPath:
+            def __init__(self, st_mtime: float) -> None:
+                self._st_mtime = st_mtime
+
+            def stat(self):
+                return type("Stat", (), {"st_mtime": self._st_mtime})()
+
+        baseline_runtime = pd.Timestamp("2026-02-10 00:00:00")
+        changed, removed = _resolve_source_delta(
+            source_files={"AAA-USDT": _FixedPath(baseline_runtime.to_pydatetime().timestamp())},
+            baseline_runtime=baseline_runtime,
+            baseline_sources={"AAA-USDT"},
+        )
+        self.assertEqual({"AAA-USDT"}, changed)
+        self.assertEqual(set(), removed)
+
     def test_baseline_read_exception_logs_warning_then_full_rebuild(self) -> None:
         self._prepare_basic_dual_side()
 
@@ -576,6 +683,21 @@ class CoinPreprocessBuiltinTests(unittest.TestCase):
         self.assertEqual("full_rebuild", summary.mode)
         warn_mock.assert_called_once()
         self.assertEqual("RuntimeError", warn_mock.call_args.args[1])
+
+    def test_runtime_timestamp_read_error_falls_back_to_full_rebuild(self) -> None:
+        self._prepare_basic_dual_side()
+        run_coin_preprocess_builtin(self.root)
+
+        output_dir = self.root / PREPROCESS_PRODUCT
+        ts_path = output_dir / TIMESTAMP_FILE_NAME
+        if ts_path.exists():
+            ts_path.unlink()
+        ts_path.mkdir(parents=True, exist_ok=True)
+
+        summary = run_coin_preprocess_builtin(self.root)
+        self.assertEqual("full_rebuild", summary.mode)
+        self.assertTrue((output_dir / OUTPUT_SPOT_DICT).exists())
+        self.assertTrue((output_dir / OUTPUT_SWAP_DICT).exists())
 
     def test_overlap_matches_existing_true_for_identical_rows(self) -> None:
         overlap_raw = pd.DataFrame(
@@ -845,7 +967,7 @@ class CoinPreprocessBuiltinTests(unittest.TestCase):
                 raise RuntimeError("inject_replace_failure")
             real_replace(src, dst)
 
-        with patch("coin_preprocess_builtin.os.replace", side_effect=flaky_replace):
+        with patch("coin_preprocess_internal.pivot.os.replace", side_effect=flaky_replace):
             with self.assertRaises(RuntimeError):
                 run_coin_preprocess_builtin(self.root)
 

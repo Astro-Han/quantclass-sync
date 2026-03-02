@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import os
 import shutil
 import sqlite3
@@ -33,6 +32,7 @@ from .constants import (
     REASON_NETWORK_ERROR,
     REASON_NO_DATA_FOR_DATE,
     REASON_NO_LOCAL_PRODUCTS,
+    REASON_NO_VALID_OUTPUT,
     REASON_PREPROCESS_DRY_RUN,
     REASON_PREPROCESS_FAILED,
     REASON_PREPROCESS_FALLBACK_FULL_OK,
@@ -79,10 +79,10 @@ from .reporting import (
     resolve_report_path,
 )
 from .status_store import (
-    connect_status_db,
     export_status_json,
     load_product_status,
     normalize_data_date,
+    open_status_db,
     read_local_timestamp_date,
     should_skip_by_timestamp,
     status_json_path,
@@ -218,10 +218,10 @@ def _is_empty_download_link_error(exc: Exception) -> bool:
 def _raise_download_stage_error(product: str, exc: Exception) -> NoReturn:
     """把下载阶段底层异常统一映射为 ProductSyncError。"""
 
-    if _is_no_data_request_error(exc):
+    if _is_no_data_request_error(exc) or _is_empty_download_link_error(exc):
         raise ProductSyncError(
             message=(
-                f"产品 {product} 下载失败；该日期无可下载数据（HTTP 404）；"
+                f"产品 {product} 下载失败；该日期无可下载数据（HTTP 404/空下载链接）；"
                 f"建议：确认产品与日期是否匹配。原始错误：{exc}"
             ),
             reason_code=REASON_NO_DATA_FOR_DATE,
@@ -511,13 +511,25 @@ def _resolve_requested_dates_for_plan(
             hid=hid,
             headers=headers,
         )
-        # latest 语义保持原样：这里不做业务日裁剪，只做规范化和去重排序。
-        api_latest_candidates = _normalize_date_queue(
-            api_latest_candidates,
-            product=product_name,
-            apply_business_day_filter=False,
+    except Exception as exc:
+        # latest 获取失败时保持 fail-open，继续执行旧兜底路径。
+        log_info(
+            f"[{plan.name}] timestamp 门控异常，回退执行更新。",
+            event="PRODUCT_PLAN",
+            decision="fallback_run",
+            error=str(exc),
         )
-        api_latest_date = api_latest_candidates[-1] if api_latest_candidates else None
+        return [requested_date_for_plan], False
+
+    # latest 语义保持原样：这里不做业务日裁剪，只做规范化和去重排序。
+    api_latest_candidates = _normalize_date_queue(
+        api_latest_candidates,
+        product=product_name,
+        apply_business_day_filter=False,
+    )
+    api_latest_date = api_latest_candidates[-1] if api_latest_candidates else None
+
+    try:
         # 2) 读取本地 timestamp 第一列日期
         local_date = read_local_timestamp_date(command_ctx.data_root, product_name)
         # 3) 如果本地已经不落后，则直接跳过，不进入下载链路
@@ -592,14 +604,16 @@ def _resolve_requested_dates_for_plan(
         )
         return catchup_dates, False
     except Exception as exc:
-        # 门控异常时采用 fail-open（失败放行）策略，避免“该更新却被误跳过”。
+        # latest 已拿到时，门控后续异常回退到 latest，避免丢失候选日期。
+        fallback_date = api_latest_date or requested_date_for_plan
         log_info(
             f"[{plan.name}] timestamp 门控异常，回退执行更新。",
             event="PRODUCT_PLAN",
             decision="fallback_run",
             error=str(exc),
+            fallback_date=fallback_date,
         )
-        return [requested_date_for_plan], False
+        return [fallback_date], False
 
 def _upsert_product_status_after_success(
     conn: Optional[sqlite3.Connection],
@@ -619,23 +633,6 @@ def _upsert_product_status_after_success(
     upsert_product_status(conn, status)
     write_local_timestamp(command_ctx.data_root, product, actual_time)
 
-
-def _callable_accepts_run_id(func: object) -> bool:
-    """判断可调用对象是否可接收 run_id 参数（兼容历史测试桩）。"""
-
-    target = func
-    side_effect = getattr(func, "side_effect", None)
-    if callable(side_effect):
-        target = side_effect
-
-    try:
-        signature = inspect.signature(target)
-    except (TypeError, ValueError):
-        return False
-
-    if "run_id" in signature.parameters:
-        return True
-    return any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
 
 def _collect_preprocess_source_successes(report: RunReport) -> List[ProductRunResult]:
     """
@@ -918,21 +915,53 @@ def _execute_plans(
                     "data_root": command_ctx.data_root,
                     "work_dir": command_ctx.work_dir,
                     "dry_run": command_ctx.dry_run,
+                    "run_id": command_ctx.run_id,
                 }
-                if _callable_accepts_run_id(process_product):
-                    process_kwargs["run_id"] = command_ctx.run_id
                 product, actual_time, stats, source_path, reason_code = process_product(
                     **process_kwargs,
                 )
                 elapsed = time.time() - t_product_start
                 total.merge(stats)
-                # 先完成状态落盘，再记录 ok，避免状态写失败时出现 ok/error 双记录。
-                _upsert_product_status_after_success(
-                    conn=conn,
-                    command_ctx=command_ctx,
-                    product=product,
-                    actual_time=actual_time,
-                )
+                if reason_code == REASON_NO_VALID_OUTPUT:
+                    _append_result(
+                        report,
+                        product=product,
+                        status="skipped",
+                        strategy=plan.strategy,
+                        reason_code=reason_code,
+                        date_time=actual_time,
+                        elapsed=elapsed,
+                        stats=stats,
+                        source_path=source_path,
+                        error="同步未产生可用输出，已跳过状态推进。",
+                        stage="SYNC",
+                        event_detail="no_valid_output",
+                    )
+                    log_info(
+                        f"[{plan.name}] 同步无有效产出，已跳过状态推进。",
+                        event="SYNC_SKIP",
+                        reason_code=reason_code,
+                    )
+                    report.phase_sync_seconds += max(0.0, time.time() - t_sync_phase)
+                    continue
+
+                status_persist_warning = ""
+                try:
+                    _upsert_product_status_after_success(
+                        conn=conn,
+                        command_ctx=command_ctx,
+                        product=product,
+                        actual_time=actual_time,
+                    )
+                except Exception as status_exc:
+                    status_persist_warning = (
+                        f"状态持久化失败（已忽略，不影响本次成功结果）: {status_exc}"
+                    )
+                    log_info(
+                        f"[{plan.name}] {status_persist_warning}",
+                        event="SYNC_WARN",
+                        reason_code=reason_code,
+                    )
                 _append_result(
                     report,
                     product=product,
@@ -943,6 +972,7 @@ def _execute_plans(
                     elapsed=elapsed,
                     stats=stats,
                     source_path=source_path,
+                    event_detail=status_persist_warning,
                 )
                 report.phase_sync_seconds += max(0.0, time.time() - t_sync_phase)
                 continue
@@ -1095,29 +1125,41 @@ def run_update_with_settings(
             no_executable_products=True,
         )
 
-    conn: Optional[sqlite3.Connection] = None
-    if not command_ctx.dry_run:
-        conn = connect_status_db(command_ctx.data_root)
-    try:
+    if command_ctx.dry_run:
         total, has_error, t_run_start = _execute_plans(
             plans,
             command_ctx,
             report,
             requested_date_time="",
-            conn=conn,
+            conn=None,
             force_update=force_update,
             catch_up_to_latest=True,
         )
         preprocess_has_error = _maybe_run_coin_preprocess(
             command_ctx=command_ctx,
             report=report,
-            conn=conn,
+            conn=None,
         )
         has_error = has_error or preprocess_has_error
-        if conn is not None:
-            export_status_json(conn, status_json_path(command_ctx.data_root))
-    finally:
-        if conn is not None:
-            conn.close()
+    else:
+        with open_status_db(command_ctx.data_root) as conn:
+            try:
+                total, has_error, t_run_start = _execute_plans(
+                    plans,
+                    command_ctx,
+                    report,
+                    requested_date_time="",
+                    conn=conn,
+                    force_update=force_update,
+                    catch_up_to_latest=True,
+                )
+                preprocess_has_error = _maybe_run_coin_preprocess(
+                    command_ctx=command_ctx,
+                    report=report,
+                    conn=conn,
+                )
+                has_error = has_error or preprocess_has_error
+            finally:
+                export_status_json(conn, status_json_path(command_ctx.data_root))
 
     return _finalize_and_write_report(report, total, has_error, t_run_start, report_path)

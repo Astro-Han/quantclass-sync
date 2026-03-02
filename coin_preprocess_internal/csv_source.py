@@ -89,7 +89,11 @@ def _read_tail_lines(path: Path, encoding: str, max_lines: int, max_bytes: int) 
         data = fp.read(read_size)
 
     text = data.decode(encoding, errors="ignore")
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    lines_raw = text.splitlines()
+    if read_size < file_size and lines_raw:
+        # 读取窗口起点可能落在半截行上，第一行直接丢弃更安全。
+        lines_raw = lines_raw[1:]
+    lines = [line.strip() for line in lines_raw if line.strip()]
     if not lines:
         return []
     return lines[-max_lines:]

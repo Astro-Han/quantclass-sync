@@ -8,9 +8,10 @@ import re
 import shutil
 import sqlite3
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterator, List, Optional
 
 from .constants import (
     DEFAULT_REPORT_DIR,
@@ -22,9 +23,50 @@ from .constants import (
     SYNC_META_DIRNAME,
     TIMESTAMP_FILE_NAME,
 )
-from .models import ProductStatus, RuntimePaths, utc_now_iso
+from .models import ProductStatus, RuntimePaths, log_info, utc_now_iso
 
 _RUN_SCOPE_PATTERN = re.compile(r"^\d{8}-\d{6}(?:[-_].+)?$")
+
+
+def _status_db_has_rows(path: Path) -> bool:
+    """判断状态库是否可用（存在 product_status 且至少 1 行）。"""
+
+    if not path.exists():
+        return False
+    if path.stat().st_size <= 0:
+        return False
+
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        table_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='product_status' LIMIT 1"
+        ).fetchone()
+        if not table_exists:
+            return False
+        row_exists = conn.execute("SELECT 1 FROM product_status LIMIT 1").fetchone()
+        return row_exists is not None
+    except Exception:
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _status_json_has_rows(path: Path) -> bool:
+    """判断状态 JSON 是否可用（可解析且非空对象）。"""
+
+    if not path.exists():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return isinstance(payload, dict) and bool(payload)
+
+
+def _has_valid_runtime_state(status_db: Path, status_json: Path) -> bool:
+    return _status_db_has_rows(status_db) or _status_json_has_rows(status_json)
 
 def resolve_runtime_paths(data_root: Path) -> RuntimePaths:
     """
@@ -42,14 +84,14 @@ def resolve_runtime_paths(data_root: Path) -> RuntimePaths:
 
     new_status_db = data_root / META_STATUS_DB_REL
     new_status_json = data_root / META_STATUS_JSON_REL
-    new_has_state = new_status_db.exists() or new_status_json.exists()
+    new_has_valid_state = _has_valid_runtime_state(new_status_db, new_status_json)
 
     legacy_status_db = data_root / LEGACY_STATUS_DB_REL
     legacy_status_json = data_root / LEGACY_STATUS_JSON_REL
-    legacy_has_state = legacy_status_db.exists() or legacy_status_json.exists()
+    legacy_has_valid_state = _has_valid_runtime_state(legacy_status_db, legacy_status_json)
 
     # 迁移保护：旧路径有状态且新路径还没初始化时，优先读旧路径，避免同一批数据写到两套状态库。
-    if legacy_has_state and not new_has_state:
+    if legacy_has_valid_state and not new_has_valid_state:
         return RuntimePaths(
             metadata_root=metadata_root,
             status_db=legacy_status_db,
@@ -123,7 +165,13 @@ def write_local_timestamp(data_root: Path, product: str, data_date: str) -> None
 
     normalized = normalize_data_date(data_date)
     if not normalized:
-        return
+        log_info(
+            "timestamp 写入失败：日期格式无效。",
+            event="TIMESTAMP",
+            product=product,
+            data_date=data_date,
+        )
+        raise ValueError(f"非法数据日期：{data_date}")
     path = data_root / product / TIMESTAMP_FILE_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     local_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -240,6 +288,17 @@ def connect_status_db(data_root: Path, read_only: bool = False) -> sqlite3.Conne
     conn.row_factory = sqlite3.Row
     ensure_status_table(conn)
     return conn
+
+
+@contextmanager
+def open_status_db(data_root: Path, read_only: bool = False) -> Iterator[sqlite3.Connection]:
+    """上下文化连接状态库，确保连接总是被关闭。"""
+
+    conn = connect_status_db(data_root, read_only=read_only)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 def load_product_status(conn: sqlite3.Connection, product: str) -> Optional[ProductStatus]:
     """读取单产品状态。"""

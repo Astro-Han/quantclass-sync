@@ -26,15 +26,26 @@ from quantclass_sync_internal.constants import (
     EXIT_CODE_SUCCESS,
     PREPROCESS_PRODUCT,
     PRODUCT_MODE_LOCAL_SCAN,
+    REASON_EXTRACT_ERROR,
+    REASON_INVALID_EXPLICIT_PRODUCT,
     REASON_MERGE_ERROR,
+    REASON_MIRROR_FALLBACK,
     REASON_MIRROR_UNKNOWN,
     REASON_NO_DATA_FOR_DATE,
+    REASON_NO_LOCAL_PRODUCTS,
+    REASON_NO_VALID_OUTPUT,
+    REASON_NETWORK_ERROR,
     REASON_OK,
+    REASON_PREPROCESS_FULL_REBUILD_OK,
+    REASON_PREPROCESS_OK,
     REASON_PREPROCESS_DRY_RUN,
     REASON_PREPROCESS_FAILED,
     REASON_PREPROCESS_FALLBACK_FULL_OK,
     REASON_PREPROCESS_INCREMENTAL_OK,
     REASON_PREPROCESS_SKIPPED_NO_DELTA,
+    REASON_UNEXPECTED_ERROR,
+    REASON_UNKNOWN_HEADER_MERGE,
+    REASON_UNKNOWN_LOCAL_PRODUCT,
     REASON_UP_TO_DATE,
     STRATEGY_MERGE_KNOWN,
     TIMESTAMP_FILE_NAME,
@@ -71,9 +82,9 @@ from quantclass_sync_internal.models import (
 from quantclass_sync_internal.status_store import connect_status_db, load_product_status
 
 # --- 直接暴露给外部 patch 的原子函数（保持旧语义） ---
-get_latest_times = _http.get_latest_times
-get_latest_time = _http.get_latest_time
-get_download_link = _http.get_download_link
+_get_latest_times_impl = _http.get_latest_times
+_get_latest_time_impl = _http.get_latest_time
+_get_download_link_impl = _http.get_download_link
 parse_latest_time_candidates = _http.parse_latest_time_candidates
 _http_metrics_for_product = _http._http_metrics_for_product
 _reset_http_metrics = _http._reset_http_metrics
@@ -107,18 +118,59 @@ _maybe_run_coin_preprocess_impl = _orchestrator._maybe_run_coin_preprocess
 run_update_with_settings_impl = _orchestrator.run_update_with_settings
 _request_data_impl = _http.request_data
 
+_http_bind_state: tuple[int, int] | None = None
+_orchestrator_bind_state: tuple[int, ...] | None = None
+_cli_bind_state: tuple[int, ...] | None = None
+
 
 def _bind_http_runtime() -> None:
     """把兼容层里可 patch 的底层依赖同步到 HTTP 模块。"""
 
+    global _http_bind_state
+    state = (id(requests), id(time))
+    if _http_bind_state == state and _http.requests is requests and _http.time is time:
+        return
     _http.requests = requests
     _http.time = time
+    _http_bind_state = state
 
 
 def _bind_orchestrator_runtime(*, probe_callable) -> None:
     """把兼容层导出函数绑定到编排模块，保持旧版 patch 语义。"""
 
+    global _orchestrator_bind_state
     _bind_http_runtime()
+    state = (
+        id(get_latest_times),
+        id(get_latest_time),
+        id(get_download_link),
+        id(build_headers_or_raise),
+        id(process_product),
+        id(load_catalog_or_raise),
+        id(write_run_report),
+        id(resolve_report_path),
+        id(_run_builtin_coin_preprocess),
+        id(_resolve_requested_dates_for_plan),
+        id(_execute_plans),
+        id(probe_callable),
+    )
+    if (
+        _orchestrator_bind_state == state
+        and _orchestrator.get_latest_times is get_latest_times
+        and _orchestrator.get_latest_time is get_latest_time
+        and _orchestrator.get_download_link is get_download_link
+        and _orchestrator.build_headers_or_raise is build_headers_or_raise
+        and _orchestrator.process_product is process_product
+        and _orchestrator.load_catalog_or_raise is load_catalog_or_raise
+        and _orchestrator.write_run_report is write_run_report
+        and _orchestrator.resolve_report_path is resolve_report_path
+        and _orchestrator._run_builtin_coin_preprocess is _run_builtin_coin_preprocess
+        and _orchestrator._resolve_requested_dates_for_plan is _resolve_requested_dates_for_plan
+        and _orchestrator._execute_plans is _execute_plans
+        and _orchestrator._probe_downloadable_dates is probe_callable
+        and _reporting.write_run_report is write_run_report
+    ):
+        return
     _orchestrator.get_latest_times = get_latest_times
     _orchestrator.get_latest_time = get_latest_time
     _orchestrator.get_download_link = get_download_link
@@ -132,13 +184,43 @@ def _bind_orchestrator_runtime(*, probe_callable) -> None:
     _orchestrator._execute_plans = _execute_plans
     _orchestrator._probe_downloadable_dates = probe_callable
     _reporting.write_run_report = write_run_report
+    _orchestrator_bind_state = state
 
 
 def _bind_cli_runtime() -> None:
     """把兼容层导出函数绑定到 CLI 模块。"""
 
+    global _cli_bind_state
     # CLI 内部会调用编排层能力，先完成编排依赖绑定。
     _bind_orchestrator_runtime(probe_callable=_probe_downloadable_dates)
+    state = (
+        id(resolve_credentials_for_update),
+        id(run_update_with_settings),
+        id(resolve_report_path),
+        id(load_catalog_or_raise),
+        id(get_latest_time),
+        id(sortable_products),
+        id(repair_sort_product_files),
+        id(cmd_setup),
+        id(cmd_update),
+        id(cmd_repair_sort),
+    )
+    if (
+        _cli_bind_state == state
+        and _cli.resolve_credentials_for_update is resolve_credentials_for_update
+        and _cli.run_update_with_settings is run_update_with_settings
+        and _cli.resolve_report_path is resolve_report_path
+        and _cli.load_catalog_or_raise is load_catalog_or_raise
+        and _cli._build_headers is _orchestrator._build_headers
+        and _cli.get_latest_time is get_latest_time
+        and _cli.sys is sys
+        and _cli.sortable_products is sortable_products
+        and _cli.repair_sort_product_files is repair_sort_product_files
+        and _cli.cmd_setup is cmd_setup
+        and _cli.cmd_update is cmd_update
+        and _cli.cmd_repair_sort is cmd_repair_sort
+    ):
+        return
     _cli.resolve_credentials_for_update = resolve_credentials_for_update
     _cli.run_update_with_settings = run_update_with_settings
     _cli.resolve_report_path = resolve_report_path
@@ -152,9 +234,25 @@ def _bind_cli_runtime() -> None:
     _cli.cmd_setup = cmd_setup
     _cli.cmd_update = cmd_update
     _cli.cmd_repair_sort = cmd_repair_sort
+    _cli_bind_state = state
 
 
 # --- 兼容层转发函数（保留旧调用点和 patch 语义） ---
+def get_latest_times(*args, **kwargs):
+    _bind_http_runtime()
+    return _get_latest_times_impl(*args, **kwargs)
+
+
+def get_latest_time(*args, **kwargs):
+    _bind_http_runtime()
+    return _get_latest_time_impl(*args, **kwargs)
+
+
+def get_download_link(*args, **kwargs):
+    _bind_http_runtime()
+    return _get_download_link_impl(*args, **kwargs)
+
+
 def request_data(*args, **kwargs):
     _bind_http_runtime()
     return _request_data_impl(*args, **kwargs)
@@ -226,6 +324,16 @@ def cmd_all_data(*args, **kwargs):
     return _cmd_all_data_impl(*args, **kwargs)
 
 
+def main() -> int:
+    """兼容入口：处理 Ctrl+C，返回标准退出码。"""
+
+    try:
+        app()
+        return 0
+    except KeyboardInterrupt:
+        return 130
+
+
 __all__ = [
     # constants
     "AGGREGATE_SPLIT_COLS",
@@ -240,15 +348,25 @@ __all__ = [
     "EXIT_CODE_NO_EXECUTABLE_PRODUCTS",
     "PREPROCESS_PRODUCT",
     "PRODUCT_MODE_LOCAL_SCAN",
+    "REASON_EXTRACT_ERROR",
+    "REASON_INVALID_EXPLICIT_PRODUCT",
     "REASON_MERGE_ERROR",
+    "REASON_MIRROR_FALLBACK",
     "REASON_MIRROR_UNKNOWN",
     "REASON_NO_DATA_FOR_DATE",
+    "REASON_NO_VALID_OUTPUT",
+    "REASON_NETWORK_ERROR",
     "REASON_OK",
+    "REASON_PREPROCESS_FULL_REBUILD_OK",
+    "REASON_PREPROCESS_OK",
     "REASON_PREPROCESS_DRY_RUN",
     "REASON_PREPROCESS_FAILED",
     "REASON_PREPROCESS_FALLBACK_FULL_OK",
     "REASON_PREPROCESS_INCREMENTAL_OK",
     "REASON_PREPROCESS_SKIPPED_NO_DELTA",
+    "REASON_UNEXPECTED_ERROR",
+    "REASON_UNKNOWN_HEADER_MERGE",
+    "REASON_UNKNOWN_LOCAL_PRODUCT",
     "REASON_UP_TO_DATE",
     "STRATEGY_MERGE_KNOWN",
     "TIMESTAMP_FILE_NAME",
@@ -312,6 +430,7 @@ __all__ = [
     "cmd_init",
     "cmd_one_data",
     "cmd_all_data",
+    "main",
     # patch helpers：保留旧版 monkey patch 入口；测试可替换这三个符号，
     # 兼容层会在调用前把替换结果回写到内部模块依赖上。
     "requests",
@@ -325,4 +444,4 @@ __all__ = [
 
 
 if __name__ == "__main__":
-    app()
+    sys.exit(main())
