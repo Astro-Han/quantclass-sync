@@ -93,7 +93,8 @@ class StateConsistencyAndWorkdirIsolationTests(unittest.TestCase):
         self.assertEqual(download_path, download_mock.call_args.kwargs["download_path"])
 
     def test_write_local_timestamp_uses_atomic_replace(self) -> None:
-        with patch("quantclass_sync_internal.status_store.os.replace", wraps=os.replace) as replace_mock:
+        # os.replace 现在在 config.atomic_temp_path 中调用，需 patch config 模块
+        with patch("quantclass_sync_internal.config.os.replace", wraps=os.replace) as replace_mock:
             write_local_timestamp(self.root, "stock-trading-data", "2026-02-11")
 
         replace_mock.assert_called_once()

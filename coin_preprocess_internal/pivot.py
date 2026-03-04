@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
-import fcntl
+import logging
 import os
 import time
 from pathlib import Path
 from typing import Dict, IO, List, Set
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
+
+LOGGER = logging.getLogger(__name__)
 
 import pandas as pd
 
@@ -22,11 +29,21 @@ def _make_market_pivot(data_dict: Dict[str, pd.DataFrame], market_type: str) -> 
     """
 
     field_pairs = PIVOT_FIELDS[market_type]
+
+    # 预构建索引缓存，避免每个字段重复 set_index
+    indexed_frames: Dict[str, pd.DataFrame] = {}
+    for symbol, frame in data_dict.items():
+        if not frame.empty and "candle_begin_time" in frame.columns:
+            indexed_frames[symbol] = frame.set_index("candle_begin_time")
+
     pivot_map: Dict[str, pd.DataFrame] = {}
     for out_name, source_col in field_pairs:
         series_list: List[pd.Series] = []
-        for symbol, frame in data_dict.items():
-            series = frame.set_index("candle_begin_time")[source_col]
+        for symbol, indexed in indexed_frames.items():
+            # 缺少该列的 symbol 直接跳过，不报错
+            if source_col not in indexed.columns:
+                continue
+            series = indexed[source_col]
             series.name = symbol
             series_list.append(series)
         if not series_list:
@@ -108,7 +125,16 @@ def _safe_unlink(path: Path) -> None:
         return
 
 def _acquire_output_locks(payloads: Dict[Path, object]) -> List[IO[str]]:
-    """按目录获取写锁，避免多进程并发写同一批产物。"""
+    """
+    按目录获取写锁，避免多进程并发写同一批产物。
+
+    在非 Unix 平台（Windows 等）fcntl 不可用时，跳过锁操作并记录警告。
+    """
+
+    # fcntl 在非 Unix 平台不可用（如 Windows），跳过锁以保持跨平台兼容性
+    if fcntl is None:
+        LOGGER.warning("fcntl 不可用（非 Unix 平台），跳过文件锁")
+        return []
 
     lock_handles: List[IO[str]] = []
     lock_dirs = sorted({target.parent for target in payloads}, key=lambda path: str(path))
@@ -199,8 +225,11 @@ def _write_pickles_atomically(payloads: Dict[Path, object]) -> None:
             for backup in restored_backups:
                 _safe_unlink(backup)
         for lock_handle in reversed(lock_handles):
+            # fcntl 可用时才执行解锁（_acquire_output_locks 在 fcntl 为 None 时返回空列表，
+            # 所以这里实际只会在 fcntl 不为 None 时执行；加判断以防止未来潜在路径变化）
             try:
-                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+                if fcntl is not None:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
             finally:
                 lock_handle.close()
 

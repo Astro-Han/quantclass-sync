@@ -6,7 +6,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import ClassVar, Dict, List, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 from rich.console import Console
@@ -144,15 +144,22 @@ class SyncStats:
     sorted_violation_files: int = 0
     sorted_auto_repaired_files: int = 0
 
+    # 需要累加的字段白名单（类变量，不参与序列化）：新增字段时只需在此处追加，merge 自动处理
+    _MERGE_FIELDS: ClassVar[Tuple[str, ...]] = (
+        "created_files",
+        "updated_files",
+        "unchanged_files",
+        "skipped_files",
+        "rows_added",
+        "sorted_checked_files",
+        "sorted_violation_files",
+        "sorted_auto_repaired_files",
+    )
+
     def merge(self, other: "SyncStats") -> None:
-        self.created_files += other.created_files
-        self.updated_files += other.updated_files
-        self.unchanged_files += other.unchanged_files
-        self.skipped_files += other.skipped_files
-        self.rows_added += other.rows_added
-        self.sorted_checked_files += other.sorted_checked_files
-        self.sorted_violation_files += other.sorted_violation_files
-        self.sorted_auto_repaired_files += other.sorted_auto_repaired_files
+        """遍历白名单字段做累加，避免新增字段时手动遗漏。"""
+        for f in self._MERGE_FIELDS:
+            setattr(self, f, getattr(self, f) + getattr(other, f))
 
 @dataclass
 class SortAudit:

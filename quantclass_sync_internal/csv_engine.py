@@ -12,6 +12,8 @@ from io import StringIO
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
+from .config import atomic_temp_path
+
 from .constants import ENCODING_CANDIDATES, UTF8_BOM
 from .models import CsvPayload, DatasetRule, SortAudit, log_debug, log_info
 
@@ -146,11 +148,19 @@ def read_csv_payload(path: Path, preferred_encoding: Optional[str] = None) -> Cs
     """
 
     text, encoding = decode_text(path, preferred_encoding)
-    non_empty_lines = [line for line in text.splitlines() if line.strip() != ""]
-    if not non_empty_lines:
+    # 取前几行非空行用于分隔符推断：迭代而非全量 list，避免 2KB 截断导致 header 落在采样范围外
+    sample_lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            sample_lines.append(stripped)
+        if len(sample_lines) >= 3:
+            break
+    if not sample_lines:
         return CsvPayload(note=None, header=[], rows=[], encoding=encoding, delimiter=",")
 
-    delimiter = detect_delimiter(non_empty_lines[:3])
+    # 采样循环已保证 sample_lines 最多 3 条，无需额外切片
+    delimiter = detect_delimiter(sample_lines)
     parsed_rows: List[List[str]] = []
     for row in csv.reader(StringIO(text), delimiter=delimiter):
         if not row:
@@ -169,7 +179,9 @@ def read_csv_payload(path: Path, preferred_encoding: Optional[str] = None) -> Cs
         header = first
         data_start = 1
     elif looks_like_header(second):
-        note = non_empty_lines[0].lstrip("\ufeff")
+        # note 取完整文本的第一条非空行，确保不受 2KB 采样截断影响
+        first_nonempty = next((line for line in text.splitlines() if line.strip()), "")
+        note = first_nonempty.lstrip("\ufeff")
         header = second
         data_start = 2
     else:
@@ -368,28 +380,21 @@ def merge_payload(existing: Optional[CsvPayload], incoming: CsvPayload, rule: Da
     return merged, max(0, len(merged_map) - before_count)
 
 def write_csv_payload(path: Path, payload: CsvPayload, rule: DatasetRule, dry_run: bool) -> None:
-    """把合并结果写回 CSV（dry-run 时跳过写盘）。"""
+    """把合并结果写回 CSV（dry-run 时跳过写盘，正常写入使用原子替换）。"""
 
     if dry_run:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     delimiter = payload.delimiter or ","
-    tmp_path = path.parent / f".{path.name}.tmp-csv-{os.getpid()}-{time.time_ns()}"
-    try:
-        with tmp_path.open("w", encoding=payload.encoding or rule.encoding, newline="") as f:
+    # 用 atomic_temp_path 做原子写入；编码和分隔符保持原有逻辑不变
+    with atomic_temp_path(path, tag="csv") as tmp:
+        with tmp.open("w", encoding=payload.encoding or rule.encoding, newline="") as f:
             if rule.has_note and payload.note is not None:
                 f.write(payload.note.rstrip("\r\n"))
                 f.write("\n")
             writer = csv.writer(f, delimiter=delimiter, lineterminator="\n")
             writer.writerow(payload.header)
             writer.writerows(payload.rows)
-        os.replace(tmp_path, path)
-    finally:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except FileNotFoundError:
-                pass
 
 @contextmanager
 def _locked_target(lock_path: Path) -> Iterator[None]:

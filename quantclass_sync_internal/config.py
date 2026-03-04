@@ -6,8 +6,9 @@ import json
 import os
 import re
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Generator, List, Optional, Sequence, Tuple
 
 from .constants import (
     DISCOVERY_IGNORED_PRODUCTS,
@@ -49,6 +50,42 @@ def validate_run_mode(mode: str) -> str:
         raise ValueError("mode 仅支持 local 或 catalog")
     return normalized
 
+@contextmanager
+def atomic_temp_path(
+    target: Path,
+    tag: str = "atomic",
+    create_mode: Optional[int] = None,
+) -> Generator[Path, None, None]:
+    """
+    原子写入上下文管理器：yield 临时路径，退出时用 os.replace 替换目标文件。
+
+    用法示例：
+        with atomic_temp_path(dest_path) as tmp:
+            tmp.write_text(content, encoding="utf-8")
+
+    create_mode：若指定，在 yield 前用 os.open 预先创建临时文件并设置权限模式。
+                 例如写入密钥文件时需要 0o600。
+                 若为 None，调用方自行写入 tmp 文件（不预先创建）。
+    """
+
+    tmp = target.parent / f".{target.name}.tmp-{tag}-{os.getpid()}-{time.time_ns()}"
+    try:
+        # 若指定权限模式，预先用 os.open 创建文件，确保权限在写入前就生效
+        if create_mode is not None:
+            # os.open 的 mode 受进程 umask 影响（实际权限 = mode & ~umask）。
+            # 调用者如需精确权限应在写入后自行 os.chmod。
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, create_mode)
+            os.close(fd)
+        yield tmp
+        os.replace(tmp, target)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
 def _write_text_atomic(
     path: Path,
     content: str,
@@ -60,23 +97,15 @@ def _write_text_atomic(
     原子写入文本文件。
 
     原子写入（要么完整写成功、要么不改变旧文件）可以避免配置/密钥写半截。
+    内部调用 atomic_temp_path 上下文管理器实现。
     """
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.parent / f".{path.name}.tmp-{os.getpid()}-{time.time_ns()}"
-    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, create_mode)
-    os.close(fd)
-    try:
-        tmp_path.write_text(content, encoding=encoding)
-        os.replace(tmp_path, path)
-        if final_mode is not None:
-            os.chmod(path, final_mode)
-    finally:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except Exception:
-                pass
+    with atomic_temp_path(path, tag="text", create_mode=create_mode) as tmp:
+        tmp.write_text(content, encoding=encoding)
+    # 成功替换后（os.replace 已完成），如需最终权限模式则单独 chmod
+    if final_mode is not None:
+        os.chmod(path, final_mode)
 
 def snapshot_text_file(path: Path) -> TextFileSnapshot:
     """保存文件当前状态。"""
@@ -349,6 +378,30 @@ def load_secrets_from_file(path: Path) -> Tuple[str, str]:
     hid = next((pairs[k] for k in hid_candidates if k in pairs), "")
     return api_key, hid
 
+def _resolve_credentials_components(
+    cli_api_key: str,
+    cli_hid: str,
+    secrets_file: Path,
+) -> Tuple[str, str, str, str, str, str, str, str]:
+    """
+    内部函数：读取 CLI / File / ENV 三层凭证，返回各层原始值及合并结果。
+
+    返回顺序：(cli_api, cli_hid_val, file_api, file_hid, env_api, env_hid, api_key, hid)
+    """
+
+    cli_api = cli_api_key.strip()
+    cli_hid_val = cli_hid.strip()
+    file_api, file_hid = load_secrets_from_file(secrets_file)
+    env_api = os.environ.get("QUANTCLASS_API_KEY", "").strip()
+    env_hid = os.environ.get("QUANTCLASS_HID", "").strip()
+
+    # 按优先级合并：CLI > 文件 > 环境变量
+    api_key = cli_api or file_api or env_api
+    hid = cli_hid_val or file_hid or env_hid
+
+    return cli_api, cli_hid_val, file_api, file_hid, env_api, env_hid, api_key, hid
+
+
 def resolve_credentials(cli_api_key: str, cli_hid: str, secrets_file: Path) -> Tuple[str, str]:
     """
     凭证优先级（高 -> 低，兼容命令）：
@@ -357,15 +410,7 @@ def resolve_credentials(cli_api_key: str, cli_hid: str, secrets_file: Path) -> T
     3) 环境变量
     """
 
-    cli_api = cli_api_key.strip()
-    cli_hid_value = cli_hid.strip()
-    file_api, file_hid = load_secrets_from_file(secrets_file)
-    env_api = os.environ.get("QUANTCLASS_API_KEY", "").strip()
-    env_hid = os.environ.get("QUANTCLASS_HID", "").strip()
-
-    api_key = cli_api or file_api or env_api
-    hid = cli_hid_value or file_hid or env_hid
-
+    *_, api_key, hid = _resolve_credentials_components(cli_api_key, cli_hid, secrets_file)
     return api_key, hid
 
 def resolve_credentials_for_update(cli_api_key: str, cli_hid: str, secrets_file: Path) -> Tuple[str, str, str]:
@@ -376,19 +421,16 @@ def resolve_credentials_for_update(cli_api_key: str, cli_hid: str, secrets_file:
     3) 环境变量
     """
 
-    cli_api = cli_api_key.strip()
-    cli_hid_value = cli_hid.strip()
-    file_api, file_hid = load_secrets_from_file(secrets_file)
-    env_api = os.environ.get("QUANTCLASS_API_KEY", "").strip()
-    env_hid = os.environ.get("QUANTCLASS_HID", "").strip()
+    cli_api, cli_hid_val, file_api, file_hid, env_api, env_hid, api_key, hid = (
+        _resolve_credentials_components(cli_api_key, cli_hid, secrets_file)
+    )
 
-    api_key = cli_api or file_api or env_api
-    hid = cli_hid_value or file_hid or env_hid
-
+    # 判断 api_key 和 hid 各自来源，生成 credential_source 标识
     api_source = "cli" if cli_api else ("setup_secrets" if file_api else ("env" if env_api else "missing"))
-    hid_source = "cli" if cli_hid_value else ("setup_secrets" if file_hid else ("env" if env_hid else "missing"))
+    hid_source = "cli" if cli_hid_val else ("setup_secrets" if file_hid else ("env" if env_hid else "missing"))
     if api_source == hid_source:
         credential_source = api_source
     else:
+        # 来源不同时记录 mixed 格式，方便日志诊断
         credential_source = f"mixed(api={api_source},hid={hid_source})"
     return api_key, hid, credential_source

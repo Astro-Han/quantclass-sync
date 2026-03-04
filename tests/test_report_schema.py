@@ -133,7 +133,8 @@ class ReportSchemaTests(unittest.TestCase):
         before = report_path.read_text(encoding="utf-8")
         report = qcs._new_report("rid-atomic", mode="network")
 
-        with patch("quantclass_sync_internal.reporting.os.replace", side_effect=RuntimeError("replace failed")):
+        # os.replace 现在在 config.atomic_temp_path 中调用，需 patch config 模块
+        with patch("quantclass_sync_internal.config.os.replace", side_effect=RuntimeError("replace failed")):
             with self.assertRaises(RuntimeError):
                 qcs.write_run_report(report_path, report)
 

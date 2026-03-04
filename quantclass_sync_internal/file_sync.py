@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
-import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
+
+from .config import atomic_temp_path
 
 from .constants import (
     AGGREGATE_SPLIT_COLS,
@@ -74,16 +74,17 @@ def normalize_source_relpath(src_rel_path: Path, product: str) -> Path:
     return Path(*parts)
 
 
+# reason_code 严重程度排序，数值越大越严重
+_REASON_SEVERITY = {
+    REASON_OK: 0,
+    REASON_MIRROR_FALLBACK: 10,
+    REASON_NO_VALID_OUTPUT: 20,
+    REASON_MERGE_ERROR: 30,
+}
+
 def _worst_reason(current: str, incoming: str) -> str:
     """返回两个 reason_code 中更严重的一个。"""
-
-    severity = {
-        REASON_OK: 0,
-        REASON_MIRROR_FALLBACK: 10,
-        REASON_NO_VALID_OUTPUT: 20,
-        REASON_MERGE_ERROR: 30,
-    }
-    if severity.get(incoming, 0) > severity.get(current, 0):
+    if _REASON_SEVERITY.get(incoming, 0) > _REASON_SEVERITY.get(current, 0):
         return incoming
     return current
 
@@ -325,16 +326,9 @@ def sync_raw_file(src: Path, target: Path, dry_run: bool) -> str:
 
     if not dry_run:
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = target.parent / f".{target.name}.tmp-raw-{os.getpid()}-{time.time_ns()}"
-        try:
-            shutil.copy2(src, tmp_path)
-            os.replace(tmp_path, target)
-        finally:
-            if tmp_path.exists():
-                try:
-                    tmp_path.unlink()
-                except Exception:
-                    pass
+        # shutil.copy2 保留文件元数据（如 mtime/权限），行为与原实现一致
+        with atomic_temp_path(target, tag="raw") as tmp:
+            shutil.copy2(src, tmp)
 
     return "updated" if existed_before else "created"
 
@@ -506,21 +500,23 @@ def sync_unknown_product(product: str, extract_path: Path, data_root: Path, dry_
     return stats, REASON_MIRROR_UNKNOWN
 
 def write_csv_payload_atomic(path: Path, payload: CsvPayload, rule: DatasetRule, dry_run: bool) -> None:
-    """原子写回 CSV，避免排序修复中途失败导致文件损坏。"""
+    """
+    原子写回 CSV，避免排序修复中途失败导致文件损坏。
+
+    注意：write_csv_payload 本身已经是原子写入；这里再包一层是为了
+    让 sortfix 有独立 tag，便于区分临时文件来源（debug 时更易识别）。
+
+    两层原子替换：
+    1. write_csv_payload 内部写 csv 临时文件，replace 到 tmp（sortfix 临时路径）
+    2. 外层 atomic_temp_path 将 tmp replace 到最终 path
+    """
 
     if dry_run:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.parent / f".{path.name}.tmp-sortfix-{os.getpid()}-{time.time_ns()}"
-    try:
-        write_csv_payload(tmp_path, payload, rule, dry_run=False)
-        os.replace(tmp_path, path)
-    finally:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except Exception:
-                pass
+    with atomic_temp_path(path, tag="sortfix") as tmp:
+        # 这里让 write_csv_payload 先写到 sortfix 临时文件，再由外层统一替换
+        write_csv_payload(tmp, payload, rule, dry_run=False)
 
 def sortable_products() -> List[str]:
     """返回支持排序修复的产品列表（排除非目录型数据）。"""

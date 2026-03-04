@@ -251,7 +251,8 @@ class HttpErrorMappingTests(unittest.TestCase):
                 )
 
             self.assertEqual(b"new-good-file", download_path.read_bytes())
-            part_files = list(download_path.parent.glob("*.part-*"))
+            # 临时文件格式：.payload.zip.tmp-part-{pid}-{ns}（点前缀），需用对应模式匹配
+            part_files = list(download_path.parent.glob(f".{download_path.name}.tmp-part-*"))
             self.assertEqual([], part_files)
 
     def test_download_file_atomic_cleans_temp_file_on_failure(self) -> None:
@@ -273,7 +274,8 @@ class HttpErrorMappingTests(unittest.TestCase):
                     )
 
             self.assertEqual(b"stable-old-file", download_path.read_bytes())
-            part_files = list(download_path.parent.glob("*.part-*"))
+            # 临时文件格式：.payload.zip.tmp-part-{pid}-{ns}（点前缀），需用对应模式匹配
+            part_files = list(download_path.parent.glob(f".{download_path.name}.tmp-part-*"))
             self.assertEqual([], part_files)
 
     def test_process_product_merge_error_reason_raises_product_sync_error(self) -> None:

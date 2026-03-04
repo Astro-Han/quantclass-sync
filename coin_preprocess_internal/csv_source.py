@@ -178,14 +178,24 @@ def _sanitize_candle_time_rows(raw_df: pd.DataFrame, symbol_name: str) -> pd.Dat
         keep="last",
     )
 
-def _detect_relist_segments(raw_df: pd.DataFrame) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+def _detect_relist_segments(
+    raw_df: pd.DataFrame,
+    assume_sanitized: bool = False,
+) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
     """
     识别 relist 切段区间。
 
     规则：时间间隔 > 1 天 且前收盘到当前开盘跳变 >= 1%。
+
+    参数:
+        assume_sanitized: 若为 True，跳过内部清洗（调用方已做过 _sanitize_candle_time_rows）。
     """
 
-    data = _sanitize_candle_time_rows(raw_df, symbol_name="source_symbol")
+    if assume_sanitized:
+        # 调用方已清洗，直接使用
+        data = raw_df
+    else:
+        data = _sanitize_candle_time_rows(raw_df, symbol_name="source_symbol")
     if data.empty:
         return []
 
@@ -358,7 +368,8 @@ def _split_symbol_frames(raw_df: pd.DataFrame, source_symbol: str, is_swap: bool
 
     source_symbol = _normalize_symbol(source_symbol)
     data = _sanitize_candle_time_rows(raw_df, symbol_name=source_symbol)
-    segments = _detect_relist_segments(data)
+    # data 已经过清洗，传入 assume_sanitized=True 避免重复清洗
+    segments = _detect_relist_segments(data, assume_sanitized=True)
     if not segments:
         return {}
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import shutil
 import sqlite3
 import traceback
@@ -13,6 +12,7 @@ from typing import Dict, Iterable, List, NoReturn, Optional, Sequence, Tuple
 
 from .archive import extract_archive
 from .config import (
+    atomic_temp_path,
     build_product_plan,
     discover_local_products,
     ensure_data_root_ready,
@@ -288,18 +288,12 @@ def _download_file_atomic(file_url: str, download_path: Path, headers: Dict[str,
     """下载到临时文件并原子替换，避免脏文件污染缓存。"""
 
     download_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = download_path.parent / f".{download_path.name}.part-{os.getpid()}-{time.time_ns()}"
-    try:
-        save_file(file_url=file_url, file_path=tmp_path, headers=headers, product=product)
-        if not tmp_path.exists() or tmp_path.stat().st_size <= 0:
+    with atomic_temp_path(download_path, tag="part") as tmp:
+        # save_file 流式写入二进制数据（内部使用 shutil.copyfileobj 或类似方式）
+        save_file(file_url=file_url, file_path=tmp, headers=headers, product=product)
+        # 空文件校验：下载完成但文件为空，视为失败（不允许推进到 os.replace）
+        if not tmp.exists() or tmp.stat().st_size <= 0:
             raise RuntimeError("下载结果为空文件。")
-        os.replace(tmp_path, download_path)
-    finally:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except Exception:
-                pass
 
 def _extract_product_archive(product: str, download_path: Path, extract_path: Path) -> None:
     """解压单产品文件。"""
@@ -730,110 +724,109 @@ def _maybe_run_coin_preprocess(
     """
 
     phase_start = time.time()
-    preprocess_dir = command_ctx.data_root / PREPROCESS_PRODUCT
-    if not preprocess_dir.is_dir():
-        report.phase_postprocess_seconds += max(0.0, time.time() - phase_start)
-        return False
-
-    source_successes = _collect_preprocess_source_successes(report)
-    if not source_successes:
-        log_debug(
-            "预处理跳过：本轮源产品无成功更新。",
-            event="PREPROCESS",
-            target=PREPROCESS_PRODUCT,
-        )
-        report.phase_postprocess_seconds += max(0.0, time.time() - phase_start)
-        return False
-    source_effective = [item for item in source_successes if _has_effective_source_delta(item)]
-    if not source_effective:
-        _append_result(
-            report,
-            product=PREPROCESS_PRODUCT,
-            status="skipped",
-            strategy="preprocess_hook",
-            reason_code=REASON_PREPROCESS_SKIPPED_NO_DELTA,
-            mode="postprocess",
-            error="源产品无有效增量（created/updated/rows_added 均为 0），跳过预处理。",
-            stage="PREPROCESS",
-        )
-        log_info(
-            "预处理跳过：源产品无有效增量。",
-            event="PREPROCESS",
-            target=PREPROCESS_PRODUCT,
-        )
-        report.phase_postprocess_seconds += max(0.0, time.time() - phase_start)
-        return False
-
-    if command_ctx.dry_run:
-        _append_result(
-            report,
-            product=PREPROCESS_PRODUCT,
-            status="skipped",
-            strategy="preprocess_hook",
-            reason_code=REASON_PREPROCESS_DRY_RUN,
-            mode="postprocess",
-            error="dry-run 模式：未执行预处理命令。",
-            stage="PREPROCESS",
-        )
-        log_info("dry-run 模式下跳过预处理执行。", event="PREPROCESS", target=PREPROCESS_PRODUCT)
-        report.phase_postprocess_seconds += max(0.0, time.time() - phase_start)
-        return False
-
-    t0 = time.time()
-    raw_cmd = ""
+    # 用 try/finally 统一在函数出口累加耗时，各分支只保留业务逻辑
     try:
-        # 统一使用仓库内置预处理实现，降低分发后的使用门槛。
-        raw_cmd, success_reason_code = _run_builtin_coin_preprocess(command_ctx)
-        elapsed = time.time() - t0
+        preprocess_dir = command_ctx.data_root / PREPROCESS_PRODUCT
+        if not preprocess_dir.is_dir():
+            return False
 
-        actual_time = _resolve_preprocess_data_date(command_ctx, source_effective)
-        _upsert_product_status_after_success(
-            conn=conn,
-            command_ctx=command_ctx,
-            product=PREPROCESS_PRODUCT,
-            actual_time=actual_time,
-        )
-        _append_result(
-            report,
-            product=PREPROCESS_PRODUCT,
-            status="ok",
-            strategy="preprocess_hook",
-            reason_code=success_reason_code,
-            elapsed=elapsed,
-            date_time=actual_time,
-            mode="postprocess",
-            source_path=raw_cmd,
-            stage="PREPROCESS",
-        )
-        log_info(
-            "预处理执行成功。",
-            event="PREPROCESS",
-            target=PREPROCESS_PRODUCT,
-            data_time=actual_time,
-            command=raw_cmd,
-        )
+        source_successes = _collect_preprocess_source_successes(report)
+        if not source_successes:
+            log_debug(
+                "预处理跳过：本轮源产品无成功更新。",
+                event="PREPROCESS",
+                target=PREPROCESS_PRODUCT,
+            )
+            return False
+        source_effective = [item for item in source_successes if _has_effective_source_delta(item)]
+        if not source_effective:
+            _append_result(
+                report,
+                product=PREPROCESS_PRODUCT,
+                status="skipped",
+                strategy="preprocess_hook",
+                reason_code=REASON_PREPROCESS_SKIPPED_NO_DELTA,
+                mode="postprocess",
+                error="源产品无有效增量（created/updated/rows_added 均为 0），跳过预处理。",
+                stage="PREPROCESS",
+            )
+            log_info(
+                "预处理跳过：源产品无有效增量。",
+                event="PREPROCESS",
+                target=PREPROCESS_PRODUCT,
+            )
+            return False
+
+        if command_ctx.dry_run:
+            _append_result(
+                report,
+                product=PREPROCESS_PRODUCT,
+                status="skipped",
+                strategy="preprocess_hook",
+                reason_code=REASON_PREPROCESS_DRY_RUN,
+                mode="postprocess",
+                error="dry-run 模式：未执行预处理命令。",
+                stage="PREPROCESS",
+            )
+            log_info("dry-run 模式下跳过预处理执行。", event="PREPROCESS", target=PREPROCESS_PRODUCT)
+            return False
+
+        t0 = time.time()
+        raw_cmd = ""
+        try:
+            # 统一使用仓库内置预处理实现，降低分发后的使用门槛。
+            raw_cmd, success_reason_code = _run_builtin_coin_preprocess(command_ctx)
+            elapsed = time.time() - t0
+
+            actual_time = _resolve_preprocess_data_date(command_ctx, source_effective)
+            _upsert_product_status_after_success(
+                conn=conn,
+                command_ctx=command_ctx,
+                product=PREPROCESS_PRODUCT,
+                actual_time=actual_time,
+            )
+            _append_result(
+                report,
+                product=PREPROCESS_PRODUCT,
+                status="ok",
+                strategy="preprocess_hook",
+                reason_code=success_reason_code,
+                elapsed=elapsed,
+                date_time=actual_time,
+                mode="postprocess",
+                source_path=raw_cmd,
+                stage="PREPROCESS",
+            )
+            log_info(
+                "预处理执行成功。",
+                event="PREPROCESS",
+                target=PREPROCESS_PRODUCT,
+                data_time=actual_time,
+                command=raw_cmd,
+            )
+            return False
+        except Exception as exc:
+            elapsed = time.time() - t0
+            message = str(exc)
+            _append_result(
+                report,
+                product=PREPROCESS_PRODUCT,
+                status="error",
+                strategy="preprocess_hook",
+                reason_code=REASON_PREPROCESS_FAILED,
+                elapsed=elapsed,
+                mode="postprocess",
+                error=message,
+                source_path=raw_cmd,
+                stage="PREPROCESS",
+            )
+            log_error(f"预处理执行异常: {message}", event="PREPROCESS")
+            if command_ctx.verbose:
+                log_debug(traceback.format_exc(), event="DEBUG")
+            return True
+    finally:
+        # 无论哪个分支退出，统一在此累加后处理阶段耗时
         report.phase_postprocess_seconds += max(0.0, time.time() - phase_start)
-        return False
-    except Exception as exc:
-        elapsed = time.time() - t0
-        message = str(exc)
-        _append_result(
-            report,
-            product=PREPROCESS_PRODUCT,
-            status="error",
-            strategy="preprocess_hook",
-            reason_code=REASON_PREPROCESS_FAILED,
-            elapsed=elapsed,
-            mode="postprocess",
-            error=message,
-            source_path=raw_cmd,
-            stage="PREPROCESS",
-        )
-        log_error(f"预处理执行异常: {message}", event="PREPROCESS")
-        if command_ctx.verbose:
-            log_debug(traceback.format_exc(), event="DEBUG")
-        report.phase_postprocess_seconds += max(0.0, time.time() - phase_start)
-        return True
 
 def _execute_plans(
     plans: Sequence[ProductPlan],

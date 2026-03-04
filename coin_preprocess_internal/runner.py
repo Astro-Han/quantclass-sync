@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
@@ -37,6 +35,9 @@ from .symbol_mapper import (
     _extract_base_symbol,
     _group_split_symbols_by_source,
 )
+
+# 复用主包的原子写入上下文管理器，避免重复实现同样的模式
+from quantclass_sync_internal.config import atomic_temp_path
 
 LOGGER = logging.getLogger(__name__)
 
@@ -112,15 +113,14 @@ def _resolve_output_data_date(spot_dict: Dict[str, pd.DataFrame], swap_dict: Dic
     return pd.Timestamp(latest).strftime("%Y-%m-%d")
 
 def _write_runtime_timestamp(output_dir: Path, data_date: str) -> None:
-    """写入 timestamp.txt（格式：数据日期,本地运行时间）。"""
+    """写入 timestamp.txt（格式：数据日期,本地运行时间），原子写入避免半截文件。"""
 
     path = output_dir / TIMESTAMP_FILE_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     local_now = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
-    tmp_path = path.parent / f".{path.name}.tmp-{os.getpid()}-{time.time_ns()}"
     try:
-        tmp_path.write_text(f"{data_date},{local_now}\n", encoding="utf-8")
-        os.replace(tmp_path, path)
+        with atomic_temp_path(path, tag="pts") as tmp:
+            tmp.write_text(f"{data_date},{local_now}\n", encoding="utf-8")
     except Exception as exc:
         # timestamp 写入失败不影响 pkl 产物可用性，保守记录告警。
         LOGGER.warning(
@@ -128,12 +128,6 @@ def _write_runtime_timestamp(output_dir: Path, data_date: str) -> None:
             path,
             type(exc).__name__,
         )
-    finally:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except FileNotFoundError:
-                pass
 
 def _has_relist_break(prev_time: pd.Timestamp, prev_close: float, next_time: pd.Timestamp, next_open: float) -> bool:
     """判断边界处是否触发 relist 切段。"""

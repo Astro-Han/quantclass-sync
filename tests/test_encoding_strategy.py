@@ -183,7 +183,8 @@ class EncodingStrategyTests(unittest.TestCase):
             delimiter=",",
         )
 
-        with patch("quantclass_sync_internal.csv_engine.os.replace", side_effect=RuntimeError("replace failed")):
+        # Phase C 重构后 os.replace 已移入 config.atomic_temp_path，需 mock 正确路径
+        with patch("quantclass_sync_internal.config.os.replace", side_effect=RuntimeError("replace failed")):
             with self.assertRaises(RuntimeError):
                 qcs.sync_payload_to_target(
                     incoming=incoming,

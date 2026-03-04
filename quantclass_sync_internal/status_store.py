@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 import sqlite3
@@ -13,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
 
+from .config import atomic_temp_path
 from .constants import (
     DEFAULT_REPORT_DIR,
     DEFAULT_REPORT_RETENTION_DAYS,
@@ -175,16 +175,8 @@ def write_local_timestamp(data_root: Path, product: str, data_date: str) -> None
     path = data_root / product / TIMESTAMP_FILE_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     local_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    tmp_path = path.parent / f".{path.name}.tmp-{os.getpid()}-{time.time_ns()}"
-    try:
-        tmp_path.write_text(f"{normalized},{local_now}\n", encoding="utf-8")
-        os.replace(tmp_path, path)
-    finally:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except FileNotFoundError:
-                pass
+    with atomic_temp_path(path, tag="ts") as tmp:
+        tmp.write_text(f"{normalized},{local_now}\n", encoding="utf-8")
 
 def should_skip_by_timestamp(local_date: Optional[str], api_latest_date: Optional[str]) -> bool:
     """判断本地是否已是最新版本。"""
@@ -361,13 +353,5 @@ def export_status_json(conn: sqlite3.Connection, output_path: Path) -> None:
     payload: Dict[str, object] = {}
     for item in list_product_status(conn):
         payload[item.name] = item.to_json_record()
-    tmp_path = output_path.parent / f".{output_path.name}.tmp-{os.getpid()}-{time.time_ns()}"
-    try:
-        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp_path, output_path)
-    finally:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except FileNotFoundError:
-                pass
+    with atomic_temp_path(output_path, tag="status-json") as tmp:
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

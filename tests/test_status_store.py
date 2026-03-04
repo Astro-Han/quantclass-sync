@@ -107,7 +107,8 @@ class StatusStoreTests(unittest.TestCase):
         try:
             upsert_product_status(conn, ProductStatus(name="demo", display_name="demo"))
             before = output_path.read_text(encoding="utf-8")
-            with patch("quantclass_sync_internal.status_store.os.replace", side_effect=RuntimeError("replace failed")):
+            # os.replace 现在在 config.atomic_temp_path 中调用，需 patch config 模块
+            with patch("quantclass_sync_internal.config.os.replace", side_effect=RuntimeError("replace failed")):
                 with self.assertRaises(RuntimeError):
                     export_status_json(conn, output_path)
         finally:

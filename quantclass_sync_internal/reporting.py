@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Protocol, Sequence
 
+from .config import atomic_temp_path
 from .constants import (
     EXIT_CODE_GENERAL_FAILURE,
     EXIT_CODE_NETWORK_OR_REMOTE_DATA_FAILURE,
@@ -44,20 +44,12 @@ def build_reason_code_counts(items: Iterable[HasReasonCode]) -> Dict[str, int]:
     return dict(sorted(counts.items()))
 
 def write_run_report(path: Path, report: RunReport) -> None:
-    """将本次运行报告写入 JSON 文件。"""
+    """将本次运行报告写入 JSON 文件（原子写入，避免报告写半截）。"""
 
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = run_report_to_dict(report)
-    tmp_path = path.parent / f".{path.name}.tmp-{os.getpid()}-{time.time_ns()}"
-    try:
-        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp_path, path)
-    finally:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except FileNotFoundError:
-                pass
+    with atomic_temp_path(path, tag="report") as tmp:
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def _append_run_event(report: RunReport, product: str, stage: str, status: str, reason_code: str, detail: str) -> None:
     report.events.append(

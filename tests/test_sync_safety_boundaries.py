@@ -435,8 +435,9 @@ class SyncRawFileChunkCompareTests(unittest.TestCase):
         target = self.root / "target-atomic.txt"
         src.write_text("new", encoding="utf-8")
 
+        # os.replace 现在在 config.atomic_temp_path 中调用，需 patch config 模块
         with patch("quantclass_sync_internal.file_sync.shutil.copy2", wraps=shutil.copy2) as copy_mock, patch(
-            "quantclass_sync_internal.file_sync.os.replace",
+            "quantclass_sync_internal.config.os.replace",
             wraps=os.replace,
         ) as replace_mock:
             result = sync_raw_file(src=src, target=target, dry_run=False)
@@ -454,7 +455,8 @@ class SyncRawFileChunkCompareTests(unittest.TestCase):
         src.write_text("new", encoding="utf-8")
         target.write_text("old", encoding="utf-8")
 
-        with patch("quantclass_sync_internal.file_sync.os.replace", side_effect=RuntimeError("replace failed")):
+        # os.replace 现在在 config.atomic_temp_path 中调用，需 patch config 模块
+        with patch("quantclass_sync_internal.config.os.replace", side_effect=RuntimeError("replace failed")):
             with self.assertRaises(RuntimeError):
                 sync_raw_file(src=src, target=target, dry_run=False)
 
