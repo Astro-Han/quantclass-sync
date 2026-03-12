@@ -836,15 +836,22 @@ def _execute_plans(
     conn: Optional[sqlite3.Connection] = None,
     force_update: bool = False,
     catch_up_to_latest: bool = False,
+    max_workers: int = 1,
 ) -> Tuple[SyncStats, bool, float]:
     """
     执行产品计划并返回汇总统计。
 
     整体流程（单次运行）：
     1) 先构建请求头与凭证（API Key/HID）
-    2) 逐个产品执行“门控判断 -> 解析日期队列 -> 下载解压 -> 同步落库 -> 记录结果”
+    2) 逐个产品执行"门控判断 -> 解析日期队列 -> 下载解压 -> 同步落库 -> 记录结果"
     3) 累加统计并在必要时中断（stop-on-error）
+
+    max_workers: 并发下载线程数。1 = 串行（默认），>1 = 并行处理产品。
+                 stop_on_error=True 时强制串行。
     """
+
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     _reset_http_metrics()
     headers, hid = build_headers_or_raise(command_ctx)
@@ -852,9 +859,17 @@ def _execute_plans(
     has_error = False
     t_run_start = time.time()
 
-    for plan in plans:
+    # stop-on-error 要求严格顺序控制，强制串行
+    effective_workers = max(1, max_workers) if not command_ctx.stop_on_error else 1
+    # 保护共享状态的互斥锁（串行时无竞争，开销可忽略）
+    _lock = threading.Lock()
+
+    def _run_one_plan(plan: ProductPlan) -> bool:
+        """处理单个产品计划。返回 True 表示发生了错误。"""
+
+        plan_has_error = False
         t_product_start = time.time()
-        # A. 判断这个产品本次应不应该跑（门控命中会直接 continue）。
+        # A. 判断这个产品本次应不应该跑（门控命中会直接 return）。
         t_plan_phase = time.time()
         requested_dates_for_plan, skipped_by_gate = _resolve_requested_dates_for_plan(
             plan=plan,
@@ -867,9 +882,10 @@ def _execute_plans(
             t_product_start=t_product_start,
             catch_up_to_latest=catch_up_to_latest,
         )
-        report.phase_plan_seconds += max(0.0, time.time() - t_plan_phase)
+        with _lock:
+            report.phase_plan_seconds += max(0.0, time.time() - t_plan_phase)
         if skipped_by_gate:
-            continue
+            return False
 
         if not requested_dates_for_plan:
             if catch_up_to_latest:
@@ -891,7 +907,7 @@ def _execute_plans(
                     event="SYNC_SKIP",
                     reason_code=REASON_NO_DATA_FOR_DATE,
                 )
-                continue
+                return False
             requested_dates_for_plan = [""]
 
         # B. 按日期队列执行单产品同步（网络 + 解压 + 文件同步）。
@@ -914,7 +930,8 @@ def _execute_plans(
                     **process_kwargs,
                 )
                 elapsed = time.time() - t_product_start
-                total.merge(stats)
+                with _lock:
+                    total.merge(stats)
                 if reason_code == REASON_NO_VALID_OUTPUT:
                     _append_result(
                         report,
@@ -935,17 +952,19 @@ def _execute_plans(
                         event="SYNC_SKIP",
                         reason_code=reason_code,
                     )
-                    report.phase_sync_seconds += max(0.0, time.time() - t_sync_phase)
+                    with _lock:
+                        report.phase_sync_seconds += max(0.0, time.time() - t_sync_phase)
                     continue
 
                 status_persist_warning = ""
                 try:
-                    _upsert_product_status_after_success(
-                        conn=conn,
-                        command_ctx=command_ctx,
-                        product=product,
-                        actual_time=actual_time,
-                    )
+                    with _lock:
+                        _upsert_product_status_after_success(
+                            conn=conn,
+                            command_ctx=command_ctx,
+                            product=product,
+                            actual_time=actual_time,
+                        )
                 except Exception as status_exc:
                     status_persist_warning = (
                         f"状态持久化失败（已忽略，不影响本次成功结果）: {status_exc}"
@@ -967,7 +986,8 @@ def _execute_plans(
                     source_path=source_path,
                     event_detail=status_persist_warning,
                 )
-                report.phase_sync_seconds += max(0.0, time.time() - t_sync_phase)
+                with _lock:
+                    report.phase_sync_seconds += max(0.0, time.time() - t_sync_phase)
                 continue
             except ProductSyncError as exc:
                 # 可预期业务错误：带有明确 reason_code。
@@ -979,7 +999,8 @@ def _execute_plans(
                 reason_code = REASON_MERGE_ERROR
                 message = str(exc)
                 debug_trace = traceback.format_exc()
-            report.phase_sync_seconds += max(0.0, time.time() - t_sync_phase)
+            with _lock:
+                report.phase_sync_seconds += max(0.0, time.time() - t_sync_phase)
 
             elapsed = time.time() - t_product_start
             # D. 回补模式：无数据日记录为 skipped，继续下一个日期。
@@ -999,8 +1020,8 @@ def _execute_plans(
                     log_debug(debug_trace, event="DEBUG")
                 continue
 
-            # E. 失败路径：记录错误；若开启 stop-on-error 则终止整次任务。
-            has_error = True
+            # E. 失败路径：记录错误。
+            plan_has_error = True
             _append_result(
                 report,
                 product=plan.name,
@@ -1014,13 +1035,41 @@ def _execute_plans(
             log_error(f"[{plan.name}] 处理失败: {message}", event="SYNC_FAIL", reason_code=reason_code)
             if command_ctx.verbose and debug_trace:
                 log_debug(debug_trace, event="DEBUG")
-            if command_ctx.stop_on_error:
-                log_error("已开启 stop-on-error，任务提前停止。", event="RUN_SUMMARY")
-                command_ctx.http_attempts_by_product = dict(HTTP_ATTEMPTS_BY_PRODUCT)
-                command_ctx.http_failures_by_product = dict(HTTP_FAILURES_BY_PRODUCT)
-                return total, has_error, t_run_start
-            # 未开启 stop-on-error：仅终止当前产品后续日期，继续下一个产品。
+            # 仅终止当前产品后续日期，继续下一个产品。
             break
+
+        return plan_has_error
+
+    if effective_workers <= 1:
+        # === 串行路径 ===
+        for plan in plans:
+            if _run_one_plan(plan):
+                has_error = True
+                if command_ctx.stop_on_error:
+                    log_error("已开启 stop-on-error，任务提前停止。", event="RUN_SUMMARY")
+                    command_ctx.http_attempts_by_product = dict(HTTP_ATTEMPTS_BY_PRODUCT)
+                    command_ctx.http_failures_by_product = dict(HTTP_FAILURES_BY_PRODUCT)
+                    return total, has_error, t_run_start
+    else:
+        # === 并行路径（stop_on_error 时已强制 effective_workers=1，不会进这里） ===
+        log_info(
+            f"并发下载启动，线程数={effective_workers}，产品数={len(plans)}。",
+            event="CONCURRENT_START",
+        )
+        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+            futures = {executor.submit(_run_one_plan, plan): plan for plan in plans}
+            for future in as_completed(futures):
+                try:
+                    if future.result():
+                        has_error = True
+                except Exception as exc:
+                    has_error = True
+                    plan = futures[future]
+                    log_error(
+                        f"[{plan.name}] 并发执行异常: {exc}",
+                        event="SYNC_FAIL",
+                        reason_code=REASON_MERGE_ERROR,
+                    )
 
     command_ctx.http_attempts_by_product = dict(HTTP_ATTEMPTS_BY_PRODUCT)
     command_ctx.http_failures_by_product = dict(HTTP_FAILURES_BY_PRODUCT)
@@ -1033,6 +1082,7 @@ def run_update_with_settings(
     force_update: bool = False,
     command_name: str = "all_data",
     fallback_products: Optional[Sequence[str]] = None,
+    max_workers: int = 1,
 ) -> int:
     """
     通用批量更新执行器（update/all_data 共用）。
@@ -1127,6 +1177,7 @@ def run_update_with_settings(
             conn=None,
             force_update=force_update,
             catch_up_to_latest=True,
+            max_workers=max_workers,
         )
         preprocess_has_error = _maybe_run_coin_preprocess(
             command_ctx=command_ctx,
@@ -1145,6 +1196,7 @@ def run_update_with_settings(
                     conn=conn,
                     force_update=force_update,
                     catch_up_to_latest=True,
+                    max_workers=max_workers,
                 )
                 preprocess_has_error = _maybe_run_coin_preprocess(
                     command_ctx=command_ctx,

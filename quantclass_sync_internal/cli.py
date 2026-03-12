@@ -499,6 +499,7 @@ def cmd_update(
     verbose: Optional[bool] = typer.Option(None, "--verbose/--no-verbose", help="显示调试日志（默认跟随全局设置）。"),
     products: List[str] = typer.Option([], "--products", help="临时覆盖默认产品清单。"),
     force_update: bool = typer.Option(False, "--force", help="强制更新：跳过 timestamp 门控。"),
+    workers: int = typer.Option(1, "--workers", "-w", min=1, max=8, help="并发下载线程数（默认 1，推荐 2-3）。"),
 ) -> None:
     """
     一键更新入口（日常只需这个命令）。
@@ -578,6 +579,7 @@ def cmd_update(
         force_update=force_update,
         command_name="update",
         fallback_products=fallback_products,
+        max_workers=workers,
     )
     log_info("update 执行完成。", event="CMD_DONE", exit_code=exit_code)
     if exit_code != 0:
@@ -685,6 +687,76 @@ def cmd_repair_sort(
     log_info("repair_sort 执行完成。", event="CMD_DONE", exit_code=exit_code)
     if exit_code != 0:
         raise typer.Exit(code=exit_code)
+
+@app.command("status")
+@command_guard("status")
+def cmd_status(ctx: typer.Context) -> None:
+    """
+    查看产品数据状态总览（只读，不调用 API）。
+
+    输出所有产品的本地数据日期、落后天数和上次同步结果。
+    """
+    from rich.table import Table
+
+    from .data_query import get_latest_run_summary, get_products_overview
+
+    command_ctx = _init_command(ctx, "status")
+    catalog = load_catalog_or_raise(command_ctx.catalog_file)
+
+    overview = get_products_overview(command_ctx.data_root, catalog)
+
+    # 统计数字
+    green_count = sum(1 for p in overview if p["status_color"] == "green")
+    yellow_count = sum(1 for p in overview if p["status_color"] == "yellow")
+    red_count = sum(1 for p in overview if p["status_color"] == "red")
+    gray_count = sum(1 for p in overview if p["status_color"] == "gray")
+
+    # 表头统计行
+    from .models import RICH_CONSOLE
+    RICH_CONSOLE.print()
+    RICH_CONSOLE.print(
+        f"  [green]● 最新 {green_count}[/green]  "
+        f"[yellow]● 落后 {yellow_count}[/yellow]  "
+        f"[red]● 异常 {red_count}[/red]  "
+        f"[dim]● 未同步 {gray_count}[/dim]"
+    )
+    RICH_CONSOLE.print()
+
+    # 状态表格
+    color_map = {"green": "🟢", "yellow": "🟡", "red": "🔴", "gray": "⚪"}
+    status_label = {"ok": "成功", "error": "失败", "skipped": "跳过", "": ""}
+
+    table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+    table.add_column("状态", width=4, justify="center")
+    table.add_column("产品名称", min_width=20)
+    table.add_column("本地日期", width=10, justify="center")
+    table.add_column("落后", width=6, justify="right")
+    table.add_column("上次结果", width=8, justify="center")
+
+    for p in overview:
+        icon = color_map.get(p["status_color"], "⚪")
+        local_date = p["local_date"] or "--"
+        days = str(p["days_behind"]) if p["days_behind"] is not None else "--"
+        result = status_label.get(p["last_status"], p["last_status"])
+        # 失败产品用红色高亮
+        style = "red" if p["status_color"] == "red" else ""
+        table.add_row(icon, p["name"], local_date, days, result, style=style)
+
+    RICH_CONSOLE.print(table)
+
+    # 底部摘要
+    log_dir = report_dir_path(command_ctx.data_root)
+    summary = get_latest_run_summary(log_dir)
+    RICH_CONSOLE.print()
+    if summary:
+        RICH_CONSOLE.print(
+            f"  上次同步: {summary['started_at']}  "
+            f"耗时: {summary['duration_seconds']:.0f}s  "
+            f"成功: {summary['success_total']}  "
+            f"失败: {summary['failed_total']}"
+        )
+    RICH_CONSOLE.print(f"  数据目录: {command_ctx.data_root}")
+    RICH_CONSOLE.print()
 
 @app.command("init")
 @command_guard("init")
