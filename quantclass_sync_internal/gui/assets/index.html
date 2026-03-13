@@ -112,7 +112,9 @@
 
         <!-- idle 状态 -->
         <div x-show="syncStatus === 'idle'">
-          <div class="sync-info">
+          <!-- 总览加载失败时，同步页也展示错误原因 -->
+          <div class="overview-error" x-show="overviewError" x-text="overviewError"></div>
+          <div class="sync-info" x-show="!overviewError">
             <p x-show="dataRoot" x-text="'数据目录: ' + dataRoot"></p>
             <p x-text="'待更新产品: ' + (summary.yellow + summary.red) + ' 个'"></p>
           </div>
