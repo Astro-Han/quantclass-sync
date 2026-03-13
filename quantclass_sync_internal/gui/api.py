@@ -23,7 +23,13 @@ from ..constants import (
     EXIT_CODE_SUCCESS,
     PRODUCT_MODE_EXPLICIT_LIST,
 )
-from ..data_query import get_latest_run_summary, get_products_overview, get_run_detail, get_run_history
+from ..data_query import (
+    check_data_health,
+    get_latest_run_summary,
+    get_products_overview,
+    get_run_detail,
+    get_run_history,
+)
 from ..models import CommandContext, log_error, log_info
 from ..orchestrator import load_catalog_or_raise, run_update_with_settings
 from ..status_store import report_dir_path
@@ -303,6 +309,23 @@ class SyncApi:
 
         log_dir = report_dir_path(data_root)
         return get_run_detail(log_dir, report_file)
+
+    def get_health_report(self) -> Dict[str, Any]:
+        """返回数据健康报告。
+
+        检测三类问题：文件缺失、CSV 不可读、残留临时文件。
+        返回结构：{"ok": bool, "health": {...}} 或 {"ok": False, "error": "..."}
+        """
+        _user_config, data_root, catalog, err = self._resolve_config()
+        if err:
+            return {"ok": False, "error": err}
+
+        try:
+            health = check_data_health(data_root, catalog)
+        except Exception as exc:
+            return {"ok": False, "error": f"健康检查执行失败：{exc}"}
+
+        return {"ok": True, "health": health}
 
     # ------------------------------------------------------------------
     # 同步线程内部逻辑（不对外暴露）

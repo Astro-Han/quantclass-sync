@@ -614,5 +614,70 @@ class TestGetRunDetail(unittest.TestCase):
         self.assertFalse(result["ok"])
 
 
+class TestGetHealthReport(unittest.TestCase):
+    """get_health_report API 测试。"""
+
+    def test_normal_path(self):
+        """正常路径：返回 ok=True 和 health 字段。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "user_config.json"
+            config_file.write_text("{}")
+            mock_config = _make_mock_config(tmp_dir)
+
+            mock_health = {
+                "issues": [],
+                "summary": {"missing_data": 0, "csv_unreadable": 0, "orphan_temp": 0, "total": 0},
+                "scanned_products": 5,
+                "elapsed_seconds": 0.1,
+            }
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.load_user_config_or_raise", return_value=mock_config), \
+                 patch(f"{_API_MOD}.load_catalog_or_raise", return_value=["p1", "p2"]), \
+                 patch(f"{_API_MOD}.check_data_health", return_value=mock_health) as mock_fn:
+
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.get_health_report()
+
+                mock_fn.assert_called_once()
+
+        self.assertTrue(result["ok"])
+        self.assertIn("health", result)
+        self.assertEqual(result["health"]["summary"]["total"], 0)
+
+    def test_config_missing(self):
+        """配置文件缺失时返回 ok=False。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "user_config.json"
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file):
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.get_health_report()
+
+        self.assertFalse(result["ok"])
+        self.assertIn("error", result)
+
+    def test_check_raises_exception(self):
+        """check_data_health 抛异常时返回 ok=False。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "user_config.json"
+            config_file.write_text("{}")
+            mock_config = _make_mock_config(tmp_dir)
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.load_user_config_or_raise", return_value=mock_config), \
+                 patch(f"{_API_MOD}.load_catalog_or_raise", return_value=["p1"]), \
+                 patch(f"{_API_MOD}.check_data_health", side_effect=RuntimeError("boom")):
+
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.get_health_report()
+
+        self.assertFalse(result["ok"])
+        self.assertIn("boom", result["error"])
+
+
 if __name__ == "__main__":
     unittest.main()
