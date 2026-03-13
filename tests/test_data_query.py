@@ -89,7 +89,7 @@ class TestGetProductsOverview(unittest.TestCase):
         (product_dir / "timestamp.txt").write_text(f"{date_str},2026-03-13 22:00:00\n")
 
     def _write_report(self, filename: str, products: list):
-        """写入一个 run_report JSON。"""
+        """写入一个 run_report JSON，同时更新 product_last_status.json。"""
         report = {
             "schema_version": "3.1",
             "run_id": "test",
@@ -103,6 +103,25 @@ class TestGetProductsOverview(unittest.TestCase):
         }
         (self.log_dir / filename).write_text(
             json.dumps(report, ensure_ascii=False), encoding="utf-8"
+        )
+        # 模拟 _update_product_last_status 的累积写入
+        status_path = self.log_dir / "product_last_status.json"
+        existing = {}
+        if status_path.exists():
+            try:
+                existing = json.loads(status_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                pass
+        for item in products:
+            name = item.get("product", "")
+            if name:
+                existing[name] = {
+                    "status": item.get("status", ""),
+                    "reason_code": item.get("reason_code", ""),
+                    "error": item.get("error", ""),
+                }
+        status_path.write_text(
+            json.dumps(existing, ensure_ascii=False), encoding="utf-8"
         )
 
     def test_basic_overview(self):
@@ -303,7 +322,7 @@ class TestReportDirIsolationByDataRoot(unittest.TestCase):
     """
 
     def _write_report(self, log_dir: Path, filename: str, products: list):
-        """在指定 log_dir 写入 run_report JSON。"""
+        """在指定 log_dir 写入 run_report JSON 和 product_last_status.json。"""
         log_dir.mkdir(parents=True, exist_ok=True)
         report = {
             "schema_version": "3.1",
@@ -318,6 +337,25 @@ class TestReportDirIsolationByDataRoot(unittest.TestCase):
         }
         (log_dir / filename).write_text(
             json.dumps(report, ensure_ascii=False), encoding="utf-8"
+        )
+        # 累积写入 product_last_status.json
+        status_path = log_dir / "product_last_status.json"
+        existing = {}
+        if status_path.exists():
+            try:
+                existing = json.loads(status_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                pass
+        for item in products:
+            name = item.get("product", "")
+            if name:
+                existing[name] = {
+                    "status": item.get("status", ""),
+                    "reason_code": item.get("reason_code", ""),
+                    "error": item.get("error", ""),
+                }
+        status_path.write_text(
+            json.dumps(existing, ensure_ascii=False), encoding="utf-8"
         )
 
     def test_two_data_roots_do_not_cross_read_reports(self):
@@ -364,16 +402,14 @@ class TestReportDirIsolationByDataRoot(unittest.TestCase):
 
 
 class TestReportHistoryScanRetainsOldProducts(unittest.TestCase):
-    """回归测试：扫描多个报告时，旧报告中的产品状态不应被丢弃。
+    """回归测试：累积状态文件保留未参与本轮运行的产品的历史状态。
 
-    Bug: _load_latest_report_products 原先只读最新一个报告，
-    导致"部分运行"（只包含少数产品）覆盖后，其余产品的上次状态丢失，
-    显示为灰色/无状态。
-    修复：改为回溯最近 N 个报告，每产品只取最近一次出现的状态。
+    Bug: 原先只读最新报告，部分运行后其他产品状态丢失。
+    修复：改用 product_last_status.json 累积维护所有产品的最后状态。
     """
 
     def _write_report(self, log_dir: Path, filename: str, products: list):
-        """在指定 log_dir 写入 run_report JSON。"""
+        """在指定 log_dir 写入 run_report JSON 和累积更新 product_last_status.json。"""
         log_dir.mkdir(parents=True, exist_ok=True)
         report = {
             "schema_version": "3.1",
@@ -388,6 +424,25 @@ class TestReportHistoryScanRetainsOldProducts(unittest.TestCase):
         }
         (log_dir / filename).write_text(
             json.dumps(report, ensure_ascii=False), encoding="utf-8"
+        )
+        # 模拟 _update_product_last_status 的累积写入
+        status_path = log_dir / "product_last_status.json"
+        existing = {}
+        if status_path.exists():
+            try:
+                existing = json.loads(status_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                pass
+        for item in products:
+            name = item.get("product", "")
+            if name:
+                existing[name] = {
+                    "status": item.get("status", ""),
+                    "reason_code": item.get("reason_code", ""),
+                    "error": item.get("error", ""),
+                }
+        status_path.write_text(
+            json.dumps(existing, ensure_ascii=False), encoding="utf-8"
         )
 
     def test_old_product_status_retained_from_earlier_report(self):
@@ -423,10 +478,10 @@ class TestReportHistoryScanRetainsOldProducts(unittest.TestCase):
 
             by_name = {item["name"]: item for item in overview}
 
-            # product-a：最新报告没有它，但旧报告有 error，应从旧报告回溯
+            # product-a：第二轮没跑它，但累积状态文件保留了第一轮的 error
             self.assertEqual(
                 by_name["product-a"]["last_status"], "error",
-                "product-a 应从旧报告回溯到 error 状态"
+                "product-a 应从累积状态文件保留 error 状态"
             )
             self.assertEqual(
                 by_name["product-a"]["status_color"], "red",
@@ -435,6 +490,81 @@ class TestReportHistoryScanRetainsOldProducts(unittest.TestCase):
 
             # product-b：最新报告有它，状态为 ok
             self.assertEqual(by_name["product-b"]["last_status"], "ok")
+
+
+class TestUpdateProductLastStatus(unittest.TestCase):
+    """回归测试：_update_product_last_status 的累积语义和同产品覆盖。"""
+
+    def test_same_product_multiple_times_takes_last(self):
+        """同一报告内同产品出现多次时（catch-up），应取最后一条。"""
+        from quantclass_sync_internal.reporting import _update_product_last_status, PRODUCT_LAST_STATUS_FILE
+        from quantclass_sync_internal.models import RunReport, ProductRunResult, SyncStats
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            report = RunReport(
+                schema_version="3.1", run_id="test", started_at="", mode="network",
+            )
+            # 同产品 p1 先 error 后 ok（模拟 catch-up：第一天失败，第二天成功）
+            report.products = [
+                ProductRunResult(
+                    product="p1", status="error", strategy="merge_known",
+                    reason_code="network_error", date_time="2026-03-12",
+                    error="day1 fail", stats=SyncStats(),
+                ),
+                ProductRunResult(
+                    product="p1", status="ok", strategy="merge_known",
+                    reason_code="ok", date_time="2026-03-13",
+                    error="", stats=SyncStats(),
+                ),
+            ]
+            _update_product_last_status(log_dir, report)
+
+            status = json.loads(
+                (log_dir / PRODUCT_LAST_STATUS_FILE).read_text(encoding="utf-8")
+            )
+            # 最后一条（ok）应覆盖前面的（error）
+            self.assertEqual(status["p1"]["status"], "ok")
+            self.assertEqual(status["p1"]["error"], "")
+
+    def test_accumulates_across_runs(self):
+        """多次运行后，未参与本轮的产品保留上次状态。"""
+        from quantclass_sync_internal.reporting import _update_product_last_status, PRODUCT_LAST_STATUS_FILE
+        from quantclass_sync_internal.models import RunReport, ProductRunResult, SyncStats
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+
+            # 第一轮：p1 error, p2 ok
+            r1 = RunReport(schema_version="3.1", run_id="r1", started_at="", mode="network")
+            r1.products = [
+                ProductRunResult(
+                    product="p1", status="error", strategy="merge_known",
+                    reason_code="network_error", error="fail", stats=SyncStats(),
+                ),
+                ProductRunResult(
+                    product="p2", status="ok", strategy="merge_known",
+                    reason_code="ok", error="", stats=SyncStats(),
+                ),
+            ]
+            _update_product_last_status(log_dir, r1)
+
+            # 第二轮：只有 p2
+            r2 = RunReport(schema_version="3.1", run_id="r2", started_at="", mode="network")
+            r2.products = [
+                ProductRunResult(
+                    product="p2", status="ok", strategy="merge_known",
+                    reason_code="ok", error="", stats=SyncStats(),
+                ),
+            ]
+            _update_product_last_status(log_dir, r2)
+
+            status = json.loads(
+                (log_dir / PRODUCT_LAST_STATUS_FILE).read_text(encoding="utf-8")
+            )
+            # p1 未参与第二轮，但仍保留第一轮的 error
+            self.assertEqual(status["p1"]["status"], "error")
+            self.assertEqual(status["p2"]["status"], "ok")
 
 
 if __name__ == "__main__":

@@ -164,6 +164,36 @@ def decide_exit_code(
         return EXIT_CODE_NETWORK_OR_REMOTE_DATA_FAILURE
     return EXIT_CODE_GENERAL_FAILURE
 
+PRODUCT_LAST_STATUS_FILE = "product_last_status.json"
+
+
+def _update_product_last_status(log_dir: Path, report: RunReport) -> None:
+    """累积更新每产品最后状态文件。
+
+    每次运行后把本轮涉及的产品状态写入 product_last_status.json，
+    未涉及的产品保留上次的状态。同一报告内同产品出现多次时取最后一条（catch-up 场景）。
+    """
+    status_path = log_dir / PRODUCT_LAST_STATUS_FILE
+    log_dir.mkdir(parents=True, exist_ok=True)
+    # 读取已有累积状态
+    existing: Dict[str, Dict[str, str]] = {}
+    if status_path.exists():
+        try:
+            existing = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pass
+    # 用本轮结果覆盖（同产品多次出现时后面的覆盖前面的）
+    for item in report.products:
+        existing[item.product] = {
+            "status": item.status,
+            "reason_code": item.reason_code,
+            "error": item.error,
+        }
+    # 原子写入
+    with atomic_temp_path(status_path, tag="last_status") as tmp:
+        tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _finalize_and_write_report(
     report: RunReport,
     total: SyncStats,
@@ -211,6 +241,7 @@ def _finalize_and_write_report(
     )
 
     write_run_report(report_path, report)
+    _update_product_last_status(report_path.parent, report)
     log_info("运行报告已写入。", event="RUN_SUMMARY", report_file=str(report_path))
     return decide_exit_code(report=report, has_error=has_error)
 

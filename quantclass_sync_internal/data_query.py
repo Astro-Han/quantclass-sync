@@ -56,36 +56,23 @@ def _status_color(days_behind: Optional[int], last_status: str) -> str:
     return "red"
 
 
-_REPORT_SCAN_LIMIT = 20  # 回溯最近 N 个报告文件
+_PRODUCT_LAST_STATUS_FILE = "product_last_status.json"
 
 
 def _load_latest_report_products(log_dir: Path) -> Dict[str, Dict[str, Any]]:
-    """从最近的 run_report JSON 中提取每产品最后一次出现的结果。
+    """读取每产品累积状态文件，返回 {product_name: {status, reason_code, error}}。
 
-    回溯最近 _REPORT_SCAN_LIMIT 个报告（按文件名降序），
-    每个产品只取最近一次出现的状态，避免部分运行后其他产品状态丢失。
-    返回 {product_name: {status, reason_code, error}}，无报告时返回空 dict。
+    该文件由每次运行结束时的 _update_product_last_status 增量维护，
+    覆盖所有历史运行中出现过的产品，不受报告数量限制。
+    文件不存在时返回空 dict（首次升级后的过渡状态，下次同步即恢复）。
     """
-    report_files = sorted(log_dir.glob("run_report_*.json"))
-    if not report_files:
+    status_path = log_dir / _PRODUCT_LAST_STATUS_FILE
+    if not status_path.exists():
         return {}
-    # 从最新报告往回扫描
-    result: Dict[str, Dict[str, Any]] = {}
-    for path in reversed(report_files[-_REPORT_SCAN_LIMIT:]):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        for item in data.get("products", []):
-            name = item.get("product", "")
-            if name and name not in result:
-                # 只取该产品最近一次出现的状态（更新报告中的覆盖不回退）
-                result[name] = {
-                    "status": item.get("status", ""),
-                    "reason_code": item.get("reason_code", ""),
-                    "error": item.get("error", ""),
-                }
-    return result
+    try:
+        return json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
 def get_products_overview(
