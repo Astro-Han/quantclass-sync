@@ -1,5 +1,5 @@
 // Alpine.js 数据组件
-// 等待 alpine:init 事件注册组件，再等待 pywebview:ready 后初始化数据
+// 等待 alpine:init 事件注册组件，再等待 pywebviewready 后初始化数据
 document.addEventListener('alpine:init', () => {
     Alpine.data('app', () => ({
         // ===== 全局状态 =====
@@ -14,7 +14,7 @@ document.addEventListener('alpine:init', () => {
 
         // ===== 同步状态 =====
         syncStatus: 'idle',    // 'idle' | 'syncing' | 'done' | 'error'
-        currentProduct: '',    // 当前正在处理的产品名
+        currentProduct: '',    // 最近完成的产品名
         completed: 0,          // 已完成产品数
         total: 0,              // 总产品数
         elapsedSeconds: 0,     // 已用秒数
@@ -24,13 +24,13 @@ document.addEventListener('alpine:init', () => {
 
         // ===== 初始化 =====
         // Alpine.js 会在组件挂载时调用 init()
-        // 优先检查 pywebview 是否已就绪，否则监听事件
+        // 优先检查 pywebview bridge 是否已完成注入，否则监听 pywebviewready 事件
         init() {
-            if (window.pywebview) {
-                // 延迟到下一轮事件循环，确保 Alpine 组件已完全挂载
+            if (window.pywebview && window.pywebview.api) {
+                // bridge 已就绪，延迟到下一轮事件循环确保 Alpine 组件完全挂载
                 setTimeout(() => this.loadOverview(), 0);
             } else {
-                window.addEventListener('pywebview:ready', () => {
+                window.addEventListener('pywebviewready', () => {
                     this.loadOverview();
                 });
             }
@@ -120,6 +120,7 @@ document.addEventListener('alpine:init', () => {
                     } else if (p.status === 'error') {
                         this.syncStatus = 'error';
                         this.errorMessage = p.error_message || '同步失败';
+                        this.runSummary = p.run_summary;  // 部分失败时也携带摘要
                         this.pollTimer = null;
                         return; // 终态，不再调度下次轮询
                     }

@@ -122,7 +122,7 @@
         <!-- syncing 状态 -->
         <div x-show="syncStatus === 'syncing'">
           <div class="sync-current">
-            <span x-text="currentProduct || '准备中...'"></span>
+            <span x-text="currentProduct ? '已完成: ' + currentProduct : '准备中...'"></span>
             <span class="sync-progress-text" x-text="total > 0 ? completed + ' / ' + total : ''"></span>
           </div>
           <!-- 进度条 -->
@@ -166,6 +166,26 @@
         <div x-show="syncStatus === 'error'" class="sync-result">
           <div class="sync-error-mark">&#10007; 同步失败</div>
           <div class="sync-error-msg" x-text="errorMessage"></div>
+          <!-- 部分产品失败时展示摘要详情 -->
+          <template x-if="runSummary">
+            <div>
+              <div class="sync-done-stats">
+                <span class="green" x-text="'成功: ' + (runSummary.ok || 0)"></span>
+                <span class="red" x-text="'失败: ' + (runSummary.error || 0)"></span>
+                <span class="gray" x-text="'跳过: ' + (runSummary.skipped || 0)"></span>
+              </div>
+              <template x-if="runSummary.failed_products && runSummary.failed_products.length > 0">
+                <div>
+                  <div class="failed-list-label">失败产品</div>
+                  <ul class="failed-list">
+                    <template x-for="name in runSummary.failed_products" :key="name">
+                      <li x-text="name"></li>
+                    </template>
+                  </ul>
+                </div>
+              </template>
+            </div>
+          </template>
           <button class="btn btn-primary" @click="resetSync()">重试</button>
         </div>
 

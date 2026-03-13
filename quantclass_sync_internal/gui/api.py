@@ -20,6 +20,8 @@ from ..constants import (
     DEFAULT_SECRETS_FILE,
     DEFAULT_USER_CONFIG_FILE,
     DEFAULT_WORK_DIR,
+    EXIT_CODE_SUCCESS,
+    PRODUCT_MODE_EXPLICIT_LIST,
 )
 from ..data_query import get_latest_run_summary, get_products_overview
 from ..models import CommandContext, log_error, log_info
@@ -36,7 +38,7 @@ def _new_run_id() -> str:
 # _progress 的初始结构，每次 start_sync 前重置为此形态
 _PROGRESS_INIT: Dict[str, Any] = {
     "status": "idle",          # idle / syncing / done / error
-    "current_product": "",     # 当前正在同步的产品名
+    "current_product": "",     # 最近完成的产品名
     "completed": 0,            # 已完成产品数
     "total": 0,                # 本次同步产品总数
     "elapsed_seconds": 0,      # 已用时（秒）
@@ -326,19 +328,29 @@ class SyncApi:
                     elapsed_seconds=round(elapsed, 1),
                 )
 
-            # 执行同步（fallback_products 来自配置的 default_products，products=[] 表示走本地扫描）
-            run_update_with_settings(
+            # 产品选择逻辑，与 CLI update 对齐：
+            # explicit_list 模式: default_products 作为主列表
+            # local_scan 模式: 本地扫描为主，default_products 作为 fallback
+            selected_products: list = []
+            fallback_products: list = []
+            if getattr(user_config, "product_mode", "") == PRODUCT_MODE_EXPLICIT_LIST:
+                selected_products = user_config.default_products or []
+            else:
+                fallback_products = user_config.default_products or []
+
+            # 执行同步，接收退出码判断业务结果
+            exit_code = run_update_with_settings(
                 command_ctx=command_ctx,
                 mode="local",  # 产品发现策略（按本地已有目录扫描）
-                products=[],
+                products=selected_products,
                 force_update=False,
                 command_name="gui_update",
-                fallback_products=user_config.default_products,
+                fallback_products=fallback_products,
                 max_workers=2,
                 progress_callback=progress_callback,
             )
 
-            # 同步完成，读取最新 run_summary 并转换为前端友好格式
+            # 读取 run_summary 并转换为前端友好格式
             elapsed = time.time() - t_start
             run_summary = None
             try:
@@ -358,12 +370,23 @@ class SyncApi:
             except Exception as summary_exc:
                 log_error(f"同步完成但运行摘要读取失败：{summary_exc}", event="GUI_SYNC")
 
-            self._update_progress(
-                status="done",
-                elapsed_seconds=round(elapsed, 1),
-                run_summary=run_summary,
-            )
-            log_info("GUI 同步完成。", event="GUI_SYNC", elapsed=round(elapsed, 1))
+            # 退出码非零表示有产品失败或无可执行产品，标记为 error 并附带 run_summary
+            if exit_code != EXIT_CODE_SUCCESS:
+                error_msg = "部分产品同步失败" if run_summary and run_summary.get("error", 0) > 0 else "同步未成功完成"
+                self._update_progress(
+                    status="error",
+                    elapsed_seconds=round(elapsed, 1),
+                    error_message=error_msg,
+                    run_summary=run_summary,
+                )
+                log_info("GUI 同步结束（有失败）。", event="GUI_SYNC", exit_code=exit_code, elapsed=round(elapsed, 1))
+            else:
+                self._update_progress(
+                    status="done",
+                    elapsed_seconds=round(elapsed, 1),
+                    run_summary=run_summary,
+                )
+                log_info("GUI 同步完成。", event="GUI_SYNC", elapsed=round(elapsed, 1))
 
         except Exception as exc:
             elapsed = time.time() - t_start

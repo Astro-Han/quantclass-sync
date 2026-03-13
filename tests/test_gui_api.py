@@ -207,7 +207,7 @@ class TestStartSyncSuccess(unittest.TestCase):
     def test_start_sync_success(self):
         # 使用 patch.start()/addCleanup 确保 patch 在整个测试方法（含后台线程）期间有效
         def fake_run_update(**kwargs):
-            pass
+            return 0  # EXIT_CODE_SUCCESS
 
         patches = [
             patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", self.config_file),
@@ -339,6 +339,7 @@ class TestProgressCallbackUpdatesProgress(unittest.TestCase):
             if progress_callback:
                 progress_callback("product-a", 1, 2)
                 progress_callback("product-b", 2, 2)
+            return 0  # EXIT_CODE_SUCCESS
 
         # 用 patch.start()/addCleanup 保证 patch 在后台线程执行期间持续有效
         patches = [
@@ -438,6 +439,58 @@ class TestOverviewFieldNames(unittest.TestCase):
         # 验证 failed_products 是字符串列表
         self.assertIsInstance(last_run["failed_products"], list)
         self.assertEqual(last_run["failed_products"], ["product-b"])
+
+
+class TestSyncNonZeroExitCode(unittest.TestCase):
+    """run_update_with_settings 返回非零退出码时，progress.status 应为 error。"""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        tmp_dir = self.tmpdir.name
+        self.config_file = Path(tmp_dir) / "user_config.json"
+        self.config_file.write_text("{}", encoding="utf-8")
+        self.mock_config = _make_mock_config(tmp_dir)
+        self.tmp_dir = tmp_dir
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_nonzero_exit_code_sets_error_status(self):
+        def fake_run_update(**kwargs):
+            return 1  # EXIT_CODE_GENERAL_FAILURE
+
+        patches = [
+            patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", self.config_file),
+            patch(f"{_API_MOD}.load_user_config_or_raise", return_value=self.mock_config),
+            patch(f"{_API_MOD}.load_catalog_or_raise", return_value=["product-a"]),
+            patch(f"{_API_MOD}.run_update_with_settings", side_effect=fake_run_update),
+            patch(f"{_API_MOD}.resolve_credentials_for_update", return_value=("key", "hid", "env")),
+            patch(f"{_API_MOD}.report_dir_path", return_value=Path(self.tmp_dir) / "log"),
+            patch(f"{_API_MOD}.get_latest_run_summary", return_value=None),
+            patch(f"{_API_MOD}.DEFAULT_SECRETS_FILE", Path(self.tmp_dir) / "secrets.env"),
+            patch(f"{_API_MOD}.DEFAULT_CATALOG_FILE", Path(self.tmp_dir) / "catalog.json"),
+            patch(f"{_API_MOD}.DEFAULT_WORK_DIR", Path(self.tmp_dir) / "work"),
+            patch(f"{_API_MOD}.DEFAULT_API_BASE", "https://fake.api"),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+        from quantclass_sync_internal.gui.api import SyncApi
+        api = SyncApi()
+        api.start_sync()
+
+        # 等待后台线程完成
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            progress = api.get_sync_progress()
+            if progress["status"] in ("done", "error"):
+                break
+            time.sleep(0.1)
+
+        final = api.get_sync_progress()
+        self.assertEqual(final["status"], "error")
+        self.assertIn("未成功完成", final["error_message"])
 
 
 if __name__ == "__main__":
