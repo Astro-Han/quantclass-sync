@@ -1194,7 +1194,7 @@ def run_update_with_settings(
         )
 
     if command_ctx.dry_run:
-        total, has_error, t_run_start = _execute_plans(
+        total, has_error, _ = _execute_plans(
             plans,
             command_ctx,
             report,
@@ -1213,7 +1213,7 @@ def run_update_with_settings(
     else:
         with open_status_db(command_ctx.data_root) as conn:
             try:
-                total, has_error, t_run_start = _execute_plans(
+                total, has_error, _ = _execute_plans(
                     plans,
                     command_ctx,
                     report,
@@ -1232,4 +1232,6 @@ def run_update_with_settings(
             finally:
                 export_status_json(conn, status_json_path(command_ctx.data_root))
 
+    # 使用 run_update_with_settings 自己的 t_run_start（第 1121 行），
+    # 而非 _execute_plans 内部的计时，以包含 discover/catalog/plan 前置阶段耗时。
     return _finalize_and_write_report(report, total, has_error, t_run_start, report_path)

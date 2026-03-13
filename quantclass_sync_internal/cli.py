@@ -64,8 +64,8 @@ from .models import (
     utc_now_iso,
 )
 from .data_query import get_latest_run_summary, get_products_overview
-from .orchestrator import _append_result, _execute_plans, _finalize_and_write_report, _new_report, _build_headers, load_catalog_or_raise, run_update_with_settings
-from .reporting import resolve_report_path
+from .orchestrator import _build_headers, _execute_plans, load_catalog_or_raise, run_update_with_settings
+from .reporting import _append_result, _finalize_and_write_report, _new_report, resolve_report_path
 from .status_store import (
     cleanup_report_logs,
     cleanup_work_cache_aggressive,

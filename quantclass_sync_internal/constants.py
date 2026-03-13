@@ -23,8 +23,6 @@ DEFAULT_USER_SECRETS_FILE = BASE_DIR / "user_secrets.env"
 
 DEFAULT_CATALOG_FILE = BASE_DIR / "catalog.txt"
 
-DEFAULT_REPORT_DIR = BASE_DIR / "log"
-
 DEFAULT_PROGRESS_EVERY = 500
 
 SYNC_META_DIRNAME = ".quantclass_sync"

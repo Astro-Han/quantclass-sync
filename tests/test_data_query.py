@@ -567,5 +567,185 @@ class TestUpdateProductLastStatus(unittest.TestCase):
             self.assertEqual(status["p2"]["status"], "ok")
 
 
+class TestBackfillFromReports(unittest.TestCase):
+    """回归测试：升级过渡期，累积文件缺失时从历史 run_report 回填。
+
+    Bug: 升级后 product_last_status.json 尚未生成，
+    _load_latest_report_products 直接返回空 dict，导致历史状态丢失。
+    修复：缺失时扫描所有 run_report 回填，并持久化供后续快速读取。
+    """
+
+    def test_backfill_restores_status_from_reports(self):
+        """只有历史 run_report 时，get_products_overview 能恢复 last_status。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_root = Path(tmpdir)
+            log_dir = data_root / ".quantclass_sync" / "log"
+            log_dir.mkdir(parents=True)
+
+            # 创建产品目录和 timestamp
+            for p in ["product-a", "product-b"]:
+                (data_root / p).mkdir(parents=True)
+                (data_root / p / "timestamp.txt").write_text(
+                    "2026-03-12,2026-03-12 22:00:00\n", encoding="utf-8"
+                )
+
+            # 只写 run_report，不写 product_last_status.json（模拟升级过渡期）
+            report = {
+                "schema_version": "3.1",
+                "run_id": "old-run",
+                "started_at": "2026-03-12T00:00:00Z",
+                "mode": "network",
+                "success_total": 1,
+                "failed_total": 1,
+                "skipped_total": 0,
+                "duration_seconds": 10.0,
+                "products": [
+                    {"product": "product-a", "status": "error",
+                     "reason_code": "network_error", "error": "连接超时"},
+                    {"product": "product-b", "status": "ok",
+                     "reason_code": "ok", "error": ""},
+                ],
+            }
+            (log_dir / "run_report_20260312_update.json").write_text(
+                json.dumps(report, ensure_ascii=False), encoding="utf-8"
+            )
+
+            # product_last_status.json 不存在
+            self.assertFalse(
+                (log_dir / "product_last_status.json").exists()
+            )
+
+            overview = get_products_overview(
+                data_root, ["product-a", "product-b"], today=date(2026, 3, 13),
+            )
+
+            by_name = {item["name"]: item for item in overview}
+            # product-a 应从历史报告恢复 error 状态
+            self.assertEqual(by_name["product-a"]["last_status"], "error")
+            self.assertEqual(by_name["product-a"]["last_error"], "连接超时")
+            self.assertEqual(by_name["product-a"]["status_color"], "red")
+            # product-b 应恢复 ok 状态
+            self.assertEqual(by_name["product-b"]["last_status"], "ok")
+
+            # 回填后 product_last_status.json 应已生成
+            self.assertTrue(
+                (log_dir / "product_last_status.json").exists(),
+                "回填后应自动生成 product_last_status.json 供后续快速读取"
+            )
+
+    def test_backfill_merges_multiple_reports(self):
+        """多份历史报告按时间顺序合并，后写覆盖先写。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_root = Path(tmpdir)
+            log_dir = data_root / ".quantclass_sync" / "log"
+            log_dir.mkdir(parents=True)
+
+            (data_root / "p1").mkdir(parents=True)
+            (data_root / "p1" / "timestamp.txt").write_text(
+                "2026-03-13,2026-03-13 22:00:00\n", encoding="utf-8"
+            )
+
+            # 报告1：p1 error
+            r1 = {
+                "schema_version": "3.1", "run_id": "r1",
+                "started_at": "2026-03-12T00:00:00Z", "mode": "network",
+                "products": [
+                    {"product": "p1", "status": "error",
+                     "reason_code": "network_error", "error": "fail"},
+                ],
+            }
+            (log_dir / "run_report_20260312_update.json").write_text(
+                json.dumps(r1), encoding="utf-8"
+            )
+
+            # 报告2（更新）：p1 ok
+            r2 = {
+                "schema_version": "3.1", "run_id": "r2",
+                "started_at": "2026-03-13T00:00:00Z", "mode": "network",
+                "products": [
+                    {"product": "p1", "status": "ok",
+                     "reason_code": "ok", "error": ""},
+                ],
+            }
+            (log_dir / "run_report_20260313_update.json").write_text(
+                json.dumps(r2), encoding="utf-8"
+            )
+
+            overview = get_products_overview(
+                data_root, ["p1"], today=date(2026, 3, 13),
+            )
+            # 后写报告的 ok 应覆盖先写报告的 error
+            self.assertEqual(overview[0]["last_status"], "ok")
+
+
+def _concurrent_status_worker(product_name: str, log_dir_str: str):
+    """并发测试 worker：每个进程写入一个独占产品到 product_last_status.json。"""
+    import time
+    from quantclass_sync_internal.reporting import _update_product_last_status
+    from quantclass_sync_internal.models import RunReport, ProductRunResult, SyncStats
+
+    work_dir = Path(log_dir_str)
+    report = RunReport(
+        schema_version="3.1", run_id=f"run-{product_name}",
+        started_at="", mode="network",
+    )
+    report.products = [
+        ProductRunResult(
+            product=product_name, status="ok",
+            strategy="merge_known", reason_code="ok",
+            error="", stats=SyncStats(),
+        ),
+    ]
+    # 加小延迟增加竞争窗口
+    time.sleep(0.01)
+    _update_product_last_status(work_dir, report)
+
+
+class TestConcurrentProductLastStatusWrite(unittest.TestCase):
+    """回归测试：多进程并发写入 product_last_status.json 不丢状态。
+
+    Bug: _update_product_last_status 的读-合并-写循环无进程级互斥，
+    两个进程同时基于同一旧快照写回会导致后写入方覆盖先写入方的全部更新。
+    修复：加 fcntl.flock 排他锁。
+    """
+
+    def test_concurrent_writes_no_lost_updates(self):
+        """多进程并发更新，最终文件应包含所有进程写入的产品。"""
+        import multiprocessing
+        from quantclass_sync_internal.reporting import PRODUCT_LAST_STATUS_FILE
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+
+            n_workers = 10
+            processes = []
+            for i in range(n_workers):
+                p = multiprocessing.Process(
+                    target=_concurrent_status_worker,
+                    args=(f"product-{i}", str(log_dir)),
+                )
+                processes.append(p)
+
+            # 同时启动所有进程
+            for p in processes:
+                p.start()
+            for p in processes:
+                p.join(timeout=10)
+
+            status = json.loads(
+                (log_dir / PRODUCT_LAST_STATUS_FILE).read_text(encoding="utf-8")
+            )
+
+            # 所有 10 个产品都应存在（无丢失）
+            missing = [
+                f"product-{i}" for i in range(n_workers)
+                if f"product-{i}" not in status
+            ]
+            self.assertEqual(
+                missing, [],
+                f"并发写入后丢失产品: {missing}。最终文件包含 {len(status)} 个产品。"
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

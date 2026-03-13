@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import time
 from collections import defaultdict
@@ -172,26 +173,34 @@ def _update_product_last_status(log_dir: Path, report: RunReport) -> None:
 
     每次运行后把本轮涉及的产品状态写入 product_last_status.json，
     未涉及的产品保留上次的状态。同一报告内同产品出现多次时取最后一条（catch-up 场景）。
+
+    使用 fcntl.flock 排他锁保护读-合并-写循环，防止并发进程丢更新。
+    原子写入防写半截，文件锁防丢更新，职责正交。
     """
     status_path = log_dir / PRODUCT_LAST_STATUS_FILE
+    lock_path = log_dir / "product_last_status.lock"
     log_dir.mkdir(parents=True, exist_ok=True)
-    # 读取已有累积状态
-    existing: Dict[str, Dict[str, str]] = {}
-    if status_path.exists():
-        try:
-            existing = json.loads(status_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            pass
-    # 用本轮结果覆盖（同产品多次出现时后面的覆盖前面的）
-    for item in report.products:
-        existing[item.product] = {
-            "status": item.status,
-            "reason_code": item.reason_code,
-            "error": item.error,
-        }
-    # 原子写入
-    with atomic_temp_path(status_path, tag="last_status") as tmp:
-        tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    with open(lock_path, "w") as lock_fd:
+        # 进程级排他锁：同一时刻只有一个进程能进入读-合并-写循环
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        # 读取已有累积状态
+        existing: Dict[str, Dict[str, str]] = {}
+        if status_path.exists():
+            try:
+                existing = json.loads(status_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                pass
+        # 用本轮结果覆盖（同产品多次出现时后面的覆盖前面的）
+        for item in report.products:
+            existing[item.product] = {
+                "status": item.status,
+                "reason_code": item.reason_code,
+                "error": item.error,
+            }
+        # 原子写入
+        with atomic_temp_path(status_path, tag="last_status") as tmp:
+            tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _finalize_and_write_report(
