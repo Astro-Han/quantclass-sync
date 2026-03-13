@@ -1193,6 +1193,7 @@ def run_update_with_settings(
             no_executable_products=True,
         )
 
+    # 丢弃 _execute_plans 内部计时（第三返回值），以外层 t_run_start 为准，含前置阶段耗时
     if command_ctx.dry_run:
         total, has_error, _ = _execute_plans(
             plans,

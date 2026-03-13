@@ -167,6 +167,72 @@ def decide_exit_code(
 
 PRODUCT_LAST_STATUS_FILE = "product_last_status.json"
 
+_LOCK_FILE = "product_last_status.lock"
+
+
+def _scan_reports_for_backfill(log_dir: Path) -> Dict[str, Dict[str, str]]:
+    """扫描历史 run_report 构建产品状态（内部函数，调用方负责加锁）。
+
+    按文件名字典序升序扫描，后写报告覆盖先写报告，与正常累积逻辑一致。
+    """
+    report_files = sorted(log_dir.glob("run_report_*.json"))
+    result: Dict[str, Dict[str, str]] = {}
+    for path in report_files:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for item in data.get("products", []):
+            name = item.get("product", "")
+            if name:
+                result[name] = {
+                    "status": item.get("status", ""),
+                    "reason_code": item.get("reason_code", ""),
+                    "error": item.get("error", ""),
+                }
+    return result
+
+
+def read_or_backfill_product_last_status(log_dir: Path) -> Dict[str, Dict[str, str]]:
+    """读取累积状态文件，缺失或损坏时从历史报告回填。
+
+    与 _update_product_last_status 共享同一把文件锁，避免回填与同步写入竞争。
+    流程：
+    1. 快路径（无锁）：文件存在且可解析，直接返回。
+    2. 慢路径（加锁）：双重检查后，扫描历史报告回填并原子写入。
+       即使结果为空 dict 也落盘，作为"已回填"哨兵，避免重复扫描。
+    """
+    status_path = log_dir / PRODUCT_LAST_STATUS_FILE
+
+    # 快路径：文件存在且可解析，无需加锁
+    if status_path.exists():
+        try:
+            result = json.loads(status_path.read_text(encoding="utf-8"))
+            if isinstance(result, dict):
+                return result
+        except (OSError, json.JSONDecodeError):
+            pass  # 损坏，走慢路径修复
+
+    # 慢路径：加锁回填（或修复损坏文件）
+    log_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = log_dir / _LOCK_FILE
+    with open(lock_path, "w") as lock_fd:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        # 双重检查：等锁期间另一个进程可能已完成写入
+        if status_path.exists():
+            try:
+                result = json.loads(status_path.read_text(encoding="utf-8"))
+                if isinstance(result, dict):
+                    return result
+            except (OSError, json.JSONDecodeError):
+                pass  # 仍然损坏，继续回填修复
+        # 从历史报告回填
+        result = _scan_reports_for_backfill(log_dir)
+        # 原子写入（即使为空 dict，也作为哨兵标记避免重复扫描）
+        with atomic_temp_path(status_path, tag="last_status") as tmp:
+            tmp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        return result
+
 
 def _update_product_last_status(log_dir: Path, report: RunReport) -> None:
     """累积更新每产品最后状态文件。
@@ -178,7 +244,7 @@ def _update_product_last_status(log_dir: Path, report: RunReport) -> None:
     原子写入防写半截，文件锁防丢更新，职责正交。
     """
     status_path = log_dir / PRODUCT_LAST_STATUS_FILE
-    lock_path = log_dir / "product_last_status.lock"
+    lock_path = log_dir / _LOCK_FILE
     log_dir.mkdir(parents=True, exist_ok=True)
 
     with open(lock_path, "w") as lock_fd:

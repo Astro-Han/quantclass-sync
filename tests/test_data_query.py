@@ -747,5 +747,60 @@ class TestConcurrentProductLastStatusWrite(unittest.TestCase):
             )
 
 
+class TestCorruptedStatusFileSelfHealing(unittest.TestCase):
+    """回归测试：累积文件损坏时自动从历史报告重建。
+
+    Bug: product_last_status.json 存在但 JSON 损坏时，
+    直接返回空 dict，不会回退到历史 run_report 重新构建。
+    修复：损坏时走慢路径（加锁 + 回填 + 原子写），自动恢复。
+    """
+
+    def test_corrupted_json_triggers_rebuild(self):
+        """累积文件损坏时，从历史报告重建状态。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_root = Path(tmpdir)
+            log_dir = data_root / ".quantclass_sync" / "log"
+            log_dir.mkdir(parents=True)
+
+            # 创建产品目录和 timestamp
+            (data_root / "p1").mkdir(parents=True)
+            (data_root / "p1" / "timestamp.txt").write_text(
+                "2026-03-12,2026-03-12 22:00:00\n", encoding="utf-8"
+            )
+
+            # 写一份正常的 run_report
+            report = {
+                "schema_version": "3.1", "run_id": "r1",
+                "started_at": "2026-03-12T00:00:00Z", "mode": "network",
+                "products": [
+                    {"product": "p1", "status": "error",
+                     "reason_code": "network_error", "error": "timeout"},
+                ],
+            }
+            (log_dir / "run_report_20260312_update.json").write_text(
+                json.dumps(report), encoding="utf-8"
+            )
+
+            # 写入损坏的 product_last_status.json
+            (log_dir / "product_last_status.json").write_text(
+                "CORRUPTED{{{not json", encoding="utf-8"
+            )
+
+            overview = get_products_overview(
+                data_root, ["p1"], today=date(2026, 3, 13),
+            )
+
+            # 应从历史报告重建，而非返回空状态
+            self.assertEqual(overview[0]["last_status"], "error")
+            self.assertEqual(overview[0]["last_error"], "timeout")
+
+            # 重建后文件应可正常解析
+            rebuilt = json.loads(
+                (log_dir / "product_last_status.json").read_text(encoding="utf-8")
+            )
+            self.assertIn("p1", rebuilt)
+            self.assertEqual(rebuilt["p1"]["status"], "error")
+
+
 if __name__ == "__main__":
     unittest.main()

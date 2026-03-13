@@ -10,6 +10,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+from .reporting import read_or_backfill_product_last_status
 from .status_store import read_local_timestamp_date, report_dir_path
 
 # --- 产品状态总览 ---
@@ -56,59 +57,16 @@ def _status_color(days_behind: Optional[int], last_status: str) -> str:
     return "red"
 
 
-from .reporting import PRODUCT_LAST_STATUS_FILE as _PRODUCT_LAST_STATUS_FILE
-
-
-def _backfill_from_reports(log_dir: Path, status_path: Path) -> Dict[str, Dict[str, Any]]:
-    """从历史 run_report JSON 回填累积状态（一次性迁移）。
-
-    升级后首次运行时 product_last_status.json 尚不存在，
-    扫描所有历史报告按时间顺序合并，写入累积文件供后续快速读取。
-    同一产品在多份报告中出现时，后写入的报告覆盖先写入的（与正常累积逻辑一致）。
-    """
-    report_files = sorted(log_dir.glob("run_report_*.json"))
-    if not report_files:
-        return {}
-    result: Dict[str, Dict[str, Any]] = {}
-    for path in report_files:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        for item in data.get("products", []):
-            name = item.get("product", "")
-            if name:
-                result[name] = {
-                    "status": item.get("status", ""),
-                    "reason_code": item.get("reason_code", ""),
-                    "error": item.get("error", ""),
-                }
-    # 写入累积文件，后续读取走快路径
-    if result:
-        try:
-            status_path.write_text(
-                json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-        except OSError:
-            pass
-    return result
-
-
 def _load_latest_report_products(log_dir: Path) -> Dict[str, Dict[str, Any]]:
     """读取每产品累积状态文件，返回 {product_name: {status, reason_code, error}}。
 
-    该文件由每次运行结束时的 _update_product_last_status 增量维护，
-    覆盖所有历史运行中出现过的产品，不受报告数量限制。
-
-    文件不存在时（升级过渡期），从历史 run_report 回填一次并持久化。
+    委托 reporting.read_or_backfill_product_last_status 处理：
+    - 正常读取：直接解析 product_last_status.json
+    - 升级过渡：文件缺失时从历史 run_report 回填并持久化
+    - 损坏自愈：JSON 损坏时重新回填修复
+    所有写入与 _update_product_last_status 共享同一把文件锁。
     """
-    status_path = log_dir / _PRODUCT_LAST_STATUS_FILE
-    if not status_path.exists():
-        return _backfill_from_reports(log_dir, status_path)
-    try:
-        return json.loads(status_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    return read_or_backfill_product_last_status(log_dir)
 
 
 def get_products_overview(
