@@ -100,10 +100,11 @@ document.addEventListener('alpine:init', () => {
         },
 
         // ===== 进度轮询 =====
-        // 每秒轮询一次 get_sync_progress()，根据 status 更新 UI
+        // 用 setTimeout 递归代替 setInterval，避免 async 回调堆积
+        // （如果一次轮询耗时超过 1 秒，setInterval 会堆积回调）
         startPolling() {
-            if (this.pollTimer) clearInterval(this.pollTimer);
-            this.pollTimer = setInterval(async () => {
+            this.stopPolling();
+            const poll = async () => {
                 try {
                     const p = await window.pywebview.api.get_sync_progress();
                     this.currentProduct = p.current_product || '';
@@ -114,23 +115,27 @@ document.addEventListener('alpine:init', () => {
                     if (p.status === 'done') {
                         this.syncStatus = 'done';
                         this.runSummary = p.run_summary;
-                        this.stopPolling();
+                        this.pollTimer = null;
+                        return; // 终态，不再调度下次轮询
                     } else if (p.status === 'error') {
                         this.syncStatus = 'error';
                         this.errorMessage = p.error_message || '同步失败';
-                        this.stopPolling();
+                        this.pollTimer = null;
+                        return; // 终态，不再调度下次轮询
                     }
-                    // status === 'syncing' 时继续轮询，无需额外处理
                 } catch (e) {
                     console.error('poll failed:', e);
-                    // 网络/窗口异常时不切换状态，等待下次轮询
+                    // 网络/窗口异常时不切换状态，继续下次轮询
                 }
-            }, 1000);
+                // 上一次完成后才调度下一次，间隔 1 秒
+                this.pollTimer = setTimeout(poll, 1000);
+            };
+            this.pollTimer = setTimeout(poll, 1000);
         },
 
         stopPolling() {
             if (this.pollTimer) {
-                clearInterval(this.pollTimer);
+                clearTimeout(this.pollTimer);
                 this.pollTimer = null;
             }
         },
