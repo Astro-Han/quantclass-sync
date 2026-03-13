@@ -640,7 +640,10 @@ class TestGetHealthReport(unittest.TestCase):
                 api = SyncApi()
                 result = api.get_health_report()
 
+                # 验证 catalog 正确透传（data_root 经 resolve 展开，只验证 catalog）
                 mock_fn.assert_called_once()
+                call_args = mock_fn.call_args
+                self.assertEqual(call_args[0][1], ["p1", "p2"])
 
         self.assertTrue(result["ok"])
         self.assertIn("health", result)

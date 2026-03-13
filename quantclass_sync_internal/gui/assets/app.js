@@ -286,7 +286,6 @@ document.addEventListener('alpine:init', () => {
             if (this.healthLoading) return;
             this.healthLoading = true;
             this.healthError = '';
-            this.healthReport = null;
             try {
                 const data = await window.pywebview.api.get_health_report();
                 if (data.ok === false) {

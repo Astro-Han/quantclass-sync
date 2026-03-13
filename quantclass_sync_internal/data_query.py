@@ -236,8 +236,14 @@ def get_run_detail(log_dir: Path, report_file: str) -> Dict[str, Any]:
 
 # --- 数据健康检查 ---
 
-# 每产品 CSV 可读性检查上限，避免大产品卡 UI
+# 每产品最多检查前 N 个 CSV 文件（按 iterdir 顺序），避免大产品卡 UI
 _CSV_CHECK_LIMIT = 100
+
+# orphan_temp 扫描最多遍历的文件节点数，超出后截断
+_ORPHAN_SCAN_LIMIT = 5000
+
+# 状态目录名（工具自身写入的元数据，不参与健康检查）
+_META_DIR_NAME = ".quantclass_sync"
 
 
 def _check_missing_data(
@@ -252,11 +258,14 @@ def _check_missing_data(
             continue
         # 有 timestamp.txt，检查目录下是否有数据（文件或子目录）
         # 排除隐藏条目和 timestamp.txt 本身，剩余任意条目即视为有数据
-        has_data = any(
-            not entry.name.startswith(".")
-            and entry.name != TIMESTAMP_FILE_NAME
-            for entry in product_dir.iterdir()
-        )
+        try:
+            has_data = any(
+                not entry.name.startswith(".")
+                and entry.name != TIMESTAMP_FILE_NAME
+                for entry in product_dir.iterdir()
+            )
+        except OSError:
+            continue
         if not has_data:
             issues.append({
                 "type": "missing_data",
@@ -271,16 +280,20 @@ def _check_csv_unreadable(data_root: Path) -> List[Dict[str, Any]]:
     """检查 KNOWN_DATASETS 中 CSV 是否可正常读取（解码 + 非空）。
 
     轻量检查：open + 读前两行，每产品上限 _CSV_CHECK_LIMIT 个文件。
+    仅检查产品目录一级下的 CSV，子目录内文件不检测。
     """
     issues: List[Dict[str, Any]] = []
     for product in KNOWN_DATASETS:
         product_dir = data_root / product
         if not product_dir.is_dir():
             continue
-        csv_files = [
-            f for f in product_dir.iterdir()
-            if f.is_file() and f.suffix == ".csv" and not f.name.startswith(".")
-        ]
+        try:
+            csv_files = [
+                f for f in product_dir.iterdir()
+                if f.is_file() and f.suffix == ".csv" and not f.name.startswith(".")
+            ]
+        except OSError:
+            continue
         for csv_path in csv_files[:_CSV_CHECK_LIMIT]:
             rel_path = f"{product}/{csv_path.name}"
             # 尝试所有候选编码
@@ -305,9 +318,20 @@ def _check_csv_unreadable(data_root: Path) -> List[Dict[str, Any]]:
 
 
 def _check_orphan_temp(data_root: Path) -> List[Dict[str, Any]]:
-    """检查 data_root 下残留的临时文件（含 .tmp- 的文件名）。"""
+    """检查 data_root 下残留的临时文件（含 .tmp- 的文件名）。
+
+    跳过 .quantclass_sync 状态目录，最多遍历 _ORPHAN_SCAN_LIMIT 个节点。
+    """
     issues: List[Dict[str, Any]] = []
+    meta_dir = data_root / _META_DIR_NAME
+    scanned = 0
     for path in data_root.rglob("*"):
+        # 跳过状态目录
+        if meta_dir.exists() and path.is_relative_to(meta_dir):
+            continue
+        scanned += 1
+        if scanned > _ORPHAN_SCAN_LIMIT:
+            break
         if not path.is_file():
             continue
         if ".tmp-" in path.name:
@@ -334,7 +358,7 @@ def check_data_health(
     检测三类问题：文件缺失(missing_data)、CSV 不可读(csv_unreadable)、
     残留临时文件(orphan_temp)。
 
-    data_root 不存在时返回空报告，单文件异常不中断整体扫描。
+    data_root 不存在时返回空报告，单个子检查异常不中断其他检查。
     """
     t0 = time.monotonic()
 
@@ -352,10 +376,17 @@ def check_data_health(
             "elapsed_seconds": 0.0,
         }
 
+    # 三个子检查各自隔离，一个失败不影响其他
     issues: List[Dict[str, Any]] = []
-    issues.extend(_check_missing_data(data_root, catalog_products))
-    issues.extend(_check_csv_unreadable(data_root))
-    issues.extend(_check_orphan_temp(data_root))
+    for check_fn, args in [
+        (_check_missing_data, (data_root, catalog_products)),
+        (_check_csv_unreadable, (data_root,)),
+        (_check_orphan_temp, (data_root,)),
+    ]:
+        try:
+            issues.extend(check_fn(*args))
+        except Exception:
+            pass
 
     # 统计各类型计数
     summary: Dict[str, int] = {"missing_data": 0, "csv_unreadable": 0, "orphan_temp": 0}

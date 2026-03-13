@@ -135,7 +135,7 @@
                       <span class="health-meta" x-text="'（扫描 ' + healthReport.scanned_products + ' 个产品，耗时 ' + healthReport.elapsed_seconds + ' 秒）'"></span>
                     </div>
                     <ul class="health-issue-list">
-                      <template x-for="issue in healthReport.issues" :key="issue.detail">
+                      <template x-for="(issue, idx) in healthReport.issues" :key="issue.type + ':' + idx">
                         <li>
                           <span class="health-issue-tag" x-text="{ missing_data: '缺失', csv_unreadable: '不可读', orphan_temp: '临时文件' }[issue.type] || issue.type"></span>
                           <span x-show="issue.product" class="health-issue-product" x-text="issue.product"></span>

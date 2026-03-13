@@ -528,6 +528,9 @@ body {
   list-style: none;
   max-height: 200px;
   overflow-y: auto;
+  border: 1px solid #f3f4f6;
+  border-radius: 6px;
+  padding: 0 10px;
 }
 
 .health-issue-list li {
