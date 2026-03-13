@@ -802,5 +802,108 @@ class TestCorruptedStatusFileSelfHealing(unittest.TestCase):
             self.assertEqual(rebuilt["p1"]["status"], "error")
 
 
+class TestDryRunDoesNotWriteProductLastStatus(unittest.TestCase):
+    """回归测试：dry_run 模式下 _finalize_and_write_report 不写累积状态文件。
+
+    Bug: cmd_repair_sort 的两处 _finalize_and_write_report 调用遗漏 dry_run 参数，
+    导致 --dry-run 模式下仍会写入 product_last_status.json。
+    """
+
+    def test_dry_run_skips_status_update(self):
+        """dry_run=True 时，写 run_report 但不写 product_last_status.json。"""
+        from quantclass_sync_internal.reporting import (
+            _finalize_and_write_report, _new_report, PRODUCT_LAST_STATUS_FILE, _append_result,
+        )
+        from quantclass_sync_internal.models import SyncStats
+        import time
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            report_path = log_dir / "run_report_test_dryrun.json"
+            report = _new_report("test-dryrun", mode="maintenance")
+            _append_result(report, product="p1", status="ok", strategy="repair_sort")
+            total = SyncStats()
+
+            _finalize_and_write_report(
+                report, total, has_error=False, t_run_start=time.time(),
+                report_path=report_path, dry_run=True, log_dir=log_dir,
+            )
+
+            # run_report 应该写入（可观测性需要）
+            self.assertTrue(report_path.exists())
+            # product_last_status.json 不应被创建
+            self.assertFalse(
+                (log_dir / PRODUCT_LAST_STATUS_FILE).exists(),
+                "dry_run=True 不应写入 product_last_status.json",
+            )
+
+    def test_non_dry_run_writes_status(self):
+        """dry_run=False 时，正常写入 product_last_status.json。"""
+        from quantclass_sync_internal.reporting import (
+            _finalize_and_write_report, _new_report, PRODUCT_LAST_STATUS_FILE, _append_result,
+        )
+        from quantclass_sync_internal.models import SyncStats
+        import time
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            report_path = log_dir / "run_report_test_normal.json"
+            report = _new_report("test-normal", mode="maintenance")
+            _append_result(report, product="p1", status="ok", strategy="repair_sort")
+            total = SyncStats()
+
+            _finalize_and_write_report(
+                report, total, has_error=False, t_run_start=time.time(),
+                report_path=report_path, dry_run=False, log_dir=log_dir,
+            )
+
+            self.assertTrue(report_path.exists())
+            status_path = log_dir / PRODUCT_LAST_STATUS_FILE
+            self.assertTrue(status_path.exists())
+            data = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["p1"]["status"], "ok")
+
+
+class TestLogDirOverridesReportPathParent(unittest.TestCase):
+    """回归测试：log_dir 参数确保状态文件写到正确目录。
+
+    Bug: --report-file /tmp/xxx.json 时，report_path.parent 变为 /tmp/，
+    product_last_status.json 写到错误目录，status 命令看不到更新。
+    """
+
+    def test_log_dir_used_for_status_file(self):
+        """log_dir 指定时，product_last_status.json 写入 log_dir 而非 report_path.parent。"""
+        from quantclass_sync_internal.reporting import (
+            _finalize_and_write_report, _new_report, PRODUCT_LAST_STATUS_FILE, _append_result,
+        )
+        from quantclass_sync_internal.models import SyncStats
+        import time
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # 模拟 --report-file 指向外部路径
+            external_dir = Path(tmpdir) / "external"
+            external_dir.mkdir()
+            report_path = external_dir / "my_report.json"
+
+            # 正确的 log_dir
+            log_dir = Path(tmpdir) / "correct_log_dir"
+            log_dir.mkdir()
+
+            report = _new_report("test-logdir", mode="network")
+            _append_result(report, product="p1", status="ok")
+            total = SyncStats()
+
+            _finalize_and_write_report(
+                report, total, has_error=False, t_run_start=time.time(),
+                report_path=report_path, dry_run=False, log_dir=log_dir,
+            )
+
+            # 报告写到 external_dir
+            self.assertTrue(report_path.exists())
+            # 状态文件写到 log_dir，而非 external_dir
+            self.assertTrue((log_dir / PRODUCT_LAST_STATUS_FILE).exists())
+            self.assertFalse((external_dir / PRODUCT_LAST_STATUS_FILE).exists())
+
+
 if __name__ == "__main__":
     unittest.main()

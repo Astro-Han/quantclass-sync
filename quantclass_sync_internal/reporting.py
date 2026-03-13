@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import time
 from collections import defaultdict
@@ -24,6 +23,11 @@ from .constants import (
 from .http_client import _http_metrics_for_product
 from .models import CommandContext, RunEvent, RunReport, SyncStats, ProductRunResult, run_report_to_dict, utc_now_iso, log_info
 from .status_store import report_dir_path
+
+try:
+    import fcntl
+except Exception:  # pragma: no cover — Windows 无 fcntl
+    fcntl = None  # type: ignore[assignment]
 
 
 class HasReasonCode(Protocol):
@@ -170,6 +174,12 @@ PRODUCT_LAST_STATUS_FILE = "product_last_status.json"
 _LOCK_FILE = "product_last_status.lock"
 
 
+def _flock_exclusive(fd: object) -> None:
+    """对文件描述符加排他锁。Windows 无 fcntl 时降级为无锁（与旧版行为一致）。"""
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+
 def _scan_reports_for_backfill(log_dir: Path) -> Dict[str, Dict[str, str]]:
     """扫描历史 run_report 构建产品状态（内部函数，调用方负责加锁）。
 
@@ -217,7 +227,7 @@ def read_or_backfill_product_last_status(log_dir: Path) -> Dict[str, Dict[str, s
     log_dir.mkdir(parents=True, exist_ok=True)
     lock_path = log_dir / _LOCK_FILE
     with open(lock_path, "w") as lock_fd:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        _flock_exclusive(lock_fd)
         # 双重检查：等锁期间另一个进程可能已完成写入
         if status_path.exists():
             try:
@@ -249,7 +259,7 @@ def _update_product_last_status(log_dir: Path, report: RunReport) -> None:
 
     with open(lock_path, "w") as lock_fd:
         # 进程级排他锁：同一时刻只有一个进程能进入读-合并-写循环
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        _flock_exclusive(lock_fd)
         # 读取已有累积状态
         existing: Dict[str, Dict[str, str]] = {}
         if status_path.exists():
@@ -276,8 +286,13 @@ def _finalize_and_write_report(
     t_run_start: float,
     report_path: Path,
     dry_run: bool = False,
+    log_dir: Optional[Path] = None,
 ) -> int:
-    """汇总结果并写入报告。dry_run 时只写报告，不更新累积状态文件。"""
+    """汇总结果并写入报告。dry_run 时只写报告，不更新累积状态文件。
+
+    log_dir: 累积状态文件所在目录。默认 None 时使用 report_path.parent，
+    当 --report-file 指向外部路径时，调用方应显式传入 report_dir_path(data_root)。
+    """
 
     report.summary = total
     report.ended_at = utc_now_iso()
@@ -318,7 +333,7 @@ def _finalize_and_write_report(
 
     write_run_report(report_path, report)
     if not dry_run:
-        _update_product_last_status(report_path.parent, report)
+        _update_product_last_status(log_dir or report_path.parent, report)
     log_info("运行报告已写入。", event="RUN_SUMMARY", report_file=str(report_path))
     return decide_exit_code(report=report, has_error=has_error)
 

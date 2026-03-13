@@ -87,6 +87,7 @@ from .status_store import (
     normalize_data_date,
     open_status_db,
     read_local_timestamp_date,
+    report_dir_path,
     should_skip_by_timestamp,
     status_json_path,
     upsert_product_status,
@@ -1170,6 +1171,7 @@ def run_update_with_settings(
             t_run_start=t_run_start,
             report_path=report_path,
             dry_run=command_ctx.dry_run,
+            log_dir=report_dir_path(command_ctx.data_root),
         )
         return decide_exit_code(
             report=report,
@@ -1188,6 +1190,7 @@ def run_update_with_settings(
             t_run_start=t_run_start,
             report_path=report_path,
             dry_run=command_ctx.dry_run,
+            log_dir=report_dir_path(command_ctx.data_root),
         )
         return decide_exit_code(
             report=report,
@@ -1237,4 +1240,8 @@ def run_update_with_settings(
 
     # 使用 run_update_with_settings 自己的 t_run_start（第 1121 行），
     # 而非 _execute_plans 内部的计时，以包含 discover/catalog/plan 前置阶段耗时。
-    return _finalize_and_write_report(report, total, has_error, t_run_start, report_path, dry_run=command_ctx.dry_run)
+    return _finalize_and_write_report(
+        report, total, has_error, t_run_start, report_path,
+        dry_run=command_ctx.dry_run,
+        log_dir=report_dir_path(command_ctx.data_root),
+    )

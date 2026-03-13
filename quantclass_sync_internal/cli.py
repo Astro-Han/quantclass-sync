@@ -620,7 +620,11 @@ def cmd_repair_sort(
 
     if not selected_products:
         log_info("无可修复产品，repair_sort 结束。", event="SORT_REPAIR")
-        exit_code = _finalize_and_write_report(report, total, has_error, t_run_start, report_path)
+        exit_code = _finalize_and_write_report(
+            report, total, has_error, t_run_start, report_path,
+            dry_run=command_ctx.dry_run,
+            log_dir=report_dir_path(command_ctx.data_root),
+        )
         if exit_code != 0:
             raise typer.Exit(code=exit_code)
         return
@@ -686,7 +690,11 @@ def cmd_repair_sort(
             if strict:
                 break
 
-    exit_code = _finalize_and_write_report(report, total, has_error, t_run_start, report_path)
+    exit_code = _finalize_and_write_report(
+        report, total, has_error, t_run_start, report_path,
+        dry_run=command_ctx.dry_run,
+        log_dir=report_dir_path(command_ctx.data_root),
+    )
     log_info("repair_sort 执行完成。", event="CMD_DONE", exit_code=exit_code)
     if exit_code != 0:
         raise typer.Exit(code=exit_code)
@@ -824,8 +832,10 @@ def cmd_one_data(
     report.planned_total = len(plan)
 
     log_info("开始执行 one_data。", event="CMD_START", product=product)
+    # 在 _execute_plans 之前记录计时，包含 _init_command/build_product_plan 耗时
+    t_run_start = time.time()
     if command_ctx.dry_run:
-        total, has_error, t_run_start = _execute_plans(
+        total, has_error, _ = _execute_plans(
             plans=plan,
             command_ctx=command_ctx,
             report=report,
@@ -836,7 +846,7 @@ def cmd_one_data(
         )
     else:
         with open_status_db(command_ctx.data_root) as conn:
-            total, has_error, t_run_start = _execute_plans(
+            total, has_error, _ = _execute_plans(
                 plans=plan,
                 command_ctx=command_ctx,
                 report=report,
@@ -846,7 +856,11 @@ def cmd_one_data(
                 catch_up_to_latest=False,
             )
             export_status_json(conn, status_json_path(command_ctx.data_root))
-    exit_code = _finalize_and_write_report(report, total, has_error, t_run_start, report_path, dry_run=command_ctx.dry_run)
+    exit_code = _finalize_and_write_report(
+        report, total, has_error, t_run_start, report_path,
+        dry_run=command_ctx.dry_run,
+        log_dir=report_dir_path(command_ctx.data_root),
+    )
     log_info("one_data 执行完成。", event="CMD_DONE", exit_code=exit_code)
     if exit_code != 0:
         raise typer.Exit(code=exit_code)
