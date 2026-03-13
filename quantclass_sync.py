@@ -205,6 +205,7 @@ def _bind_cli_runtime() -> None:
         id(cmd_setup),
         id(cmd_update),
         id(cmd_repair_sort),
+        id(cmd_status),
     )
     if (
         _cli_bind_state == state
@@ -220,6 +221,7 @@ def _bind_cli_runtime() -> None:
         and _cli.cmd_setup is cmd_setup
         and _cli.cmd_update is cmd_update
         and _cli.cmd_repair_sort is cmd_repair_sort
+        and _cli.cmd_status is cmd_status
     ):
         return
     _cli.resolve_credentials_for_update = resolve_credentials_for_update
@@ -235,6 +237,7 @@ def _bind_cli_runtime() -> None:
     _cli.cmd_setup = cmd_setup
     _cli.cmd_update = cmd_update
     _cli.cmd_repair_sort = cmd_repair_sort
+    _cli.cmd_status = cmd_status
     _cli_bind_state = state
 
 

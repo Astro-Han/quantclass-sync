@@ -169,6 +169,9 @@ def get_run_history(log_dir: Path, n: int = 10) -> List[Dict[str, Any]]:
 
     每条包含: run_id, started_at, duration_seconds, success_total, failed_total, skipped_total, report_file
     """
+    # n <= 0 时无意义，直接返回空列表
+    if n <= 0:
+        return []
     report_files = sorted(log_dir.glob("run_report_*.json"))
     # 取最近 n 个，按时间降序
     recent = report_files[-n:] if len(report_files) > n else report_files

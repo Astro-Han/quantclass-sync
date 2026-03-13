@@ -870,6 +870,9 @@ def _execute_plans(
         plan_has_error = False
         t_product_start = time.time()
         # A. 判断这个产品本次应不应该跑（门控命中会直接 return）。
+        # 注意：_resolve_requested_dates_for_plan 内部也调用了 _append_result（gate-skip 路径），
+        # 但该调用处于网络 I/O 之后、函数签名修改代价较高，且 CPython GIL 已保证 list.append 原子性，
+        # 故不在此处加锁。本函数内所有直接调用 _append_result 的位置均已用 _lock 保护。
         t_plan_phase = time.time()
         requested_dates_for_plan, skipped_by_gate = _resolve_requested_dates_for_plan(
             plan=plan,
@@ -890,18 +893,20 @@ def _execute_plans(
         if not requested_dates_for_plan:
             if catch_up_to_latest:
                 elapsed = time.time() - t_product_start
-                _append_result(
-                    report,
-                    product=plan.name,
-                    status="skipped",
-                    strategy=plan.strategy,
-                    reason_code=REASON_NO_DATA_FOR_DATE,
-                    elapsed=elapsed,
-                    mode="gate",
-                    error="catch-up 日期队列为空，已跳过本产品。",
-                    stage="PLAN",
-                    event_detail="catchup_dates=0",
-                )
+                # 并发路径：写 report 需加锁，防止 list.append 与其他线程竞争
+                with _lock:
+                    _append_result(
+                        report,
+                        product=plan.name,
+                        status="skipped",
+                        strategy=plan.strategy,
+                        reason_code=REASON_NO_DATA_FOR_DATE,
+                        elapsed=elapsed,
+                        mode="gate",
+                        error="catch-up 日期队列为空，已跳过本产品。",
+                        stage="PLAN",
+                        event_detail="catchup_dates=0",
+                    )
                 log_info(
                     f"[{plan.name}] catch-up 日期队列为空，已跳过。",
                     event="SYNC_SKIP",
@@ -933,27 +938,28 @@ def _execute_plans(
                 with _lock:
                     total.merge(stats)
                 if reason_code == REASON_NO_VALID_OUTPUT:
-                    _append_result(
-                        report,
-                        product=product,
-                        status="skipped",
-                        strategy=plan.strategy,
-                        reason_code=reason_code,
-                        date_time=actual_time,
-                        elapsed=elapsed,
-                        stats=stats,
-                        source_path=source_path,
-                        error="同步未产生可用输出，已跳过状态推进。",
-                        stage="SYNC",
-                        event_detail="no_valid_output",
-                    )
+                    # 并发路径：写 report 需加锁
+                    with _lock:
+                        _append_result(
+                            report,
+                            product=product,
+                            status="skipped",
+                            strategy=plan.strategy,
+                            reason_code=reason_code,
+                            date_time=actual_time,
+                            elapsed=elapsed,
+                            stats=stats,
+                            source_path=source_path,
+                            error="同步未产生可用输出，已跳过状态推进。",
+                            stage="SYNC",
+                            event_detail="no_valid_output",
+                        )
+                        report.phase_sync_seconds += max(0.0, time.time() - t_sync_phase)
                     log_info(
                         f"[{plan.name}] 同步无有效产出，已跳过状态推进。",
                         event="SYNC_SKIP",
                         reason_code=reason_code,
                     )
-                    with _lock:
-                        report.phase_sync_seconds += max(0.0, time.time() - t_sync_phase)
                     continue
 
                 status_persist_warning = ""
@@ -974,19 +980,20 @@ def _execute_plans(
                         event="SYNC_WARN",
                         reason_code=reason_code,
                     )
-                _append_result(
-                    report,
-                    product=product,
-                    status="ok",
-                    strategy=plan.strategy,
-                    reason_code=reason_code,
-                    date_time=actual_time,
-                    elapsed=elapsed,
-                    stats=stats,
-                    source_path=source_path,
-                    event_detail=status_persist_warning,
-                )
+                # 并发路径：写 report 需加锁
                 with _lock:
+                    _append_result(
+                        report,
+                        product=product,
+                        status="ok",
+                        strategy=plan.strategy,
+                        reason_code=reason_code,
+                        date_time=actual_time,
+                        elapsed=elapsed,
+                        stats=stats,
+                        source_path=source_path,
+                        event_detail=status_persist_warning,
+                    )
                     report.phase_sync_seconds += max(0.0, time.time() - t_sync_phase)
                 continue
             except ProductSyncError as exc:
@@ -1005,16 +1012,18 @@ def _execute_plans(
             elapsed = time.time() - t_product_start
             # D. 回补模式：无数据日记录为 skipped，继续下一个日期。
             if catch_up_to_latest and reason_code == REASON_NO_DATA_FOR_DATE:
-                _append_result(
-                    report,
-                    product=plan.name,
-                    status="skipped",
-                    strategy=plan.strategy,
-                    reason_code=reason_code,
-                    date_time=requested_date_for_plan,
-                    elapsed=elapsed,
-                    error=message,
-                )
+                # 并发路径：写 report 需加锁
+                with _lock:
+                    _append_result(
+                        report,
+                        product=plan.name,
+                        status="skipped",
+                        strategy=plan.strategy,
+                        reason_code=reason_code,
+                        date_time=requested_date_for_plan,
+                        elapsed=elapsed,
+                        error=message,
+                    )
                 log_info(f"[{plan.name}] 无数据日已跳过: {message}", event="SYNC_SKIP", reason_code=reason_code)
                 if command_ctx.verbose and debug_trace:
                     log_debug(debug_trace, event="DEBUG")
@@ -1022,16 +1031,18 @@ def _execute_plans(
 
             # E. 失败路径：记录错误。
             plan_has_error = True
-            _append_result(
-                report,
-                product=plan.name,
-                status="error",
-                strategy=plan.strategy,
-                reason_code=reason_code,
-                date_time=requested_date_for_plan,
-                elapsed=elapsed,
-                error=message,
-            )
+            # 并发路径：写 report 需加锁
+            with _lock:
+                _append_result(
+                    report,
+                    product=plan.name,
+                    status="error",
+                    strategy=plan.strategy,
+                    reason_code=reason_code,
+                    date_time=requested_date_for_plan,
+                    elapsed=elapsed,
+                    error=message,
+                )
             log_error(f"[{plan.name}] 处理失败: {message}", event="SYNC_FAIL", reason_code=reason_code)
             if command_ctx.verbose and debug_trace:
                 log_debug(debug_trace, event="DEBUG")
@@ -1063,6 +1074,7 @@ def _execute_plans(
                     if future.result():
                         has_error = True
                 except Exception as exc:
+                    # _run_one_plan 内部未捕获的异常（理论上不应发生，但做防御性兜底）
                     has_error = True
                     plan = futures[future]
                     log_error(
@@ -1070,6 +1082,16 @@ def _execute_plans(
                         event="SYNC_FAIL",
                         reason_code=REASON_MERGE_ERROR,
                     )
+                    # 补写 report，避免该产品在报告中完全缺失；加锁保证并发安全
+                    with _lock:
+                        _append_result(
+                            report,
+                            product=plan.name,
+                            status="error",
+                            strategy=plan.strategy,
+                            reason_code=REASON_MERGE_ERROR,
+                            error=f"并发执行异常（未预期）: {exc}",
+                        )
 
     command_ctx.http_attempts_by_product = dict(HTTP_ATTEMPTS_BY_PRODUCT)
     command_ctx.http_failures_by_product = dict(HTTP_FAILURES_BY_PRODUCT)

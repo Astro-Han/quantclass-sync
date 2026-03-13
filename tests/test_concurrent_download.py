@@ -117,10 +117,15 @@ class TestMaxWorkersParameter(unittest.TestCase):
     def test_concurrent_actually_parallel(
         self, mock_upsert, mock_process, mock_resolve, mock_reset, mock_headers
     ):
-        """验证并发确实是并行而非串行。"""
+        """验证并发确实是并行而非串行。
+
+        用计数器在 sleep 前 +1、后 -1，测量 sleep 期间的同时活跃峰值，
+        比累计线程数更准确地反映真实并发度。
+        """
         mock_headers.return_value = ({"Authorization": "test"}, "test-hid")
-        active_threads = []
-        max_active = [0]
+        # 当前同时活跃线程计数和峰值记录
+        active_count = [0]
+        peak_active = [0]
         lock = threading.Lock()
 
         def fake_resolve(plan, **kwargs):
@@ -129,12 +134,13 @@ class TestMaxWorkersParameter(unittest.TestCase):
         mock_resolve.side_effect = fake_resolve
 
         def fake_process(**kwargs):
-            tid = threading.current_thread().ident
+            # 进入 sleep 前 +1，退出后 -1，测量 sleep 中的并发峰值
             with lock:
-                active_threads.append(tid)
-                current = len(set(active_threads))
-                max_active[0] = max(max_active[0], current)
-            time.sleep(0.05)  # 确保线程有重叠
+                active_count[0] += 1
+                peak_active[0] = max(peak_active[0], active_count[0])
+            time.sleep(0.05)  # 确保线程有重叠窗口
+            with lock:
+                active_count[0] -= 1
             return kwargs["plan"].name, "2026-03-13", SyncStats(), "", "ok"
 
         mock_process.side_effect = fake_process
@@ -145,8 +151,8 @@ class TestMaxWorkersParameter(unittest.TestCase):
 
         _execute_plans(plans, ctx, report, max_workers=4)
 
-        # 至少有 2 个线程同时活跃（证明并行生效）
-        self.assertGreaterEqual(max_active[0], 2)
+        # 至少有 2 个线程同时处于 sleep（证明并行生效）
+        self.assertGreaterEqual(peak_active[0], 2)
 
 
 class TestConcurrentErrorHandling(unittest.TestCase):
