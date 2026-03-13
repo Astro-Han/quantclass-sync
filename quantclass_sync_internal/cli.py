@@ -895,3 +895,11 @@ def cmd_all_data(
     log_info("all_data 执行完成。", event="CMD_DONE", exit_code=exit_code)
     if exit_code != 0:
         raise typer.Exit(code=exit_code)
+
+@app.command("gui")
+def cmd_gui(ctx: typer.Context) -> None:
+    """
+    启动 GUI 窗口（需要 pywebview 依赖）。
+    """
+    from .gui import launch_gui
+    launch_gui()

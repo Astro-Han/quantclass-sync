@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QuantClass Sync</title>
+  <link rel="stylesheet" href="style.css" />
+  <!-- Alpine.js 本地引入 -->
+  <script defer src="alpine.min.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <div class="app" x-data="app()">
+
+    <!-- 顶部导航 -->
+    <header class="header">
+      <span class="header-title">QuantClass Sync</span>
+      <nav class="tabs">
+        <button
+          class="tab"
+          :class="{ active: tab === 'overview' }"
+          @click="switchTab('overview')"
+        >总览</button>
+        <button
+          class="tab"
+          :class="{ active: tab === 'sync' }"
+          @click="switchTab('sync')"
+        >同步</button>
+      </nav>
+    </header>
+
+    <!-- 主内容区 -->
+    <main class="content">
+
+      <!-- ===== 总览页面 ===== -->
+      <div x-show="tab === 'overview'">
+
+        <!-- 加载状态 -->
+        <div class="loading" x-show="loading">加载中...</div>
+
+        <template x-if="!loading">
+          <div>
+            <!-- 统计卡片 -->
+            <div class="stats-cards">
+              <div class="stat-card">
+                <span class="stat-dot green"></span>
+                <div class="stat-count" x-text="summary.green"></div>
+                <div class="stat-label">最新</div>
+              </div>
+              <div class="stat-card">
+                <span class="stat-dot yellow"></span>
+                <div class="stat-count" x-text="summary.yellow"></div>
+                <div class="stat-label">落后</div>
+              </div>
+              <div class="stat-card">
+                <span class="stat-dot red"></span>
+                <div class="stat-count" x-text="summary.red"></div>
+                <div class="stat-label">异常</div>
+              </div>
+              <div class="stat-card">
+                <span class="stat-dot gray"></span>
+                <div class="stat-count" x-text="summary.gray"></div>
+                <div class="stat-label">未同步</div>
+              </div>
+            </div>
+
+            <!-- 产品状态表格 -->
+            <table class="product-table">
+              <thead>
+                <tr>
+                  <th>状态</th>
+                  <th>产品名称</th>
+                  <th>本地日期</th>
+                  <th>落后天数</th>
+                  <th>上次结果</th>
+                </tr>
+              </thead>
+              <tbody>
+                <!-- 排序: 红 -> 黄 -> 绿 -> 灰 -->
+                <template
+                  x-for="p in products.slice().sort((a, b) => {
+                    const order = { red: 0, yellow: 1, green: 2, gray: 3 };
+                    return (order[a.color] ?? 4) - (order[b.color] ?? 4);
+                  })"
+                  :key="p.name"
+                >
+                  <tr>
+                    <td><span class="status-dot" :class="p.color"></span></td>
+                    <td x-text="p.name"></td>
+                    <td x-text="p.local_date || '--'"></td>
+                    <td x-text="p.behind_days != null ? p.behind_days : '--'"></td>
+                    <td x-text="{ ok: '成功', error: '失败', skipped: '跳过', '': '' }[p.last_result] ?? p.last_result"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+
+            <!-- 底部信息 -->
+            <div class="footer-info">
+              <span x-text="lastRun ? '上次同步: ' + lastRun.started_at + '  耗时: ' + formatDuration(lastRun.duration_seconds) : '尚未同步'"></span>
+              <span x-show="dataRoot" x-text="'数据目录: ' + dataRoot"></span>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <!-- ===== 同步页面 ===== -->
+      <div x-show="tab === 'sync'" class="sync-panel">
+
+        <!-- idle 状态 -->
+        <div x-show="syncStatus === 'idle'">
+          <div class="sync-info">
+            <p x-show="dataRoot" x-text="'数据目录: ' + dataRoot"></p>
+            <p x-text="'待更新产品: ' + (summary.yellow + summary.red) + ' 个'"></p>
+          </div>
+          <button class="btn btn-primary" @click="startSync()">开始同步</button>
+        </div>
+
+        <!-- syncing 状态 -->
+        <div x-show="syncStatus === 'syncing'">
+          <div class="sync-current">
+            <span x-text="currentProduct || '准备中...'"></span>
+            <span class="sync-progress-text" x-text="total > 0 ? completed + ' / ' + total : ''"></span>
+          </div>
+          <!-- 进度条 -->
+          <div class="progress-bar">
+            <div class="progress-fill" :style="'width: ' + progressPercent() + '%'"></div>
+          </div>
+          <div class="sync-stats">
+            <span x-text="'已完成: ' + completed + ' 个'"></span>
+            <span x-text="'预估剩余: ' + estimatedRemaining()"></span>
+            <span x-text="'已用时: ' + formatDuration(elapsedSeconds)"></span>
+          </div>
+          <button class="btn btn-disabled" disabled>同步中...</button>
+        </div>
+
+        <!-- done 状态 -->
+        <div x-show="syncStatus === 'done'" class="sync-result">
+          <div class="sync-done-mark">&#10003; 同步完成</div>
+          <template x-if="runSummary">
+            <div class="sync-done-stats">
+              <span class="green" x-text="'成功: ' + (runSummary.ok || 0)"></span>
+              <span class="red" x-text="'失败: ' + (runSummary.error || 0)"></span>
+              <span class="gray" x-text="'跳过: ' + (runSummary.skipped || 0)"></span>
+              <span x-text="'耗时: ' + formatDuration(runSummary.duration_seconds)"></span>
+            </div>
+          </template>
+          <!-- 失败产品列表 -->
+          <template x-if="runSummary && runSummary.failed_products && runSummary.failed_products.length > 0">
+            <div>
+              <div class="failed-list-label">失败产品</div>
+              <ul class="failed-list">
+                <template x-for="name in runSummary.failed_products" :key="name">
+                  <li x-text="name"></li>
+                </template>
+              </ul>
+            </div>
+          </template>
+          <button class="btn btn-primary" @click="resetSync()">再次同步</button>
+        </div>
+
+        <!-- error 状态 -->
+        <div x-show="syncStatus === 'error'" class="sync-result">
+          <div class="sync-error-mark">&#10007; 同步失败</div>
+          <div class="sync-error-msg" x-text="errorMessage"></div>
+          <button class="btn btn-primary" @click="resetSync()">重试</button>
+        </div>
+
+      </div>
+
+    </main>
+  </div>
+</body>
+</html>

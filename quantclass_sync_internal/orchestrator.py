@@ -11,7 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Dict, Iterable, List, NoReturn, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, NoReturn, Optional, Sequence, Tuple
 
 from .archive import extract_archive
 from .config import (
@@ -844,6 +844,7 @@ def _execute_plans(
     force_update: bool = False,
     catch_up_to_latest: bool = False,
     max_workers: int = 1,
+    progress_callback: Optional[Callable[[str, int, int], None]] = None,
 ) -> Tuple[SyncStats, bool, float]:
     """
     执行产品计划并返回汇总统计。
@@ -855,6 +856,8 @@ def _execute_plans(
 
     max_workers: 并发下载线程数。1 = 串行（默认），>1 = 并行处理产品。
                  stop_on_error=True 时强制串行。
+    progress_callback: 每个产品完成后回调 (product_name, completed_count, total_count)。
+                       供 GUI 轮询进度使用，CLI 不传。
     """
 
     _reset_http_metrics()
@@ -1054,10 +1057,25 @@ def _execute_plans(
 
         return plan_has_error
 
+    # 进度计数器，用于 progress_callback 上报（串行路径直接递增，并行路径需加锁）
+    _completed = 0
+
+    def _notify_progress(product_name: str) -> None:
+        """安全调用进度回调（异常不影响主流程）。"""
+        nonlocal _completed
+        _completed += 1
+        if progress_callback is not None:
+            try:
+                progress_callback(product_name, _completed, len(plans))
+            except Exception:
+                pass
+
     if effective_workers <= 1:
         # === 串行路径 ===
         for plan in plans:
-            if _run_one_plan(plan):
+            plan_error = _run_one_plan(plan)
+            _notify_progress(plan.name)
+            if plan_error:
                 has_error = True
                 if command_ctx.stop_on_error:
                     log_error("已开启 stop-on-error，任务提前停止。", event="RUN_SUMMARY")
@@ -1074,13 +1092,18 @@ def _execute_plans(
             futures = {executor.submit(_run_one_plan, plan): plan for plan in plans}
             # as_completed 在主线程顺序消费，has_error 写入无并发竞争，无需加锁
             for future in as_completed(futures):
+                plan = futures[future]
                 try:
-                    if future.result():
+                    plan_error = future.result()
+                    with _lock:
+                        _notify_progress(plan.name)
+                    if plan_error:
                         has_error = True
                 except Exception as exc:
                     # _run_one_plan 内部未捕获的异常（理论上不应发生，但做防御性兜底）
                     has_error = True
-                    plan = futures[future]
+                    with _lock:
+                        _notify_progress(plan.name)
                     log_error(
                         f"[{plan.name}] 并发执行异常: {exc}",
                         event="SYNC_FAIL",
@@ -1109,11 +1132,13 @@ def run_update_with_settings(
     command_name: str = "all_data",
     fallback_products: Optional[Sequence[str]] = None,
     max_workers: int = 1,
+    progress_callback: Optional[Callable[[str, int, int], None]] = None,
 ) -> int:
     """
     通用批量更新执行器（update/all_data 共用）。
 
-    fallback_products 用于“本地扫描为空”时的回退清单。
+    fallback_products 用于"本地扫描为空"时的回退清单。
+    progress_callback: 每个产品完成后回调 (product_name, completed_count, total_count).
     """
 
     ensure_data_root_ready(command_ctx.data_root, create_if_missing=False)
@@ -1209,6 +1234,7 @@ def run_update_with_settings(
             force_update=force_update,
             catch_up_to_latest=True,
             max_workers=max_workers,
+            progress_callback=progress_callback,
         )
         preprocess_has_error = _maybe_run_coin_preprocess(
             command_ctx=command_ctx,
@@ -1228,6 +1254,7 @@ def run_update_with_settings(
                     force_update=force_update,
                     catch_up_to_latest=True,
                     max_workers=max_workers,
+                    progress_callback=progress_callback,
                 )
                 preprocess_has_error = _maybe_run_coin_preprocess(
                     command_ctx=command_ctx,

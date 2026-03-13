@@ -108,6 +108,7 @@ _cmd_setup_impl = _cli.cmd_setup
 _cmd_update_impl = _cli.cmd_update
 _cmd_repair_sort_impl = _cli.cmd_repair_sort
 _cmd_status_impl = _cli.cmd_status
+_cmd_gui_impl = _cli.cmd_gui
 _cmd_init_impl = _cli.cmd_init
 _cmd_one_data_impl = _cli.cmd_one_data
 _cmd_all_data_impl = _cli.cmd_all_data
@@ -320,6 +321,11 @@ def cmd_status(*args, **kwargs):
     return _cmd_status_impl(*args, **kwargs)
 
 
+def cmd_gui(*args, **kwargs):
+    _bind_cli_runtime()
+    return _cmd_gui_impl(*args, **kwargs)
+
+
 def cmd_init(*args, **kwargs):
     _bind_cli_runtime()
     return _cmd_init_impl(*args, **kwargs)
@@ -439,6 +445,7 @@ __all__ = [
     "cmd_update",
     "cmd_repair_sort",
     "cmd_status",
+    "cmd_gui",
     "cmd_init",
     "cmd_one_data",
     "cmd_all_data",

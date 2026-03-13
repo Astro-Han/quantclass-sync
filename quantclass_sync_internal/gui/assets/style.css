@@ -1,0 +1,362 @@
+/* ========== 全局重置与基础 ========== */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  min-width: 700px;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  color: #1f2937;
+  background: #f5f5f5;
+  line-height: 1.5;
+}
+
+/* ========== 全局容器 ========== */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-width: 700px;
+}
+
+/* ========== 顶部导航 ========== */
+.header {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 0 24px;
+  height: 52px;
+  background: #ffffff;
+  border-bottom: 1px solid #e5e7eb;
+  flex-shrink: 0;
+}
+
+.header-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #111827;
+  letter-spacing: -0.01em;
+}
+
+/* ========== Tab 导航 ========== */
+.tabs {
+  display: flex;
+  gap: 0;
+  height: 100%;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  height: 100%;
+  font-size: 14px;
+  color: #6b7280;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+
+.tab:hover {
+  color: #374151;
+}
+
+.tab.active {
+  color: #1d4ed8;
+  border-bottom-color: #3b82f6;
+  font-weight: 500;
+}
+
+/* ========== 主内容区 ========== */
+.content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+}
+
+/* ========== 加载状态 ========== */
+.loading {
+  padding: 40px;
+  text-align: center;
+  color: #9ca3af;
+  font-size: 14px;
+}
+
+/* ========== 统计卡片 ========== */
+.stats-cards {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.stat-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 16px 12px;
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+/* 状态圆点 (卡片内大圆点) */
+.stat-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.stat-dot.green  { background: #22c55e; }
+.stat-dot.yellow { background: #eab308; }
+.stat-dot.red    { background: #ef4444; }
+.stat-dot.gray   { background: #9ca3af; }
+
+.stat-count {
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1;
+  color: #111827;
+}
+
+.stat-label {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+/* ========== 产品状态表格 ========== */
+.product-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+
+.product-table th {
+  padding: 10px 14px;
+  text-align: left;
+  font-size: 12px;
+  font-weight: 500;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  background: #f9fafb;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.product-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid #f3f4f6;
+  color: #374151;
+}
+
+.product-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.product-table tbody tr:hover td {
+  background: #f9fafb;
+}
+
+/* 表格内状态圆点 (小) */
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.status-dot.green  { background: #22c55e; }
+.status-dot.yellow { background: #eab308; }
+.status-dot.red    { background: #ef4444; }
+.status-dot.gray   { background: #9ca3af; }
+
+/* ========== 底部信息 ========== */
+.footer-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #9ca3af;
+}
+
+/* ========== 同步面板 ========== */
+.sync-panel {
+  max-width: 520px;
+  margin: 0 auto;
+  padding-top: 12px;
+}
+
+/* idle 状态信息区 */
+.sync-info {
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  padding: 20px;
+  margin-bottom: 16px;
+  color: #374151;
+}
+
+.sync-info p {
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: #6b7280;
+}
+
+.sync-info p:last-child {
+  margin-bottom: 0;
+}
+
+/* syncing 当前产品行 */
+.sync-current {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  font-size: 14px;
+  color: #374151;
+}
+
+.sync-progress-text {
+  font-size: 13px;
+  color: #6b7280;
+}
+
+/* ========== 进度条 ========== */
+.progress-bar {
+  width: 100%;
+  height: 8px;
+  background: #e5e7eb;
+  border-radius: 9999px;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.progress-fill {
+  height: 100%;
+  background: #3b82f6;
+  border-radius: 9999px;
+  transition: width 0.4s ease;
+}
+
+/* syncing 统计行 */
+.sync-stats {
+  display: flex;
+  gap: 20px;
+  font-size: 13px;
+  color: #6b7280;
+  margin-bottom: 20px;
+}
+
+/* ========== 同步结果区 ========== */
+.sync-result {
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  padding: 28px 24px;
+  text-align: center;
+}
+
+.sync-done-mark {
+  font-size: 18px;
+  font-weight: 600;
+  color: #22c55e;
+  margin-bottom: 16px;
+}
+
+.sync-error-mark {
+  font-size: 18px;
+  font-weight: 600;
+  color: #ef4444;
+  margin-bottom: 12px;
+}
+
+.sync-error-msg {
+  font-size: 13px;
+  color: #6b7280;
+  margin-bottom: 20px;
+  word-break: break-all;
+}
+
+.sync-done-stats {
+  display: flex;
+  justify-content: center;
+  gap: 20px;
+  font-size: 13px;
+  color: #6b7280;
+  margin-bottom: 16px;
+}
+
+.sync-done-stats .green { color: #22c55e; }
+.sync-done-stats .red   { color: #ef4444; }
+.sync-done-stats .gray  { color: #9ca3af; }
+
+/* ========== 失败产品列表 ========== */
+.failed-list-label {
+  font-size: 12px;
+  color: #9ca3af;
+  margin-bottom: 6px;
+  text-align: left;
+}
+
+.failed-list {
+  list-style: none;
+  text-align: left;
+  background: #fef2f2;
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-bottom: 20px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.failed-list li {
+  font-size: 13px;
+  color: #b91c1c;
+  padding: 2px 0;
+}
+
+/* ========== 按钮 ========== */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 20px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  border: none;
+  transition: background 0.15s;
+  white-space: nowrap;
+}
+
+.btn-primary {
+  background: #3b82f6;
+  color: #ffffff;
+}
+
+.btn-primary:hover {
+  background: #2563eb;
+}
+
+.btn-disabled {
+  background: #93c5fd;
+  color: #ffffff;
+  cursor: not-allowed;
+}
