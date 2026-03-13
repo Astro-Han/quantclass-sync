@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 import typer
+from rich.table import Table
 
 from . import models as models_module
 from .config import (
@@ -52,6 +53,7 @@ from .models import (
     ProductPlan,
     ProductStatus,
     ProductSyncError,
+    RICH_CONSOLE,
     SyncStats,
     UserConfig,
     log_debug,
@@ -61,6 +63,7 @@ from .models import (
     split_products,
     utc_now_iso,
 )
+from .data_query import get_latest_run_summary, get_products_overview
 from .orchestrator import _append_result, _execute_plans, _finalize_and_write_report, _new_report, _build_headers, load_catalog_or_raise, run_update_with_settings
 from .reporting import resolve_report_path
 from .status_store import (
@@ -696,10 +699,6 @@ def cmd_status(ctx: typer.Context) -> None:
 
     输出所有产品的本地数据日期、落后天数和上次同步结果。
     """
-    from rich.table import Table
-
-    from .data_query import get_latest_run_summary, get_products_overview
-
     command_ctx = _init_command(ctx, "status")
     catalog = load_catalog_or_raise(command_ctx.catalog_file)
 
@@ -712,7 +711,6 @@ def cmd_status(ctx: typer.Context) -> None:
     gray_count = sum(1 for p in overview if p["status_color"] == "gray")
 
     # 表头统计行
-    from .models import RICH_CONSOLE
     RICH_CONSOLE.print()
     RICH_CONSOLE.print(
         f"  [green]● 最新 {green_count}[/green]  "

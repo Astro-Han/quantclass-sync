@@ -47,6 +47,8 @@ META_STATUS_DB_REL = Path(SYNC_META_DIRNAME) / "status" / "FuelBinStat.db"
 
 META_STATUS_JSON_REL = Path(SYNC_META_DIRNAME) / "status" / "products-status.json"
 
+META_REPORT_DIR_REL = Path(SYNC_META_DIRNAME) / "log"
+
 TRADING_PRODUCTS = {"stock-trading-data-pro", "stock-trading-data"}
 
 INDEX_PRODUCTS = {"stock-main-index-data"}

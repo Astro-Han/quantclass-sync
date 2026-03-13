@@ -293,5 +293,149 @@ class TestGetRunHistory(unittest.TestCase):
         self.assertEqual(history[0]["run_id"], "ok")
 
 
+class TestReportDirIsolationByDataRoot(unittest.TestCase):
+    """回归测试：不同 data_root 的报告应互不干扰。
+
+    Bug: report_dir 以前指向脚本目录下的 log/，两个 data_root 共享同一个
+    报告目录，导致 A 的 get_products_overview 可能读到 B 的报告。
+    修复：resolve_runtime_paths 把 report_dir 改到
+    data_root/.quantclass_sync/log/，按 data_root 隔离。
+    """
+
+    def _write_report(self, log_dir: Path, filename: str, products: list):
+        """在指定 log_dir 写入 run_report JSON。"""
+        log_dir.mkdir(parents=True, exist_ok=True)
+        report = {
+            "schema_version": "3.1",
+            "run_id": "test",
+            "started_at": "2026-03-13T00:00:00Z",
+            "mode": "network",
+            "success_total": sum(1 for p in products if p.get("status") == "ok"),
+            "failed_total": sum(1 for p in products if p.get("status") == "error"),
+            "skipped_total": 0,
+            "duration_seconds": 10.0,
+            "products": products,
+        }
+        (log_dir / filename).write_text(
+            json.dumps(report, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def test_two_data_roots_do_not_cross_read_reports(self):
+        """两个 data_root 的报告互不干扰：A 的查询不读到 B 的报告内容。"""
+        with tempfile.TemporaryDirectory() as tmpdir_a, \
+                tempfile.TemporaryDirectory() as tmpdir_b:
+            data_root_a = Path(tmpdir_a)
+            data_root_b = Path(tmpdir_b)
+
+            # data_root_a 下的产品 stock-a 状态为 ok
+            (data_root_a / "stock-a").mkdir(parents=True)
+            (data_root_a / "stock-a" / "timestamp.txt").write_text(
+                "2026-03-13,2026-03-13 22:00:00\n", encoding="utf-8"
+            )
+            log_dir_a = data_root_a / ".quantclass_sync" / "log"
+            self._write_report(log_dir_a, "run_report_20260313_update.json", [
+                {"product": "stock-a", "status": "ok", "reason_code": "ok", "error": ""},
+            ])
+
+            # data_root_b 下的产品 stock-a 状态为 error（同名产品，不同 data_root）
+            (data_root_b / "stock-a").mkdir(parents=True)
+            (data_root_b / "stock-a" / "timestamp.txt").write_text(
+                "2026-03-12,2026-03-12 22:00:00\n", encoding="utf-8"
+            )
+            log_dir_b = data_root_b / ".quantclass_sync" / "log"
+            self._write_report(log_dir_b, "run_report_20260313_update.json", [
+                {"product": "stock-a", "status": "error", "reason_code": "network_error", "error": "B 的错误"},
+            ])
+
+            # 查询 data_root_a 的 overview，不 mock report_dir_path，
+            # 由 resolve_runtime_paths 自动返回 data_root_a/.quantclass_sync/log/
+            overview_a = get_products_overview(
+                data_root_a, ["stock-a"], today=date(2026, 3, 13)
+            )
+
+            # data_root_a 下的 stock-a 应为 ok（green），不应读到 data_root_b 的 error
+            self.assertEqual(len(overview_a), 1)
+            self.assertEqual(overview_a[0]["last_status"], "ok")
+            self.assertEqual(overview_a[0]["status_color"], "green")
+            self.assertNotEqual(
+                overview_a[0]["last_error"], "B 的错误",
+                "data_root_a 的查询不应读到 data_root_b 的报告内容",
+            )
+
+
+class TestReportHistoryScanRetainsOldProducts(unittest.TestCase):
+    """回归测试：扫描多个报告时，旧报告中的产品状态不应被丢弃。
+
+    Bug: _load_latest_report_products 原先只读最新一个报告，
+    导致"部分运行"（只包含少数产品）覆盖后，其余产品的上次状态丢失，
+    显示为灰色/无状态。
+    修复：改为回溯最近 N 个报告，每产品只取最近一次出现的状态。
+    """
+
+    def _write_report(self, log_dir: Path, filename: str, products: list):
+        """在指定 log_dir 写入 run_report JSON。"""
+        log_dir.mkdir(parents=True, exist_ok=True)
+        report = {
+            "schema_version": "3.1",
+            "run_id": "test",
+            "started_at": "2026-03-13T00:00:00Z",
+            "mode": "network",
+            "success_total": sum(1 for p in products if p.get("status") == "ok"),
+            "failed_total": sum(1 for p in products if p.get("status") == "error"),
+            "skipped_total": 0,
+            "duration_seconds": 10.0,
+            "products": products,
+        }
+        (log_dir / filename).write_text(
+            json.dumps(report, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def test_old_product_status_retained_from_earlier_report(self):
+        """旧报告中的 product-a(error) 在新报告未覆盖时，仍应显示为 error 状态。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_root = Path(tmpdir)
+            log_dir = data_root / ".quantclass_sync" / "log"
+
+            # 为两个产品创建 timestamp（避免因无 timestamp 而显示为 gray）
+            for p in ["product-a", "product-b"]:
+                (data_root / p).mkdir(parents=True)
+                (data_root / p / "timestamp.txt").write_text(
+                    "2026-03-12,2026-03-12 22:00:00\n", encoding="utf-8"
+                )
+
+            # 第一个报告（较早）：product-a(error) + product-b(ok)
+            self._write_report(log_dir, "run_report_20260312_update.json", [
+                {"product": "product-a", "status": "error", "reason_code": "network_error", "error": "连接超时"},
+                {"product": "product-b", "status": "ok", "reason_code": "ok", "error": ""},
+            ])
+
+            # 第二个报告（较新）：只包含 product-b(ok)，不包含 product-a
+            self._write_report(log_dir, "run_report_20260313_update.json", [
+                {"product": "product-b", "status": "ok", "reason_code": "ok", "error": ""},
+            ])
+
+            # 不 mock report_dir_path，验证真实路径结构
+            overview = get_products_overview(
+                data_root,
+                ["product-a", "product-b"],
+                today=date(2026, 3, 13),
+            )
+
+            by_name = {item["name"]: item for item in overview}
+
+            # product-a：最新报告没有它，但旧报告有 error，应从旧报告回溯
+            self.assertEqual(
+                by_name["product-a"]["last_status"], "error",
+                "product-a 应从旧报告回溯到 error 状态"
+            )
+            self.assertEqual(
+                by_name["product-a"]["status_color"], "red",
+                "error 状态应显示为红色"
+            )
+
+            # product-b：最新报告有它，状态为 ok
+            self.assertEqual(by_name["product-b"]["last_status"], "ok")
+
+
 if __name__ == "__main__":
     unittest.main()

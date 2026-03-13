@@ -123,9 +123,8 @@ class TestMaxWorkersParameter(unittest.TestCase):
         比累计线程数更准确地反映真实并发度。
         """
         mock_headers.return_value = ({"Authorization": "test"}, "test-hid")
-        # 当前同时活跃线程计数和峰值记录
-        active_count = [0]
-        peak_active = [0]
+        active_count = 0
+        peak_active = 0
         lock = threading.Lock()
 
         def fake_resolve(plan, **kwargs):
@@ -134,13 +133,14 @@ class TestMaxWorkersParameter(unittest.TestCase):
         mock_resolve.side_effect = fake_resolve
 
         def fake_process(**kwargs):
+            nonlocal active_count, peak_active
             # 进入 sleep 前 +1，退出后 -1，测量 sleep 中的并发峰值
             with lock:
-                active_count[0] += 1
-                peak_active[0] = max(peak_active[0], active_count[0])
+                active_count += 1
+                peak_active = max(peak_active, active_count)
             time.sleep(0.05)  # 确保线程有重叠窗口
             with lock:
-                active_count[0] -= 1
+                active_count -= 1
             return kwargs["plan"].name, "2026-03-13", SyncStats(), "", "ok"
 
         mock_process.side_effect = fake_process
@@ -152,7 +152,7 @@ class TestMaxWorkersParameter(unittest.TestCase):
         _execute_plans(plans, ctx, report, max_workers=4)
 
         # 至少有 2 个线程同时处于 sleep（证明并行生效）
-        self.assertGreaterEqual(peak_active[0], 2)
+        self.assertGreaterEqual(peak_active, 2)
 
 
 class TestConcurrentErrorHandling(unittest.TestCase):
@@ -285,6 +285,88 @@ class TestStatsAccumulation(unittest.TestCase):
         self.assertEqual(total.created_files, n)
         self.assertEqual(total.updated_files, n * 2)
         self.assertEqual(total.rows_added, n * 10)
+
+
+class TestSQLiteCrossThreadSafety(unittest.TestCase):
+    """回归测试：并发模式下 SQLite 跨线程使用不应抛 ProgrammingError。
+
+    Bug: connect_status_db 未设置 check_same_thread=False，
+    导致工作线程调用 _upsert_product_status_after_success 时触发
+    sqlite3.ProgrammingError: SQLite objects created in a thread can only be
+    used in that same thread.
+    修复：connect_status_db 加 check_same_thread=False 参数。
+    """
+
+    @patch("quantclass_sync_internal.orchestrator.build_headers_or_raise")
+    @patch("quantclass_sync_internal.orchestrator._reset_http_metrics")
+    @patch("quantclass_sync_internal.orchestrator._resolve_requested_dates_for_plan")
+    @patch("quantclass_sync_internal.orchestrator.process_product")
+    def test_no_programming_error_on_concurrent_sqlite_write(
+        self, mock_process, mock_resolve, mock_reset, mock_headers
+    ):
+        """并发 max_workers=2 时，_upsert_product_status_after_success 真实执行
+        不应抛 sqlite3.ProgrammingError（跨线程访问同一 Connection）。
+        """
+        from pathlib import Path
+        import tempfile
+        from quantclass_sync_internal.status_store import open_status_db
+        from quantclass_sync_internal.reporting import _new_report
+
+        mock_headers.return_value = ({"Authorization": "test"}, "test-hid")
+
+        def fake_resolve(plan, **kwargs):
+            return ["2026-03-13"], False
+
+        mock_resolve.side_effect = fake_resolve
+
+        def fake_process(**kwargs):
+            # 模拟成功同步，返回真实的数据日期
+            name = kwargs["plan"].name
+            return name, "2026-03-13", SyncStats(updated_files=1), "", "ok"
+
+        mock_process.side_effect = fake_process
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_root = Path(tmpdir)
+            products = ["product-a", "product-b"]
+
+            # 为每个产品创建目录（write_local_timestamp 需要目录存在或会自动创建）
+            for p in products:
+                (data_root / p).mkdir(parents=True)
+
+            # 用 open_status_db 创建真实的 SQLite 连接（在主线程中创建）
+            with open_status_db(data_root) as conn:
+                # dry_run=False 才会触发真实的状态写入路径
+                ctx = _make_ctx(data_root=data_root, dry_run=False)
+                plans = [
+                    ProductPlan(name=p, strategy="merge_known") for p in products
+                ]
+                report = _new_report("test-sqlite-thread", "network")
+
+                # 不应抛 sqlite3.ProgrammingError
+                try:
+                    _execute_plans(
+                        plans, ctx, report,
+                        conn=conn,
+                        max_workers=2,
+                    )
+                except Exception as exc:
+                    self.fail(
+                        f"并发写入 SQLite 时抛出异常（预期不抛）: {type(exc).__name__}: {exc}"
+                    )
+
+            # 验证 timestamp.txt 被写入（确认 _upsert_product_status_after_success 真正执行）
+            for p in products:
+                ts_path = data_root / p / "timestamp.txt"
+                self.assertTrue(
+                    ts_path.exists(),
+                    f"{p}/timestamp.txt 未被写入，_upsert_product_status_after_success 可能未执行",
+                )
+                content = ts_path.read_text(encoding="utf-8").strip()
+                self.assertTrue(
+                    content.startswith("2026-03-13"),
+                    f"{p}/timestamp.txt 内容异常: {content!r}",
+                )
 
 
 if __name__ == "__main__":

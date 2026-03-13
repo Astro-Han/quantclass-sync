@@ -56,31 +56,35 @@ def _status_color(days_behind: Optional[int], last_status: str) -> str:
     return "red"
 
 
-def _load_latest_report_products(log_dir: Path) -> Dict[str, Dict[str, Any]]:
-    """从最新的 run_report JSON 中提取每产品结果，返回 {product_name: {status, reason_code, error}} 。
+_REPORT_SCAN_LIMIT = 20  # 回溯最近 N 个报告文件
 
-    如果没有报告文件，返回空 dict。
+
+def _load_latest_report_products(log_dir: Path) -> Dict[str, Dict[str, Any]]:
+    """从最近的 run_report JSON 中提取每产品最后一次出现的结果。
+
+    回溯最近 _REPORT_SCAN_LIMIT 个报告（按文件名降序），
+    每个产品只取最近一次出现的状态，避免部分运行后其他产品状态丢失。
+    返回 {product_name: {status, reason_code, error}}，无报告时返回空 dict。
     """
     report_files = sorted(log_dir.glob("run_report_*.json"))
     if not report_files:
         return {}
-    # 取最新的报告（按文件名排序，文件名含时间戳）
-    latest = report_files[-1]
-    try:
-        data = json.loads(latest.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    # 从最新报告往回扫描
     result: Dict[str, Dict[str, Any]] = {}
-    for item in data.get("products", []):
-        name = item.get("product", "")
-        if name:
-            # 同一个产品可能在报告中出现多次（回补多天），取最后一条。
-            # 依赖报告写入顺序（按日期递增），若将来写入乱序需改为显式比较 date_time。
-            result[name] = {
-                "status": item.get("status", ""),
-                "reason_code": item.get("reason_code", ""),
-                "error": item.get("error", ""),
-            }
+    for path in reversed(report_files[-_REPORT_SCAN_LIMIT:]):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for item in data.get("products", []):
+            name = item.get("product", "")
+            if name and name not in result:
+                # 只取该产品最近一次出现的状态（更新报告中的覆盖不回退）
+                result[name] = {
+                    "status": item.get("status", ""),
+                    "reason_code": item.get("reason_code", ""),
+                    "error": item.get("error", ""),
+                }
     return result
 
 

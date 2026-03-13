@@ -14,10 +14,10 @@ from typing import Dict, Iterator, List, Optional
 
 from .config import atomic_temp_path
 from .constants import (
-    DEFAULT_REPORT_DIR,
     DEFAULT_REPORT_RETENTION_DAYS,
     LEGACY_STATUS_DB_REL,
     LEGACY_STATUS_JSON_REL,
+    META_REPORT_DIR_REL,
     META_STATUS_DB_REL,
     META_STATUS_JSON_REL,
     SYNC_META_DIRNAME,
@@ -75,12 +75,12 @@ def resolve_runtime_paths(data_root: Path) -> RuntimePaths:
     规则：
     - 默认使用新路径：<data_root>/.quantclass_sync/*
     - 若检测到旧路径已有状态数据，且新路径尚无状态数据，则回退旧路径读取（避免迁移期分裂）
-    - 运行报告默认写到脚本目录下 log（与 data_root 解耦，便于分发复用）
+    - 运行报告写到 data_root/.quantclass_sync/log/，按数据目录隔离
     """
 
     data_root = data_root.resolve()
     metadata_root = data_root / SYNC_META_DIRNAME
-    default_report_dir = DEFAULT_REPORT_DIR.resolve()
+    report_dir = (data_root / META_REPORT_DIR_REL).resolve()
 
     new_status_db = data_root / META_STATUS_DB_REL
     new_status_json = data_root / META_STATUS_JSON_REL
@@ -96,7 +96,7 @@ def resolve_runtime_paths(data_root: Path) -> RuntimePaths:
             metadata_root=metadata_root,
             status_db=legacy_status_db,
             status_json=legacy_status_json,
-            report_dir=default_report_dir,
+            report_dir=report_dir,
             source="legacy",
         )
 
@@ -104,7 +104,7 @@ def resolve_runtime_paths(data_root: Path) -> RuntimePaths:
         metadata_root=metadata_root,
         status_db=new_status_db,
         status_json=new_status_json,
-        report_dir=default_report_dir,
+        report_dir=report_dir,
         source="metadata",
     )
 
@@ -119,7 +119,7 @@ def status_json_path(data_root: Path) -> Path:
     return resolve_runtime_paths(data_root).status_json
 
 def report_dir_path(data_root: Path) -> Path:
-    """返回运行报告目录（默认：脚本目录下 log）。"""
+    """返回运行报告目录（data_root/.quantclass_sync/log/）。"""
 
     return resolve_runtime_paths(data_root).report_dir
 
@@ -276,7 +276,8 @@ def connect_status_db(data_root: Path, read_only: bool = False) -> sqlite3.Conne
         return conn
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    # check_same_thread=False: 并发下载时工作线程在 _lock 保护下使用主线程创建的连接
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     ensure_status_table(conn)
     return conn
