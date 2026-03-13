@@ -23,7 +23,8 @@ if [ ! -f "$ENV_FILE" ]; then
     echo ""
 fi
 
-CONDA_ENV=$(cat "$ENV_FILE")
+# 读取环境名并去除尾随空白
+CONDA_ENV=$(tr -d '[:space:]' < "$ENV_FILE")
 
 # 激活 conda 环境
 # 尝试常见的 conda 初始化路径
@@ -45,7 +46,7 @@ else
     exit 1
 fi
 
-conda activate "$CONDA_ENV" 2>/dev/null
+conda activate "$CONDA_ENV"
 if [ $? -ne 0 ]; then
     echo "错误：无法激活 conda 环境 '$CONDA_ENV'。"
     echo "请检查环境名是否正确，或删除 $ENV_FILE 后重新运行。"

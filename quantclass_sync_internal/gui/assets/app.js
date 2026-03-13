@@ -20,6 +20,7 @@ document.addEventListener('alpine:init', () => {
         historyList: [],       // 历史运行列表
         historyDetail: null,   // 当前查看的运行详情（null 时显示列表）
         historyLoading: false, // 历史页加载中
+        historyError: '',      // 历史页错误信息
 
         // ===== 同步状态 =====
         syncStatus: 'idle',    // 'idle' | 'syncing' | 'done' | 'error'
@@ -226,16 +227,18 @@ document.addEventListener('alpine:init', () => {
         async loadHistory() {
             this.historyLoading = true;
             this.historyDetail = null;
+            this.historyError = '';
             try {
                 const data = await window.pywebview.api.get_history();
                 if (data.ok === false) {
-                    console.error('loadHistory error:', data.error);
+                    this.historyError = data.error || '历史记录加载失败';
                     this.historyList = [];
                 } else {
                     this.historyList = data.runs || [];
                 }
             } catch (e) {
                 console.error('loadHistory failed:', e);
+                this.historyError = String(e);
                 this.historyList = [];
             }
             this.historyLoading = false;
@@ -244,16 +247,19 @@ document.addEventListener('alpine:init', () => {
         // 查看指定运行的产品明细
         async viewDetail(reportFile) {
             this.historyLoading = true;
+            this.historyError = '';
             try {
                 const data = await window.pywebview.api.get_run_detail(reportFile);
                 if (data.ok === false) {
-                    console.error('viewDetail error:', data.error);
+                    // 加载失败，留在列表视图并展示错误
+                    this.historyError = data.error || '报告详情加载失败';
                     this.historyDetail = null;
                 } else {
                     this.historyDetail = data;
                 }
             } catch (e) {
                 console.error('viewDetail failed:', e);
+                this.historyError = String(e);
                 this.historyDetail = null;
             }
             this.historyLoading = false;
@@ -262,6 +268,7 @@ document.addEventListener('alpine:init', () => {
         // 返回历史列表
         backToList() {
             this.historyDetail = null;
+            this.historyError = '';
         },
     }));
 });

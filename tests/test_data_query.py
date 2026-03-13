@@ -366,16 +366,13 @@ class TestGetRunDetail(unittest.TestCase):
 
     def test_path_traversal_rejected(self):
         """路径遍历攻击被拒绝。"""
-        # 创建一个在 log_dir 外的文件
-        import os
-        outer_dir = tempfile.TemporaryDirectory()
-        outer_file = os.path.join(outer_dir.name, "secret.json")
-        Path(outer_file).write_text('{"evil": true}', encoding="utf-8")
+        with tempfile.TemporaryDirectory() as outer_path:
+            outer_file = str(Path(outer_path) / "secret.json")
+            Path(outer_file).write_text('{"evil": true}', encoding="utf-8")
 
-        result = get_run_detail(self.log_dir, outer_file)
-        self.assertFalse(result["ok"])
-        self.assertIn("非法路径", result["error"])
-        outer_dir.cleanup()
+            result = get_run_detail(self.log_dir, outer_file)
+            self.assertFalse(result["ok"])
+            self.assertIn("非法路径", result["error"])
 
     def test_corrupt_json(self):
         """损坏的 JSON 文件返回 ok=False。"""

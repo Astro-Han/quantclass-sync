@@ -211,6 +211,9 @@
         <!-- 加载状态 -->
         <div class="loading" x-show="historyLoading">加载中...</div>
 
+        <!-- 错误提示 -->
+        <div class="overview-error" x-show="!historyLoading && historyError" x-text="historyError"></div>
+
         <!-- 列表视图 -->
         <div x-show="!historyLoading && !historyDetail">
           <table class="product-table" x-show="historyList.length > 0">
@@ -240,41 +243,43 @@
           <div class="empty-state" x-show="historyList.length === 0">暂无运行记录</div>
         </div>
 
-        <!-- 详情视图 -->
-        <div x-show="!historyLoading && historyDetail">
-          <button class="btn-back" @click="backToList()">&larr; 返回列表</button>
-          <div class="detail-header">
-            <span x-text="'运行时间: ' + historyDetail.started_at"></span>
-            <span x-text="'耗时: ' + formatDuration(historyDetail.duration_seconds)"></span>
-          </div>
-          <div class="sync-done-stats" style="margin-bottom: 16px;">
-            <span class="green" x-text="'成功: ' + historyDetail.success_total"></span>
-            <span class="red" x-text="'失败: ' + historyDetail.failed_total"></span>
-            <span class="gray" x-text="'跳过: ' + historyDetail.skipped_total"></span>
-          </div>
-          <table class="product-table">
-            <thead>
-              <tr>
-                <th>状态</th>
-                <th>产品名称</th>
-                <th>耗时</th>
-                <th>错误</th>
-              </tr>
-            </thead>
-            <tbody>
-              <template x-for="p in historyDetail.products" :key="p.product">
+        <!-- 详情视图（用 x-if 避免 historyDetail 为 null 时访问属性报错） -->
+        <template x-if="!historyLoading && historyDetail">
+          <div>
+            <button class="btn-back" @click="backToList()">&larr; 返回列表</button>
+            <div class="detail-header">
+              <span x-text="'运行时间: ' + historyDetail.started_at"></span>
+              <span x-text="'耗时: ' + formatDuration(historyDetail.duration_seconds)"></span>
+            </div>
+            <div class="sync-done-stats" style="margin-bottom: 16px;">
+              <span class="green" x-text="'成功: ' + historyDetail.success_total"></span>
+              <span class="red" x-text="'失败: ' + historyDetail.failed_total"></span>
+              <span class="gray" x-text="'跳过: ' + historyDetail.skipped_total"></span>
+            </div>
+            <table class="product-table">
+              <thead>
                 <tr>
-                  <td>
-                    <span class="status-dot" :class="{ green: p.status === 'ok', red: p.status === 'error', gray: p.status === 'skipped' }"></span>
-                  </td>
-                  <td x-text="p.product"></td>
-                  <td x-text="formatDuration(p.elapsed_seconds)"></td>
-                  <td class="text-error" x-text="p.error || ''"></td>
+                  <th>状态</th>
+                  <th>产品名称</th>
+                  <th>耗时</th>
+                  <th>错误</th>
                 </tr>
-              </template>
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                <template x-for="p in historyDetail.products" :key="p.product">
+                  <tr>
+                    <td>
+                      <span class="status-dot" :class="{ green: p.status === 'ok', red: p.status === 'error', gray: p.status === 'skipped' }"></span>
+                    </td>
+                    <td x-text="p.product"></td>
+                    <td x-text="formatDuration(p.elapsed_seconds)"></td>
+                    <td class="text-error" x-text="p.error || ''"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </template>
 
       </div>
 

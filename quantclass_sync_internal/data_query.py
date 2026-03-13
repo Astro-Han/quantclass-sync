@@ -196,10 +196,10 @@ def get_run_detail(log_dir: Path, report_file: str) -> Dict[str, Any]:
         "products": [{"product": str, "status": str, "elapsed_seconds": float, "error": str}, ...]
     }
     """
-    # 路径安全检查：必须在 log_dir 内
+    # 路径安全检查：report_file 解析后必须在 log_dir 目录内（防止路径遍历）
     report_path = Path(report_file).resolve()
     log_dir_resolved = log_dir.resolve()
-    if not str(report_path).startswith(str(log_dir_resolved) + os.sep) and report_path != log_dir_resolved:
+    if not str(report_path).startswith(str(log_dir_resolved) + os.sep):
         return {"ok": False, "error": "非法路径：报告文件不在日志目录内"}
 
     if not report_path.exists():
