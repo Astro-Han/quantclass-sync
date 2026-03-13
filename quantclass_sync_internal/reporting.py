@@ -6,7 +6,7 @@ import json
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Protocol, Sequence
+from typing import IO, Dict, Iterable, Optional, Protocol, Sequence
 
 from .config import atomic_temp_path
 from .constants import (
@@ -26,7 +26,7 @@ from .status_store import report_dir_path
 
 try:
     import fcntl
-except Exception:  # pragma: no cover — Windows 无 fcntl
+except ImportError:  # pragma: no cover — Windows 无 fcntl
     fcntl = None  # type: ignore[assignment]
 
 
@@ -174,7 +174,7 @@ PRODUCT_LAST_STATUS_FILE = "product_last_status.json"
 _LOCK_FILE = "product_last_status.lock"
 
 
-def _flock_exclusive(fd: object) -> None:
+def _flock_exclusive(fd: IO) -> None:
     """对文件描述符加排他锁。Windows 无 fcntl 时降级为无锁（与旧版行为一致）。"""
     if fcntl is not None:
         fcntl.flock(fd, fcntl.LOCK_EX)

@@ -19,12 +19,12 @@ from .models import CsvPayload, DatasetRule, SortAudit, log_debug, log_info
 
 try:
     import fcntl
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     fcntl = None
 
 try:
     import msvcrt
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     msvcrt = None
 
 LOCK_POLL_INTERVAL_SECONDS = 0.05

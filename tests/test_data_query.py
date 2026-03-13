@@ -905,5 +905,35 @@ class TestLogDirOverridesReportPathParent(unittest.TestCase):
             self.assertFalse((external_dir / PRODUCT_LAST_STATUS_FILE).exists())
 
 
+class TestEmptyProductsSentinelWrite(unittest.TestCase):
+    """边界测试：products 为空时仍写入哨兵文件 {}，避免重复扫描历史报告。"""
+
+    def test_empty_products_writes_sentinel(self):
+        """报告无产品记录时，_finalize_and_write_report 仍写入空 {} 到 product_last_status.json。"""
+        from quantclass_sync_internal.reporting import (
+            _finalize_and_write_report, _new_report, PRODUCT_LAST_STATUS_FILE,
+        )
+        from quantclass_sync_internal.models import SyncStats
+        import time
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            report_path = log_dir / "run_report_test_empty.json"
+            # 不向 report 添加任何产品记录
+            report = _new_report("test-empty", mode="network")
+            total = SyncStats()
+
+            _finalize_and_write_report(
+                report, total, has_error=False, t_run_start=time.time(),
+                report_path=report_path, dry_run=False, log_dir=log_dir,
+            )
+
+            status_path = log_dir / PRODUCT_LAST_STATUS_FILE
+            self.assertTrue(status_path.exists())
+            data = json.loads(status_path.read_text(encoding="utf-8"))
+            # 空 dict 哨兵
+            self.assertEqual(data, {})
+
+
 if __name__ == "__main__":
     unittest.main()
