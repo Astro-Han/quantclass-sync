@@ -157,13 +157,15 @@ python3 scripts/repair_coin_cap.py
 |------|------|
 | `<data_root>/.quantclass_sync/status/` | 同步状态（SQLite + JSON） |
 | `<data_root>/<product>/timestamp.txt` | 每个产品上次同步到哪天 |
-| `log/run_report_*.json` | 每次运行的报告 |
+| `<data_root>/.quantclass_sync/log/run_report_*.json` | 每次运行的报告 |
 
 想看最近一次运行报告：
 
 ```bash
-ls -t log/run_report_* | head -1 | xargs cat
+ls -t <data_root>/.quantclass_sync/log/run_report_* | head -1 | xargs cat
 ```
+
+把 `<data_root>` 替换成你在 setup 时填的数据目录。
 
 ### 缓存
 
@@ -184,7 +186,7 @@ ls -t log/run_report_* | head -1 | xargs cat
 **怎么看运行报告？**
 
 ```bash
-ls -t log/run_report_* | head -1 | xargs cat
+ls -t <data_root>/.quantclass_sync/log/run_report_* | head -1 | xargs cat
 ```
 
 ---

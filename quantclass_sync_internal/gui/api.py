@@ -17,8 +17,8 @@ from ..config import load_user_config_or_raise, resolve_credentials_for_update
 from ..constants import (
     DEFAULT_API_BASE,
     DEFAULT_CATALOG_FILE,
-    DEFAULT_SECRETS_FILE,
     DEFAULT_USER_CONFIG_FILE,
+    DEFAULT_USER_SECRETS_FILE,
     DEFAULT_WORK_DIR,
     EXIT_CODE_SUCCESS,
     PRODUCT_MODE_EXPLICIT_LIST,
@@ -337,7 +337,7 @@ class SyncApi:
 
         try:
             config_file = DEFAULT_USER_CONFIG_FILE.resolve()
-            secrets_file = DEFAULT_SECRETS_FILE.resolve()
+            secrets_file = DEFAULT_USER_SECRETS_FILE.resolve()
 
             # 解析凭证（CLI 来源为空，走文件或环境变量）
             api_key, hid, credential_source = resolve_credentials_for_update(
