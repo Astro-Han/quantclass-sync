@@ -23,6 +23,11 @@ document.addEventListener('alpine:init', () => {
         historyError: '',      // 历史页错误信息
         historyLoaded: false,  // 历史列表是否已加载过（避免重复请求）
 
+        // ===== 健康检查状态 =====
+        healthReport: null,        // 健康报告结果对象（null 表示未检查过）
+        healthLoading: false,      // 是否正在检查中
+        healthError: '',           // 检查失败时的错误信息
+
         // ===== 同步状态 =====
         syncStatus: 'idle',    // 'idle' | 'syncing' | 'done' | 'error'
         currentProduct: '',    // 最近完成的产品名
@@ -272,6 +277,28 @@ document.addEventListener('alpine:init', () => {
                 this.historyDetail = null;
             }
             this.historyLoading = false;
+        },
+
+        // ===== 健康检查 =====
+
+        // 调用 Python 端 get_health_report()，扫描数据目录检测三类问题
+        async checkHealth() {
+            if (this.healthLoading) return;
+            this.healthLoading = true;
+            this.healthError = '';
+            this.healthReport = null;
+            try {
+                const data = await window.pywebview.api.get_health_report();
+                if (data.ok === false) {
+                    this.healthError = data.error || '健康检查失败';
+                } else {
+                    this.healthReport = data.health;
+                }
+            } catch (e) {
+                console.error('checkHealth failed:', e);
+                this.healthError = String(e);
+            }
+            this.healthLoading = false;
         },
 
         // 返回历史列表（如有新同步记录待刷新，自动重新加载）

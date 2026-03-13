@@ -466,3 +466,105 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ========== 数据健康检查 ========== */
+.health-section {
+  margin-top: 20px;
+  margin-bottom: 16px;
+}
+
+.btn-health {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: #374151;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.btn-health:hover:not(:disabled) {
+  background: #f9fafb;
+  border-color: #9ca3af;
+}
+
+.btn-health:disabled {
+  cursor: not-allowed;
+  color: #9ca3af;
+}
+
+.health-result {
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  padding: 16px 20px;
+}
+
+.health-ok {
+  color: #22c55e;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.health-warn {
+  color: #f59e0b;
+  font-size: 14px;
+  font-weight: 500;
+  margin-bottom: 12px;
+}
+
+.health-meta {
+  font-size: 12px;
+  color: #9ca3af;
+  font-weight: 400;
+}
+
+.health-issue-list {
+  list-style: none;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.health-issue-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 13px;
+  color: #374151;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.health-issue-list li:last-child {
+  border-bottom: none;
+}
+
+.health-issue-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  background: #fef2f2;
+  color: #b91c1c;
+  white-space: nowrap;
+}
+
+.health-issue-product {
+  font-size: 12px;
+  color: #6b7280;
+  white-space: nowrap;
+}
+
+.health-issue-detail {
+  font-size: 12px;
+  color: #9ca3af;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
