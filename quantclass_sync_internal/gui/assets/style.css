@@ -93,7 +93,7 @@ body {
 }
 
 /* ========== 错误提示 ========== */
-.overview-error {
+.error-banner {
   padding: 20px;
   text-align: center;
   color: #b91c1c;

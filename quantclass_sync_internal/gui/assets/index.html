@@ -44,7 +44,7 @@
         <div class="loading" x-show="loading">加载中...</div>
 
         <!-- 错误提示 -->
-        <div class="overview-error" x-show="!loading && overviewError" x-text="overviewError"></div>
+        <div class="error-banner" x-show="!loading && overviewError" x-text="overviewError"></div>
 
         <template x-if="!loading && !overviewError">
           <div>
@@ -124,7 +124,7 @@
         <!-- idle 状态 -->
         <div x-show="syncStatus === 'idle'">
           <!-- 总览加载失败时，同步页也展示错误原因 -->
-          <div class="overview-error" x-show="overviewError" x-text="overviewError"></div>
+          <div class="error-banner" x-show="overviewError" x-text="overviewError"></div>
           <div class="sync-info" x-show="!overviewError">
             <p x-show="dataRoot" x-text="'数据目录: ' + dataRoot"></p>
             <p x-text="'待更新产品: ' + (summary.yellow + summary.red) + ' 个'"></p>
@@ -212,7 +212,7 @@
         <div class="loading" x-show="historyLoading">加载中...</div>
 
         <!-- 错误提示 -->
-        <div class="overview-error" x-show="!historyLoading && historyError" x-text="historyError"></div>
+        <div class="error-banner" x-show="!historyLoading && historyError" x-text="historyError"></div>
 
         <!-- 列表视图 -->
         <div x-show="!historyLoading && !historyDetail">

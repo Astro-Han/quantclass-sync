@@ -284,7 +284,7 @@ class TestStartSyncAlreadyRunning(unittest.TestCase):
                     self.assertFalse(result2["started"])
                     self.assertIn("正在进行", result2["message"])
 
-                    # 释放慢任务线程
+                    # 释放慢任务线程（daemon=True，即使未 join 也不阻塞进程退出）
                     hold.set()
 
 

@@ -84,7 +84,7 @@ document.addEventListener('alpine:init', () => {
         // ===== 筛选方法 =====
 
         // 按 searchText 和 filterColor 过滤并排序产品列表
-        // 注：每次渲染会调用多次（x-for + x-show），产品数 <100 无性能问题
+        // 注：table x-for 和 empty-state x-show 各调一次，共两次，产品数 <100 无性能问题
         filteredProducts() {
             const order = { red: 0, yellow: 1, green: 2, gray: 3 };
             return this.products
@@ -276,10 +276,11 @@ document.addEventListener('alpine:init', () => {
 
         // 返回历史列表（如有新同步记录待刷新，自动重新加载）
         backToList() {
-            this.historyDetail = null;
             this.historyError = '';
             if (!this.historyLoaded) {
-                this.loadHistory();
+                this.loadHistory(); // 内部会清除 historyDetail
+            } else {
+                this.historyDetail = null;
             }
         },
     }));
