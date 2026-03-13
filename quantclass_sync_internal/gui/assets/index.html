@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>QuantClass Sync</title>
   <link rel="stylesheet" href="style.css" />
-  <!-- Alpine.js 本地引入 -->
-  <script defer src="alpine.min.js"></script>
+  <!-- app.js 必须在 Alpine 之前加载，确保 alpine:init 监听器已注册 -->
   <script defer src="app.js"></script>
+  <script defer src="alpine.min.js"></script>
 </head>
 <body>
   <div class="app" x-data="app()">
