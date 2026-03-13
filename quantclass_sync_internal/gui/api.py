@@ -334,7 +334,9 @@ class SyncApi:
             selected_products: list = []
             fallback_products: list = []
             if getattr(user_config, "product_mode", "") == PRODUCT_MODE_EXPLICIT_LIST:
-                selected_products = user_config.default_products or []
+                if not user_config.default_products:
+                    raise RuntimeError("配置了 explicit_list，但 default_products 为空；请重新执行 setup。")
+                selected_products = user_config.default_products
             else:
                 fallback_products = user_config.default_products or []
 

@@ -456,7 +456,7 @@ class TestSyncNonZeroExitCode(unittest.TestCase):
         self.tmpdir.cleanup()
 
     def test_nonzero_exit_code_sets_error_status(self):
-        def fake_run_update(**kwargs):
+        def fake_run_update(progress_callback=None, **kwargs):
             return 1  # EXIT_CODE_GENERAL_FAILURE
 
         patches = [
