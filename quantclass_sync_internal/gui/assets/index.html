@@ -38,7 +38,10 @@
         <!-- 加载状态 -->
         <div class="loading" x-show="loading">加载中...</div>
 
-        <template x-if="!loading">
+        <!-- 错误提示 -->
+        <div class="overview-error" x-show="!loading && overviewError" x-text="overviewError"></div>
+
+        <template x-if="!loading && !overviewError">
           <div>
             <!-- 统计卡片 -->
             <div class="stats-cards">

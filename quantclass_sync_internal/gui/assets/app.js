@@ -10,6 +10,7 @@ document.addEventListener('alpine:init', () => {
         dataRoot: '',      // 数据目录路径
         lastRun: null,     // 上次同步时间字符串
         configExists: false,
+        overviewError: '',  // 总览加载错误信息
 
         // ===== 同步状态 =====
         syncStatus: 'idle',    // 'idle' | 'syncing' | 'done' | 'error'
@@ -39,15 +40,24 @@ document.addEventListener('alpine:init', () => {
         // 调用 Python 端 get_overview()，返回产品列表和统计摘要
         async loadOverview() {
             this.loading = true;
+            this.overviewError = '';
             try {
                 const data = await window.pywebview.api.get_overview();
-                this.products = data.products || [];
-                this.summary = data.summary || { green: 0, yellow: 0, red: 0, gray: 0 };
-                this.dataRoot = data.data_root || '';
-                this.lastRun = data.last_run;
-                this.configExists = true;
+                if (data.ok === false) {
+                    // Python 端返回错误（配置缺失等）
+                    this.overviewError = data.error || '数据加载失败';
+                    this.products = [];
+                    this.summary = { green: 0, yellow: 0, red: 0, gray: 0 };
+                } else {
+                    this.products = data.products || [];
+                    this.summary = data.summary || { green: 0, yellow: 0, red: 0, gray: 0 };
+                    this.dataRoot = data.data_root || '';
+                    this.lastRun = data.last_run;
+                    this.configExists = true;
+                }
             } catch (e) {
                 console.error('loadOverview failed:', e);
+                this.overviewError = String(e);
             }
             this.loading = false;
         },
@@ -65,8 +75,8 @@ document.addEventListener('alpine:init', () => {
         // 调用 Python 端 start_sync()，成功后切换到 syncing 状态并启动轮询
         async startSync() {
             if (this.syncStatus === 'syncing') return;
-            // 重置进度字段
-            this.syncStatus = 'idle';
+            // 立即标记为 syncing，防止双击穿透（后端也有锁保护作为最终屏障）
+            this.syncStatus = 'syncing';
             this.completed = 0;
             this.total = 0;
             this.currentProduct = '';
@@ -76,7 +86,6 @@ document.addEventListener('alpine:init', () => {
             try {
                 const result = await window.pywebview.api.start_sync();
                 if (result.started) {
-                    this.syncStatus = 'syncing';
                     this.startPolling();
                 } else {
                     // Python 端拒绝启动（如已有任务在跑）

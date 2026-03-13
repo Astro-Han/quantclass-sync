@@ -155,7 +155,7 @@ def global_options(
         source=runtime_paths.source,
     )
 
-    # CommandContext 是“本次运行共享配置”，后续命令都从这里读取参数。
+    # CommandContext 是"本次运行共享配置"，后续命令都从这里读取参数。
     command_ctx = CommandContext(
         run_id=run_id,
         data_root=resolved_data_root,
@@ -176,7 +176,7 @@ def global_options(
     )
     ctx.obj = command_ctx
 
-    # 无子命令时做“首次引导”：
+    # 无子命令时做"首次引导"：
     # - 首次（无配置）：自动进入 setup
     # - 非首次（已有配置）：默认执行 update
     if ctx.invoked_subcommand is None:
@@ -459,7 +459,7 @@ def cmd_setup(
     ctx.obj = setup_ctx
 
     # 默认先做连通性检查，再写文件：
-    # 这样检查失败时不会留下“新配置写了一半”的状态。
+    # 这样检查失败时不会留下"新配置写了一半"的状态。
     if not skip_check:
         probe_product = default_products[0] if default_products else (catalog[0] if catalog else "stock-trading-data")
         headers = _build_headers(raw_api_key)
@@ -469,7 +469,7 @@ def cmd_setup(
             raise RuntimeError(f"连通性检查失败；请检查 API Key/HID 或网络。原始错误：{exc}") from exc
         log_info("连通性检查通过。", event="SETUP", probe_product=probe_product)
 
-    # 真正落盘时用“配置+密钥”一体化写入，任一步失败都会回滚。
+    # 真正落盘时用"配置+密钥"一体化写入，任一步失败都会回滚。
     now = utc_now_iso()
     user_config = UserConfig(
         data_root=data_root_path,
@@ -521,7 +521,7 @@ def cmd_update(
     _sync_logger_runtime(LOGGER)
     run_ctx = _build_command_ctx_with_overrides(base_ctx, data_root=data_root, secrets_file=secrets_file)
     # update 明确固定优先级：CLI > setup secrets > ENV，
-    # 解析后写回 run_ctx，避免后续流程再次按“旧优先级”重算。
+    # 解析后写回 run_ctx，避免后续流程再次按"旧优先级"重算。
     api_key, hid, credential_source = resolve_credentials_for_update(
         cli_api_key=run_ctx.api_key,
         cli_hid=run_ctx.hid,

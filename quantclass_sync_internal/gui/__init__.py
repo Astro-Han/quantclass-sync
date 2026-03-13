@@ -24,6 +24,7 @@ def launch_gui() -> None:
 
     api = SyncApi()
     # 创建窗口，挂载 SyncApi 实例供 JS 调用
+    # 保留 window 引用：部分 pywebview 后端要求窗口对象在 start() 时仍存活
     window = webview.create_window(  # noqa: F841
         title="QuantClass Sync",
         url=str(ASSETS_DIR / "index.html"),

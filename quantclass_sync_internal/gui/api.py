@@ -303,7 +303,7 @@ class SyncApi:
                 report_file=None,
                 stop_on_error=False,
                 verbose=False,
-                mode="network",
+                mode="network",  # API 接入模式（走真实 HTTP）
                 api_base=DEFAULT_API_BASE,
                 catalog_file=DEFAULT_CATALOG_FILE.resolve(),
                 work_dir=DEFAULT_WORK_DIR.resolve(),
@@ -329,7 +329,7 @@ class SyncApi:
             # 执行同步（fallback_products 来自配置的 default_products，products=[] 表示走本地扫描）
             run_update_with_settings(
                 command_ctx=command_ctx,
-                mode="local",
+                mode="local",  # 产品发现策略（按本地已有目录扫描）
                 products=[],
                 force_update=False,
                 command_name="gui_update",

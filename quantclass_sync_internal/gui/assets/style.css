@@ -92,6 +92,17 @@ body {
   font-size: 14px;
 }
 
+/* ========== 错误提示 ========== */
+.overview-error {
+  padding: 20px;
+  text-align: center;
+  color: #b91c1c;
+  background: #fef2f2;
+  border-radius: 8px;
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
 /* ========== 统计卡片 ========== */
 .stats-cards {
   display: flex;
