@@ -278,6 +278,7 @@ class SyncApi:
             ]
         }
         """
+        # 复用 _resolve_config() 获取 data_root，catalog 未使用但避免提取额外轻量方法
         _user_config, data_root, _catalog, err = self._resolve_config()
         if err:
             return {"ok": False, "error": err}

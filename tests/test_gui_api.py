@@ -569,11 +569,14 @@ class TestGetRunDetail(unittest.TestCase):
                  patch(f"{_API_MOD}.load_user_config_or_raise", return_value=mock_config), \
                  patch(f"{_API_MOD}.load_catalog_or_raise", return_value=["product-a"]), \
                  patch(f"{_API_MOD}.report_dir_path", return_value=Path(tmp_dir) / "log"), \
-                 patch(f"{_API_MOD}.get_run_detail", return_value=mock_detail):
+                 patch(f"{_API_MOD}.get_run_detail", return_value=mock_detail) as mock_fn:
 
                 from quantclass_sync_internal.gui.api import SyncApi
                 api = SyncApi()
                 result = api.get_run_detail("/tmp/log/report.json")
+
+                # 验证底层函数被正确调用（log_dir + report_file 透传）
+                mock_fn.assert_called_once_with(Path(tmp_dir) / "log", "/tmp/log/report.json")
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["success_total"], 2)

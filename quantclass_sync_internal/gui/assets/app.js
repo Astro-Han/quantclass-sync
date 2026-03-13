@@ -83,6 +83,7 @@ document.addEventListener('alpine:init', () => {
         // ===== 筛选方法 =====
 
         // 按 searchText 和 filterColor 过滤并排序产品列表
+        // 注：每次渲染会调用多次（x-for + x-show），产品数 <100 无性能问题
         filteredProducts() {
             const order = { red: 0, yellow: 1, green: 2, gray: 3 };
             return this.products

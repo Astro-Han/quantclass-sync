@@ -354,9 +354,12 @@ class TestGetRunDetail(unittest.TestCase):
         self.assertAlmostEqual(result["duration_seconds"], 45.2)
         # 产品数量正确
         self.assertEqual(len(result["products"]), 4)
-        # 失败产品排在最前
+        # 排序顺序：error → skipped → ok
         self.assertEqual(result["products"][0]["status"], "error")
         self.assertEqual(result["products"][0]["product"], "p-err")
+        self.assertEqual(result["products"][1]["status"], "skipped")
+        self.assertEqual(result["products"][2]["status"], "ok")
+        self.assertEqual(result["products"][3]["status"], "ok")
 
     def test_file_not_found(self):
         """报告文件不存在返回 ok=False。"""

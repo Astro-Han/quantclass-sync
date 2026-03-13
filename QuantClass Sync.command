@@ -57,7 +57,13 @@ if [ $? -ne 0 ]; then
 fi
 
 echo "已激活环境: $CONDA_ENV"
+echo "Python 路径: $(which python)"
 echo "启动 QuantClass Sync GUI..."
 echo ""
 
 python quantclass_sync.py gui
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "程序异常退出，按任意键关闭..."
+    read -n 1
+fi
