@@ -240,7 +240,7 @@
               </template>
             </tbody>
           </table>
-          <div class="empty-state" x-show="historyList.length === 0">暂无运行记录</div>
+          <div class="empty-state" x-show="historyList.length === 0 && !historyError">暂无运行记录</div>
         </div>
 
         <!-- 详情视图（用 x-if 避免 historyDetail 为 null 时访问属性报错） -->

@@ -272,20 +272,20 @@ class TestStartSyncAlreadyRunning(unittest.TestCase):
 
                 from quantclass_sync_internal.gui.api import SyncApi
                 api = SyncApi()
-                # 注入慢任务替代真实同步，避免触发网络调用
-                api._run_sync = slow_sync
 
-                # 第一次启动成功
-                result1 = api.start_sync()
-                self.assertTrue(result1["started"])
+                # patch.object 替换绑定方法，确保 Thread(target=self._run_sync) 能命中
+                with patch.object(api, '_run_sync', slow_sync):
+                    # 第一次启动成功
+                    result1 = api.start_sync()
+                    self.assertTrue(result1["started"])
 
-                # 第二次启动被锁拒绝
-                result2 = api.start_sync()
-                self.assertFalse(result2["started"])
-                self.assertIn("正在进行", result2["message"])
+                    # 第二次启动被锁拒绝
+                    result2 = api.start_sync()
+                    self.assertFalse(result2["started"])
+                    self.assertIn("正在进行", result2["message"])
 
-                # 释放慢任务线程
-                hold.set()
+                    # 释放慢任务线程
+                    hold.set()
 
 
 class TestStartSyncNoCredentials(unittest.TestCase):

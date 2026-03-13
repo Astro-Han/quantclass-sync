@@ -46,8 +46,7 @@ else
     exit 1
 fi
 
-conda activate "$CONDA_ENV"
-if [ $? -ne 0 ]; then
+if ! conda activate "$CONDA_ENV"; then
     echo "错误：无法激活 conda 环境 '$CONDA_ENV'。"
     echo "请检查环境名是否正确，或删除 $ENV_FILE 后重新运行。"
     echo ""

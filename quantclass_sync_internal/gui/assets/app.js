@@ -108,7 +108,7 @@ document.addEventListener('alpine:init', () => {
             if (name === 'overview' && this.syncStatus !== 'syncing') {
                 this.loadOverview();
             }
-            if (name === 'history' && !this.historyLoaded && !this.historyDetail) {
+            if (name === 'history' && !this.historyLoaded && !this.historyLoading) {
                 this.loadHistory();
             }
         },
@@ -230,6 +230,7 @@ document.addEventListener('alpine:init', () => {
         // 加载历史运行列表
         async loadHistory() {
             this.historyLoading = true;
+            // 刷新列表时关闭详情视图，确保用户看到最新列表
             this.historyDetail = null;
             this.historyError = '';
             try {
@@ -237,6 +238,7 @@ document.addEventListener('alpine:init', () => {
                 if (data.ok === false) {
                     this.historyError = data.error || '历史记录加载失败';
                     this.historyList = [];
+                    this.historyLoaded = false; // 失败后允许重试
                 } else {
                     this.historyList = data.runs || [];
                     this.historyLoaded = true;
@@ -245,6 +247,7 @@ document.addEventListener('alpine:init', () => {
                 console.error('loadHistory failed:', e);
                 this.historyError = String(e);
                 this.historyList = [];
+                this.historyLoaded = false; // 异常后允许重试
             }
             this.historyLoading = false;
         },
@@ -271,10 +274,13 @@ document.addEventListener('alpine:init', () => {
             this.historyLoading = false;
         },
 
-        // 返回历史列表
+        // 返回历史列表（如有新同步记录待刷新，自动重新加载）
         backToList() {
             this.historyDetail = null;
             this.historyError = '';
+            if (!this.historyLoaded) {
+                this.loadHistory();
+            }
         },
     }));
 });
