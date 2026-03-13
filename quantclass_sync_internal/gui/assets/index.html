@@ -186,7 +186,7 @@
                 <span class="green" x-text="'成功: ' + (runSummary.ok || 0)"></span>
                 <span class="red" x-text="'失败: ' + (runSummary.error || 0)"></span>
                 <span class="gray" x-text="'跳过: ' + (runSummary.skipped || 0)"></span>
-              <span x-text="'耗时: ' + formatDuration(runSummary.duration_seconds)"></span>
+                <span x-text="'耗时: ' + formatDuration(runSummary.duration_seconds)"></span>
               </div>
               <template x-if="runSummary.failed_products && runSummary.failed_products.length > 0">
                 <div>
