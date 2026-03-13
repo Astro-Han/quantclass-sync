@@ -44,10 +44,13 @@ document.addEventListener('alpine:init', () => {
             try {
                 const data = await window.pywebview.api.get_overview();
                 if (data.ok === false) {
-                    // Python 端返回错误（配置缺失等）
+                    // Python 端返回错误（配置缺失等），清空所有派生状态避免残留旧值
                     this.overviewError = data.error || '数据加载失败';
                     this.products = [];
                     this.summary = { green: 0, yellow: 0, red: 0, gray: 0 };
+                    this.dataRoot = '';
+                    this.lastRun = null;
+                    this.configExists = false;
                 } else {
                     this.products = data.products || [];
                     this.summary = data.summary || { green: 0, yellow: 0, red: 0, gray: 0 };
@@ -58,6 +61,11 @@ document.addEventListener('alpine:init', () => {
             } catch (e) {
                 console.error('loadOverview failed:', e);
                 this.overviewError = String(e);
+                this.products = [];
+                this.summary = { green: 0, yellow: 0, red: 0, gray: 0 };
+                this.dataRoot = '';
+                this.lastRun = null;
+                this.configExists = false;
             }
             this.loading = false;
         },
