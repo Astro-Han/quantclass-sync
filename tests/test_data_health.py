@@ -226,15 +226,14 @@ class TestCheckOrphanTemp(unittest.TestCase):
         issues = _check_orphan_temp(self.data_root)
         self.assertEqual(len(issues), 0)
 
-    def test_nested_subdirectory(self):
-        """嵌套子目录中的 .tmp- 文件也能检出。"""
+    def test_nested_subdirectory_not_scanned(self):
+        """嵌套子目录中的 .tmp- 文件不检测（只扫一级目录）。"""
         nested = self.data_root / "product" / "subdir"
         nested.mkdir(parents=True)
         (nested / ".data.csv.tmp-atomic-9999-111").write_text("temp")
 
         issues = _check_orphan_temp(self.data_root)
-        self.assertEqual(len(issues), 1)
-        self.assertEqual(issues[0]["product"], "product")
+        self.assertEqual(len(issues), 0)
 
     def test_tmp_in_root_level(self):
         """data_root 根级的 .tmp- 文件，product 应为空。"""

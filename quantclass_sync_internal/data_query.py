@@ -240,9 +240,6 @@ def get_run_detail(log_dir: Path, report_file: str) -> Dict[str, Any]:
 # 每产品最多检查前 N 个 CSV 文件（按 iterdir 顺序），避免大产品卡 UI
 _CSV_CHECK_LIMIT = 100
 
-# orphan_temp 扫描最多遍历的文件节点数，超出后截断
-_ORPHAN_SCAN_LIMIT = 5000
-
 # 状态目录名（工具自身写入的元数据，不参与健康检查）
 _META_DIR_NAME = ".quantclass_sync"
 
@@ -321,34 +318,48 @@ def _check_csv_unreadable(data_root: Path) -> List[Dict[str, Any]]:
 def _check_orphan_temp(data_root: Path) -> List[Dict[str, Any]]:
     """检查 data_root 下残留的临时文件（含 .tmp- 的文件名）。
 
-    跳过 .quantclass_sync 状态目录，最多遍历 _ORPHAN_SCAN_LIMIT 个节点。
+    按产品目录逐个扫描一级文件（atomic_temp_path 生成的 tmp 文件与目标同目录）。
+    同时检查 data_root 根级文件。跳过 .quantclass_sync 状态目录。
     """
     issues: List[Dict[str, Any]] = []
-    meta_dir = data_root / _META_DIR_NAME
-    meta_exists = meta_dir.is_dir()
-    scanned = 0
-    for path in data_root.rglob("*"):
-        # 跳过状态目录
-        if meta_exists and path.is_relative_to(meta_dir):
+
+    # 扫描 data_root 根级文件
+    try:
+        for entry in data_root.iterdir():
+            if entry.is_file() and ".tmp-" in entry.name:
+                issues.append({
+                    "type": "orphan_temp",
+                    "product": "",
+                    "detail": entry.name,
+                    "file": entry.name,
+                })
+    except OSError:
+        pass
+
+    # 逐产品目录扫描一级文件
+    try:
+        subdirs = [
+            d for d in data_root.iterdir()
+            if d.is_dir() and not d.name.startswith(".")
+        ]
+    except OSError:
+        return issues
+
+    for product_dir in subdirs:
+        product = product_dir.name
+        try:
+            for entry in product_dir.iterdir():
+                if entry.is_file() and ".tmp-" in entry.name:
+                    rel = f"{product}/{entry.name}"
+                    issues.append({
+                        "type": "orphan_temp",
+                        "product": product,
+                        "detail": rel,
+                        "file": rel,
+                    })
+        except OSError:
             continue
-        scanned += 1
-        if scanned > _ORPHAN_SCAN_LIMIT:
-            break
-        if not path.is_file():
-            continue
-        if ".tmp-" in path.name:
-            # 提取所属产品（第一级子目录）
-            try:
-                rel = path.relative_to(data_root)
-                product = rel.parts[0] if len(rel.parts) > 1 else ""
-            except ValueError:
-                product = ""
-            issues.append({
-                "type": "orphan_temp",
-                "product": product,
-                "detail": str(path.relative_to(data_root)),
-                "file": str(path.relative_to(data_root)),
-            })
+
     return issues
 
 
