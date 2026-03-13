@@ -20,7 +20,7 @@ document.addEventListener('alpine:init', () => {
         elapsedSeconds: 0,     // 已用秒数
         errorMessage: '',      // 错误信息（error 状态时）
         runSummary: null,      // 完成后的摘要对象
-        pollTimer: null,       // setInterval 句柄
+        pollTimer: null,       // setTimeout 句柄
 
         // ===== 初始化 =====
         // Alpine.js 会在组件挂载时调用 init()
