@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+from .constants import ENCODING_CANDIDATES, KNOWN_DATASETS, TIMESTAMP_FILE_NAME
 from .reporting import read_or_backfill_product_last_status
 from .status_store import read_local_timestamp_date, report_dir_path
 
@@ -229,4 +231,142 @@ def get_run_detail(log_dir: Path, report_file: str) -> Dict[str, Any]:
         "failed_total": data.get("failed_total", 0),
         "skipped_total": data.get("skipped_total", 0),
         "products": products,
+    }
+
+
+# --- 数据健康检查 ---
+
+# 每产品 CSV 可读性检查上限，避免大产品卡 UI
+_CSV_CHECK_LIMIT = 100
+
+
+def _check_missing_data(
+    data_root: Path, catalog_products: Sequence[str],
+) -> List[Dict[str, Any]]:
+    """检查有 timestamp.txt 但目录下无数据文件的产品。"""
+    issues: List[Dict[str, Any]] = []
+    for product in catalog_products:
+        product_dir = data_root / product
+        ts_file = product_dir / TIMESTAMP_FILE_NAME
+        if not ts_file.is_file():
+            continue
+        # 有 timestamp.txt，检查目录下是否有 .csv 或 .zip 文件
+        has_data = any(
+            f.is_file() and f.suffix in (".csv", ".zip")
+            for f in product_dir.iterdir()
+            if not f.name.startswith(".")
+        )
+        if not has_data:
+            issues.append({
+                "type": "missing_data",
+                "product": product,
+                "detail": "有 timestamp.txt 但目录下无数据文件",
+                "file": "",
+            })
+    return issues
+
+
+def _check_csv_unreadable(data_root: Path) -> List[Dict[str, Any]]:
+    """检查 KNOWN_DATASETS 中 CSV 是否可正常读取（解码 + 非空）。
+
+    轻量检查：open + 读前两行，每产品上限 _CSV_CHECK_LIMIT 个文件。
+    """
+    issues: List[Dict[str, Any]] = []
+    for product in KNOWN_DATASETS:
+        product_dir = data_root / product
+        if not product_dir.is_dir():
+            continue
+        csv_files = [
+            f for f in product_dir.iterdir()
+            if f.is_file() and f.suffix == ".csv" and not f.name.startswith(".")
+        ]
+        for csv_path in csv_files[:_CSV_CHECK_LIMIT]:
+            rel_path = f"{product}/{csv_path.name}"
+            # 尝试所有候选编码
+            readable = False
+            for enc in ENCODING_CANDIDATES:
+                try:
+                    with open(csv_path, "r", encoding=enc) as fh:
+                        first_line = fh.readline()
+                        if first_line.strip():
+                            readable = True
+                            break
+                except (OSError, UnicodeDecodeError, ValueError):
+                    continue
+            if not readable:
+                issues.append({
+                    "type": "csv_unreadable",
+                    "product": product,
+                    "detail": f"{rel_path}: 无法解码或内容为空",
+                    "file": rel_path,
+                })
+    return issues
+
+
+def _check_orphan_temp(data_root: Path) -> List[Dict[str, Any]]:
+    """检查 data_root 下残留的临时文件（含 .tmp- 的文件名）。"""
+    issues: List[Dict[str, Any]] = []
+    for path in data_root.rglob("*"):
+        if not path.is_file():
+            continue
+        if ".tmp-" in path.name:
+            # 提取所属产品（第一级子目录）
+            try:
+                rel = path.relative_to(data_root)
+                product = rel.parts[0] if len(rel.parts) > 1 else ""
+            except ValueError:
+                product = ""
+            issues.append({
+                "type": "orphan_temp",
+                "product": product,
+                "detail": str(path.relative_to(data_root)),
+                "file": str(path.relative_to(data_root)),
+            })
+    return issues
+
+
+def check_data_health(
+    data_root: Path, catalog_products: Sequence[str],
+) -> Dict[str, Any]:
+    """扫描 data_root，返回数据健康报告。
+
+    检测三类问题：文件缺失(missing_data)、CSV 不可读(csv_unreadable)、
+    残留临时文件(orphan_temp)。
+
+    data_root 不存在时返回空报告，单文件异常不中断整体扫描。
+    """
+    t0 = time.monotonic()
+
+    # data_root 不存在，返回空报告
+    if not data_root.is_dir():
+        return {
+            "issues": [],
+            "summary": {
+                "missing_data": 0,
+                "csv_unreadable": 0,
+                "orphan_temp": 0,
+                "total": 0,
+            },
+            "scanned_products": 0,
+            "elapsed_seconds": 0.0,
+        }
+
+    issues: List[Dict[str, Any]] = []
+    issues.extend(_check_missing_data(data_root, catalog_products))
+    issues.extend(_check_csv_unreadable(data_root))
+    issues.extend(_check_orphan_temp(data_root))
+
+    # 统计各类型计数
+    summary: Dict[str, int] = {"missing_data": 0, "csv_unreadable": 0, "orphan_temp": 0}
+    for issue in issues:
+        issue_type = issue["type"]
+        summary[issue_type] = summary.get(issue_type, 0) + 1
+    summary["total"] = len(issues)
+
+    elapsed = round(time.monotonic() - t0, 2)
+    return {
+        "issues": issues,
+        "summary": summary,
+        "scanned_products": len(catalog_products),
+        "elapsed_seconds": elapsed,
     }
