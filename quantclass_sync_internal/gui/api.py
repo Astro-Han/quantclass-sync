@@ -391,6 +391,8 @@ class SyncApi:
                 log_info("GUI 同步完成。", event="GUI_SYNC", elapsed=round(elapsed, 1))
 
         except Exception as exc:
+            # 预检阶段异常（凭证缺失、配置错误等），尚未进入 run_update_with_settings，
+            # 无 run_summary 可填（保持初始值 None），前端据此不展示摘要详情
             elapsed = time.time() - t_start
             error_msg = str(exc)
             log_error(f"GUI 同步出错：{error_msg}", event="GUI_SYNC")
