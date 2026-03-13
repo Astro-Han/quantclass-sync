@@ -66,6 +66,40 @@ class TestCheckMissingData(unittest.TestCase):
         issues = _check_missing_data(self.data_root, [product])
         self.assertEqual(len(issues), 0)
 
+    def test_has_timestamp_has_extensionless_files(self):
+        """有 timestamp.txt 且有无后缀文件 -> 不报问题。"""
+        product = "test-product"
+        pdir = self.data_root / product
+        pdir.mkdir()
+        (pdir / TIMESTAMP_FILE_NAME).write_text("2026-01-01,2026-01-01 10:00:00\n")
+        (pdir / "bj832317").write_text("some data")
+
+        issues = _check_missing_data(self.data_root, [product])
+        self.assertEqual(len(issues), 0)
+
+    def test_has_timestamp_has_subdirectories(self):
+        """有 timestamp.txt 且有子目录（如 stock-fin-data-xbx 按代码拆分）-> 不报问题。"""
+        product = "test-product"
+        pdir = self.data_root / product
+        pdir.mkdir()
+        (pdir / TIMESTAMP_FILE_NAME).write_text("2026-01-01,2026-01-01 10:00:00\n")
+        subdir = pdir / "bj832317"
+        subdir.mkdir()
+        (subdir / "bj832317.csv").write_text("col1\n1\n")
+
+        issues = _check_missing_data(self.data_root, [product])
+        self.assertEqual(len(issues), 0)
+
+    def test_only_timestamp_file(self):
+        """目录里只有 timestamp.txt，无其他文件 -> 报 missing_data。"""
+        product = "test-product"
+        pdir = self.data_root / product
+        pdir.mkdir()
+        (pdir / TIMESTAMP_FILE_NAME).write_text("2026-01-01,2026-01-01 10:00:00\n")
+
+        issues = _check_missing_data(self.data_root, [product])
+        self.assertEqual(len(issues), 1)
+
     def test_product_dir_not_exists(self):
         """产品目录不存在 -> 不报问题（没有 timestamp.txt）。"""
         issues = _check_missing_data(self.data_root, ["nonexistent"])

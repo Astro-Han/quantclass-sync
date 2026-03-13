@@ -250,11 +250,12 @@ def _check_missing_data(
         ts_file = product_dir / TIMESTAMP_FILE_NAME
         if not ts_file.is_file():
             continue
-        # 有 timestamp.txt，检查目录下是否有 .csv 或 .zip 文件
+        # 有 timestamp.txt，检查目录下是否有数据（文件或子目录）
+        # 排除隐藏条目和 timestamp.txt 本身，剩余任意条目即视为有数据
         has_data = any(
-            f.is_file() and f.suffix in (".csv", ".zip")
-            for f in product_dir.iterdir()
-            if not f.name.startswith(".")
+            not entry.name.startswith(".")
+            and entry.name != TIMESTAMP_FILE_NAME
+            for entry in product_dir.iterdir()
         )
         if not has_data:
             issues.append({
