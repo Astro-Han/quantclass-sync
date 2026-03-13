@@ -390,11 +390,13 @@ def check_data_health(
         except Exception as exc:
             log_error(f"健康检查子任务 {check_fn.__name__} 异常：{exc}", event="HEALTH_CHECK")
 
-    # 统计各类型计数
+    # 统计各类型计数（只统计已知类型，确保 total = 三类之和）
+    _KNOWN_TYPES = {"missing_data", "csv_unreadable", "orphan_temp"}
     summary: Dict[str, int] = {"missing_data": 0, "csv_unreadable": 0, "orphan_temp": 0}
     for issue in issues:
         issue_type = issue["type"]
-        summary[issue_type] = summary.get(issue_type, 0) + 1
+        if issue_type in _KNOWN_TYPES:
+            summary[issue_type] += 1
     summary["total"] = len(issues)
 
     elapsed = round(time.monotonic() - t0, 2)
