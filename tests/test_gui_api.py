@@ -245,9 +245,20 @@ class TestStartSyncSuccess(unittest.TestCase):
 
 
 class TestStartSyncAlreadyRunning(unittest.TestCase):
-    """start_sync 重复启动时返回 started=False。"""
+    """start_sync 重复启动时返回 started=False。
+
+    通过注入慢任务让同步线程真正运行，验证锁内读-判断-写的原子性。
+    """
 
     def test_start_sync_already_running(self):
+        import threading
+
+        # 用 Event 让注入的 _run_sync 阻塞，直到测试主动释放
+        hold = threading.Event()
+
+        def slow_sync(*args, **kwargs):
+            hold.wait(timeout=5)
+
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_file = Path(tmp_dir) / "user_config.json"
             config_file.write_text("{}", encoding="utf-8")
@@ -261,12 +272,20 @@ class TestStartSyncAlreadyRunning(unittest.TestCase):
 
                 from quantclass_sync_internal.gui.api import SyncApi
                 api = SyncApi()
-                # 手动将状态设置为 syncing，模拟正在运行
-                api._progress["status"] = "syncing"
-                result = api.start_sync()
+                # 注入慢任务替代真实同步，避免触发网络调用
+                api._run_sync = slow_sync
 
-        self.assertFalse(result["started"])
-        self.assertIn("正在进行", result["message"])
+                # 第一次启动成功
+                result1 = api.start_sync()
+                self.assertTrue(result1["started"])
+
+                # 第二次启动被锁拒绝
+                result2 = api.start_sync()
+                self.assertFalse(result2["started"])
+                self.assertIn("正在进行", result2["message"])
+
+                # 释放慢任务线程
+                hold.set()
 
 
 class TestStartSyncNoCredentials(unittest.TestCase):

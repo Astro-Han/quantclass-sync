@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import os
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -199,7 +198,7 @@ def get_run_detail(log_dir: Path, report_file: str) -> Dict[str, Any]:
     # 路径安全检查：report_file 解析后必须在 log_dir 目录内（防止路径遍历）
     report_path = Path(report_file).resolve()
     log_dir_resolved = log_dir.resolve()
-    if not str(report_path).startswith(str(log_dir_resolved) + os.sep):
+    if not report_path.is_relative_to(log_dir_resolved):
         return {"ok": False, "error": "非法路径：报告文件不在日志目录内"}
 
     if not report_path.exists():
