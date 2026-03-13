@@ -3,7 +3,9 @@
 自动从 QuantClass 下载股票和币圈数据，帮你把本地数据保持最新。
 好几天没跑也没关系，一条命令就能把缺的全补上。
 
-当前版本：**v0.8.2**
+当前版本：**v1.0**
+
+macOS 工具。Windows 用户推荐使用 QuantClass 官方客户端。
 
 ---
 
@@ -97,6 +99,7 @@ python3 quantclass_sync.py update    # 写全也行，效果一样
 | `--force` | 不管本地是不是最新，强制重新下载 |
 | `--products` | 只更新指定的产品（可以写多个） |
 | `--no-verbose` | 不想看那么多日志就加这个 |
+| `--workers N` | 并发下载线程数（1-8，默认 1） |
 
 **例子** — 只更新两个产品：
 
@@ -105,6 +108,24 @@ python3 quantclass_sync.py --products stock-trading-data --products stock-main-i
 ```
 
 **凭证从哪读？** 按优先级：命令行参数 > `user_secrets.env` > 环境变量。
+
+### status — 查看状态
+
+```bash
+python3 quantclass_sync.py status
+```
+
+一屏看全局：哪些产品已同步、落后几天、上次运行结果。离线可用，不调 API。
+
+### gui — 图形界面
+
+```bash
+python3 quantclass_sync.py gui
+```
+
+打开图形界面窗口，包含总览、同步、历史三个页面。关闭窗口后命令退出。
+
+macOS 用户也可以直接双击 `QuantClass Sync.command` 启动 GUI，不需要打开终端。首次运行会提示输入 conda 环境名。
 
 ### 币圈合成（自动的，不用管）
 
@@ -208,6 +229,17 @@ ls -t <data_root>/.quantclass_sync/log/run_report_* | head -1 | xargs cat
 ---
 
 ## 更新记录
+
+<details>
+<summary>v1.0</summary>
+
+- 新增图形界面（GUI）：总览、同步、历史三个页面
+- 新增并发下载：`--workers` 参数支持 1-8 线程
+- 新增 `status` 命令：一屏查看全局同步状态
+- 新增 `.command` 双击启动 GUI（macOS）
+- 测试用例从 199 增加到 315 个
+
+</details>
 
 <details>
 <summary>v0.8.2</summary>
