@@ -221,19 +221,15 @@ class SyncApi:
         如果已在同步中，返回 {"started": False, "message": "..."}。
         否则启动后台线程，返回 {"started": True, "message": "..."}。
         """
-        with self._lock:
-            current_status = self._progress.get("status", "idle")
-
-        if current_status == "syncing":
-            return {"started": False, "message": "同步正在进行中，请等待完成后再试。"}
-
-        # 解析配置，失败直接拒绝启动
+        # 解析配置（锁外执行，不阻塞进度轮询）
         user_config, data_root, catalog, err = self._resolve_config()
         if err:
             return {"started": False, "message": f"配置读取失败，无法启动同步：{err}"}
 
-        # 重置进度状态
+        # 读-判断-写合并在同一个锁块，防止双击连续启动
         with self._lock:
+            if self._progress.get("status") == "syncing":
+                return {"started": False, "message": "同步正在进行中，请等待完成后再试。"}
             self._progress = dict(_PROGRESS_INIT)
             self._progress["status"] = "syncing"
 
@@ -359,8 +355,8 @@ class SyncApi:
                             fp.get("product", "") for fp in raw_run.get("failed_products", [])
                         ],
                     }
-            except Exception:
-                pass
+            except Exception as summary_exc:
+                log_error(f"同步完成但运行摘要读取失败：{summary_exc}", event="GUI_SYNC")
 
             self._update_progress(
                 status="done",

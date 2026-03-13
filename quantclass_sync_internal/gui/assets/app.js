@@ -26,7 +26,8 @@ document.addEventListener('alpine:init', () => {
         // 优先检查 pywebview 是否已就绪，否则监听事件
         init() {
             if (window.pywebview) {
-                this.loadOverview();
+                // 延迟到下一轮事件循环，确保 Alpine 组件已完全挂载
+                setTimeout(() => this.loadOverview(), 0);
             } else {
                 window.addEventListener('pywebview:ready', () => {
                     this.loadOverview();

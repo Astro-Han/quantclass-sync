@@ -1061,7 +1061,10 @@ def _execute_plans(
     _completed = 0
 
     def _notify_progress(product_name: str) -> None:
-        """安全调用进度回调（异常不影响主流程）。"""
+        """安全调用进度回调（异常不影响主流程）。
+
+        串行路径直接调用（无竞争），并行路径由调用方在 _lock 内调用。
+        """
         nonlocal _completed
         _completed += 1
         if progress_callback is not None:
