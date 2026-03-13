@@ -23,8 +23,8 @@ if [ ! -f "$ENV_FILE" ]; then
     echo ""
 fi
 
-# 读取环境名并去除尾随空白
-CONDA_ENV=$(tr -d '[:space:]' < "$ENV_FILE")
+# 读取环境名并去除首尾空白
+CONDA_ENV=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' "$ENV_FILE")
 
 # 激活 conda 环境
 # 尝试常见的 conda 初始化路径

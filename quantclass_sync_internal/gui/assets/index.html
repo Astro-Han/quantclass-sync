@@ -273,7 +273,7 @@
                     </td>
                     <td x-text="p.product"></td>
                     <td x-text="formatDuration(p.elapsed_seconds)"></td>
-                    <td class="text-error" x-text="p.error || ''"></td>
+                    <td :class="{ 'text-error': p.error }" x-text="p.error || ''"></td>
                   </tr>
                 </template>
               </tbody>

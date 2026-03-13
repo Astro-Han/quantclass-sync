@@ -160,8 +160,8 @@ def get_run_history(log_dir: Path, n: int = 10) -> List[Dict[str, Any]]:
     if n <= 0:
         return []
     report_files = sorted(log_dir.glob("run_report_*.json"))
-    # 取最近 n 个，按时间降序
-    recent = report_files[-n:] if len(report_files) > n else report_files
+    # 取最近 n 个，按时间降序（[-n:] 当 n >= len 时返回全部，无需分支）
+    recent = list(report_files[-n:])
     recent.reverse()
 
     history: List[Dict[str, Any]] = []

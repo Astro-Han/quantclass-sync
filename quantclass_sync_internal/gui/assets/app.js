@@ -21,6 +21,7 @@ document.addEventListener('alpine:init', () => {
         historyDetail: null,   // 当前查看的运行详情（null 时显示列表）
         historyLoading: false, // 历史页加载中
         historyError: '',      // 历史页错误信息
+        historyLoaded: false,  // 历史列表是否已加载过（避免重复请求）
 
         // ===== 同步状态 =====
         syncStatus: 'idle',    // 'idle' | 'syncing' | 'done' | 'error'
@@ -107,7 +108,7 @@ document.addEventListener('alpine:init', () => {
             if (name === 'overview' && this.syncStatus !== 'syncing') {
                 this.loadOverview();
             }
-            if (name === 'history') {
+            if (name === 'history' && !this.historyLoaded) {
                 this.loadHistory();
             }
         },
@@ -156,12 +157,14 @@ document.addEventListener('alpine:init', () => {
                     if (p.status === 'done') {
                         this.syncStatus = 'done';
                         this.runSummary = p.run_summary;
+                        this.historyLoaded = false; // 有新运行，下次切历史页时刷新
                         this.pollTimer = null;
                         return; // 终态，不再调度下次轮询
                     } else if (p.status === 'error') {
                         this.syncStatus = 'error';
                         this.errorMessage = p.error_message || '同步失败';
                         this.runSummary = p.run_summary;  // 部分失败时也携带摘要
+                        this.historyLoaded = false; // 有新运行，下次切历史页时刷新
                         this.pollTimer = null;
                         return; // 终态，不再调度下次轮询
                     }
@@ -236,6 +239,7 @@ document.addEventListener('alpine:init', () => {
                     this.historyList = [];
                 } else {
                     this.historyList = data.runs || [];
+                    this.historyLoaded = true;
                 }
             } catch (e) {
                 console.error('loadHistory failed:', e);
