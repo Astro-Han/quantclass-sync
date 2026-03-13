@@ -846,7 +846,7 @@ def cmd_one_data(
                 catch_up_to_latest=False,
             )
             export_status_json(conn, status_json_path(command_ctx.data_root))
-    exit_code = _finalize_and_write_report(report, total, has_error, t_run_start, report_path)
+    exit_code = _finalize_and_write_report(report, total, has_error, t_run_start, report_path, dry_run=command_ctx.dry_run)
     log_info("one_data 执行完成。", event="CMD_DONE", exit_code=exit_code)
     if exit_code != 0:
         raise typer.Exit(code=exit_code)

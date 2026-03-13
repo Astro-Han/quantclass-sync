@@ -275,8 +275,9 @@ def _finalize_and_write_report(
     has_error: bool,
     t_run_start: float,
     report_path: Path,
+    dry_run: bool = False,
 ) -> int:
-    """汇总结果并写入报告。"""
+    """汇总结果并写入报告。dry_run 时只写报告，不更新累积状态文件。"""
 
     report.summary = total
     report.ended_at = utc_now_iso()
@@ -316,7 +317,8 @@ def _finalize_and_write_report(
     )
 
     write_run_report(report_path, report)
-    _update_product_last_status(report_path.parent, report)
+    if not dry_run:
+        _update_product_last_status(report_path.parent, report)
     log_info("运行报告已写入。", event="RUN_SUMMARY", report_file=str(report_path))
     return decide_exit_code(report=report, has_error=has_error)
 
