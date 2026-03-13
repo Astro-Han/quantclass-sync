@@ -108,7 +108,7 @@ document.addEventListener('alpine:init', () => {
             if (name === 'overview' && this.syncStatus !== 'syncing') {
                 this.loadOverview();
             }
-            if (name === 'history' && !this.historyLoaded) {
+            if (name === 'history' && !this.historyLoaded && !this.historyDetail) {
                 this.loadHistory();
             }
         },
@@ -249,8 +249,9 @@ document.addEventListener('alpine:init', () => {
             this.historyLoading = false;
         },
 
-        // 查看指定运行的产品明细
+        // 查看指定运行的产品明细（防重入：避免连续快速点击产生并发请求）
         async viewDetail(reportFile) {
+            if (this.historyLoading) return;
             this.historyLoading = true;
             this.historyError = '';
             try {
