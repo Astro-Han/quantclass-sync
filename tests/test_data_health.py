@@ -277,7 +277,7 @@ class TestCheckDataHealthIntegration(unittest.TestCase):
 
     def test_data_root_not_exists(self):
         """data_root 不存在 -> 返回空报告。"""
-        fake_root = Path("/tmp/nonexistent_health_check_test_dir")
+        fake_root = self.data_root / "nonexistent_subdir"
         result = check_data_health(fake_root, ["any-product"])
         self.assertEqual(result["issues"], [])
         self.assertEqual(result["summary"]["total"], 0)

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from .constants import ENCODING_CANDIDATES, KNOWN_DATASETS, TIMESTAMP_FILE_NAME
+from .models import log_error
 from .reporting import read_or_backfill_product_last_status
 from .status_store import read_local_timestamp_date, report_dir_path
 
@@ -324,10 +325,11 @@ def _check_orphan_temp(data_root: Path) -> List[Dict[str, Any]]:
     """
     issues: List[Dict[str, Any]] = []
     meta_dir = data_root / _META_DIR_NAME
+    meta_exists = meta_dir.is_dir()
     scanned = 0
     for path in data_root.rglob("*"):
         # 跳过状态目录
-        if meta_dir.exists() and path.is_relative_to(meta_dir):
+        if meta_exists and path.is_relative_to(meta_dir):
             continue
         scanned += 1
         if scanned > _ORPHAN_SCAN_LIMIT:
@@ -385,8 +387,8 @@ def check_data_health(
     ]:
         try:
             issues.extend(check_fn(*args))
-        except Exception:
-            pass
+        except Exception as exc:
+            log_error(f"健康检查子任务 {check_fn.__name__} 异常：{exc}", event="HEALTH_CHECK")
 
     # 统计各类型计数
     summary: Dict[str, int] = {"missing_data": 0, "csv_unreadable": 0, "orphan_temp": 0}

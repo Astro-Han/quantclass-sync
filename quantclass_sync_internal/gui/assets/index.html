@@ -125,14 +125,14 @@
                   <!-- 无问题 -->
                   <div class="health-ok" x-show="healthReport.summary.total === 0">
                     &#10003; 数据健康，未发现问题
-                    <span class="health-meta" x-text="'（扫描 ' + healthReport.scanned_products + ' 个产品，耗时 ' + healthReport.elapsed_seconds + ' 秒）'"></span>
+                    <span class="health-meta" x-text="'（扫描 ' + healthReport.scanned_products + ' 个产品，耗时 ' + formatDuration(healthReport.elapsed_seconds) + '）'"></span>
                   </div>
 
                   <!-- 有问题 -->
                   <div x-show="healthReport.summary.total > 0">
                     <div class="health-warn">
                       发现 <span x-text="healthReport.summary.total"></span> 个问题
-                      <span class="health-meta" x-text="'（扫描 ' + healthReport.scanned_products + ' 个产品，耗时 ' + healthReport.elapsed_seconds + ' 秒）'"></span>
+                      <span class="health-meta" x-text="'（扫描 ' + healthReport.scanned_products + ' 个产品，耗时 ' + formatDuration(healthReport.elapsed_seconds) + '）'"></span>
                     </div>
                     <ul class="health-issue-list">
                       <template x-for="(issue, idx) in healthReport.issues" :key="issue.type + ':' + idx">
