@@ -3,7 +3,7 @@
 document.addEventListener('alpine:init', () => {
     Alpine.data('app', () => ({
         // ===== 全局状态 =====
-        tab: 'overview',   // 当前 Tab: 'overview' | 'sync'
+        tab: 'overview',   // 当前 Tab: 'overview' | 'sync' | 'history'
         loading: true,     // 总览是否正在加载
         products: [],      // 产品列表，每项包含 name/color/local_date/behind_days/last_result
         summary: { green: 0, yellow: 0, red: 0, gray: 0 }, // 四色计数
@@ -11,6 +11,15 @@ document.addEventListener('alpine:init', () => {
         lastRun: null,     // 上次同步时间字符串
         configExists: false,
         overviewError: '',  // 总览加载错误信息
+
+        // ===== 筛选状态 =====
+        searchText: '',        // 搜索文本（按产品名模糊匹配）
+        filterColor: 'all',   // 筛选颜色: 'all' | 'green' | 'yellow' | 'red' | 'gray'
+
+        // ===== 历史状态 =====
+        historyList: [],       // 历史运行列表
+        historyDetail: null,   // 当前查看的运行详情（null 时显示列表）
+        historyLoading: false, // 历史页加载中
 
         // ===== 同步状态 =====
         syncStatus: 'idle',    // 'idle' | 'syncing' | 'done' | 'error'
@@ -70,12 +79,34 @@ document.addEventListener('alpine:init', () => {
             this.loading = false;
         },
 
+        // ===== 筛选方法 =====
+
+        // 按 searchText 和 filterColor 过滤并排序产品列表
+        filteredProducts() {
+            const order = { red: 0, yellow: 1, green: 2, gray: 3 };
+            return this.products
+                .filter(p => {
+                    if (this.filterColor !== 'all' && p.color !== this.filterColor) return false;
+                    if (this.searchText && !p.name.toLowerCase().includes(this.searchText.toLowerCase())) return false;
+                    return true;
+                })
+                .sort((a, b) => (order[a.color] ?? 4) - (order[b.color] ?? 4));
+        },
+
+        // 点击统计卡片切换筛选（再点一次恢复 all）
+        toggleFilter(color) {
+            this.filterColor = this.filterColor === color ? 'all' : color;
+        },
+
         // ===== Tab 切换 =====
         // 切换到总览时自动刷新数据（同步进行中不刷新，避免干扰）
         switchTab(name) {
             this.tab = name;
             if (name === 'overview' && this.syncStatus !== 'syncing') {
                 this.loadOverview();
+            }
+            if (name === 'history') {
+                this.loadHistory();
             }
         },
 
@@ -187,6 +218,50 @@ document.addEventListener('alpine:init', () => {
             const m = Math.floor(seconds / 60);
             const s = Math.round(seconds % 60);
             return m + ' 分 ' + s + ' 秒';
+        },
+
+        // ===== 历史页方法 =====
+
+        // 加载历史运行列表
+        async loadHistory() {
+            this.historyLoading = true;
+            this.historyDetail = null;
+            try {
+                const data = await window.pywebview.api.get_history();
+                if (data.ok === false) {
+                    console.error('loadHistory error:', data.error);
+                    this.historyList = [];
+                } else {
+                    this.historyList = data.runs || [];
+                }
+            } catch (e) {
+                console.error('loadHistory failed:', e);
+                this.historyList = [];
+            }
+            this.historyLoading = false;
+        },
+
+        // 查看指定运行的产品明细
+        async viewDetail(reportFile) {
+            this.historyLoading = true;
+            try {
+                const data = await window.pywebview.api.get_run_detail(reportFile);
+                if (data.ok === false) {
+                    console.error('viewDetail error:', data.error);
+                    this.historyDetail = null;
+                } else {
+                    this.historyDetail = data;
+                }
+            } catch (e) {
+                console.error('viewDetail failed:', e);
+                this.historyDetail = null;
+            }
+            this.historyLoading = false;
+        },
+
+        // 返回历史列表
+        backToList() {
+            this.historyDetail = null;
         },
     }));
 });

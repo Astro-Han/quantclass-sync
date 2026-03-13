@@ -11,6 +11,7 @@ from quantclass_sync_internal.data_query import (
     _status_color,
     get_latest_run_summary,
     get_products_overview,
+    get_run_detail,
     get_run_history,
 )
 
@@ -310,6 +311,79 @@ class TestGetRunHistory(unittest.TestCase):
         history = get_run_history(self.log_dir)
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0]["run_id"], "ok")
+
+
+class TestGetRunDetail(unittest.TestCase):
+    """运行报告详情读取。"""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.log_dir = Path(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _write_report(self, filename="run_report_20260313_update.json"):
+        """写入标准测试报告，返回文件路径。"""
+        report = {
+            "run_id": "run-20260313",
+            "started_at": "2026-03-13T12:00:00Z",
+            "duration_seconds": 45.2,
+            "success_total": 2,
+            "failed_total": 1,
+            "skipped_total": 1,
+            "products": [
+                {"product": "p-ok", "status": "ok", "elapsed_seconds": 10, "error": ""},
+                {"product": "p-err", "status": "error", "elapsed_seconds": 5, "error": "HTTP 403"},
+                {"product": "p-skip", "status": "skipped", "elapsed_seconds": 0, "error": ""},
+                {"product": "p-ok2", "status": "ok", "elapsed_seconds": 8, "error": ""},
+            ],
+        }
+        path = self.log_dir / filename
+        path.write_text(json.dumps(report), encoding="utf-8")
+        return str(path)
+
+    def test_normal(self):
+        """正常读取报告详情。"""
+        report_file = self._write_report()
+        result = get_run_detail(self.log_dir, report_file)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["success_total"], 2)
+        self.assertEqual(result["failed_total"], 1)
+        self.assertEqual(result["skipped_total"], 1)
+        self.assertAlmostEqual(result["duration_seconds"], 45.2)
+        # 产品数量正确
+        self.assertEqual(len(result["products"]), 4)
+        # 失败产品排在最前
+        self.assertEqual(result["products"][0]["status"], "error")
+        self.assertEqual(result["products"][0]["product"], "p-err")
+
+    def test_file_not_found(self):
+        """报告文件不存在返回 ok=False。"""
+        result = get_run_detail(self.log_dir, str(self.log_dir / "nonexistent.json"))
+        self.assertFalse(result["ok"])
+        self.assertIn("不存在", result["error"])
+
+    def test_path_traversal_rejected(self):
+        """路径遍历攻击被拒绝。"""
+        # 创建一个在 log_dir 外的文件
+        import os
+        outer_dir = tempfile.TemporaryDirectory()
+        outer_file = os.path.join(outer_dir.name, "secret.json")
+        Path(outer_file).write_text('{"evil": true}', encoding="utf-8")
+
+        result = get_run_detail(self.log_dir, outer_file)
+        self.assertFalse(result["ok"])
+        self.assertIn("非法路径", result["error"])
+        outer_dir.cleanup()
+
+    def test_corrupt_json(self):
+        """损坏的 JSON 文件返回 ok=False。"""
+        path = self.log_dir / "run_report_bad.json"
+        path.write_text("not valid json", encoding="utf-8")
+        result = get_run_detail(self.log_dir, str(path))
+        self.assertFalse(result["ok"])
+        self.assertIn("读取失败", result["error"])
 
 
 class TestReportDirIsolationByDataRoot(unittest.TestCase):

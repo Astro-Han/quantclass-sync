@@ -120,6 +120,17 @@ body {
   background: #ffffff;
   border-radius: 8px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  cursor: pointer;
+  transition: box-shadow 0.15s, border-color 0.15s;
+  border: 2px solid transparent;
+}
+
+.stat-card:hover {
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+}
+
+.stat-card-active {
+  border-color: #3b82f6;
 }
 
 /* 状态圆点 (卡片内大圆点) */
@@ -145,6 +156,30 @@ body {
 .stat-label {
   font-size: 12px;
   color: #6b7280;
+}
+
+/* ========== 搜索栏 ========== */
+.filter-bar {
+  margin-bottom: 12px;
+}
+
+.search-input {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 14px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  outline: none;
+  transition: border-color 0.15s;
+  background: #ffffff;
+}
+
+.search-input:focus {
+  border-color: #3b82f6;
+}
+
+.search-input::placeholder {
+  color: #9ca3af;
 }
 
 /* ========== 产品状态表格 ========== */
@@ -370,4 +405,64 @@ body {
   background: #93c5fd;
   color: #ffffff;
   cursor: not-allowed;
+}
+
+/* ========== 空状态提示 ========== */
+.empty-state {
+  padding: 40px;
+  text-align: center;
+  color: #9ca3af;
+  font-size: 14px;
+}
+
+/* ========== 历史页 ========== */
+
+/* 详情链接按钮 */
+.btn-link {
+  background: none;
+  border: none;
+  color: #3b82f6;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0;
+}
+
+.btn-link:hover {
+  text-decoration: underline;
+}
+
+/* 返回按钮 */
+.btn-back {
+  background: none;
+  border: none;
+  color: #6b7280;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 4px 0;
+  margin-bottom: 16px;
+}
+
+.btn-back:hover {
+  color: #374151;
+}
+
+/* 详情页头部信息 */
+.detail-header {
+  display: flex;
+  gap: 24px;
+  font-size: 13px;
+  color: #6b7280;
+  margin-bottom: 12px;
+}
+
+/* 历史表格内彩色文字 */
+.text-green { color: #22c55e; }
+.text-red   { color: #ef4444; }
+.text-error {
+  font-size: 12px;
+  color: #b91c1c;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

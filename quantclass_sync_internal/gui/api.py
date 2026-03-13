@@ -23,7 +23,7 @@ from ..constants import (
     EXIT_CODE_SUCCESS,
     PRODUCT_MODE_EXPLICIT_LIST,
 )
-from ..data_query import get_latest_run_summary, get_products_overview
+from ..data_query import get_latest_run_summary, get_products_overview, get_run_detail, get_run_history
 from ..models import CommandContext, log_error, log_info
 from ..orchestrator import load_catalog_or_raise, run_update_with_settings
 from ..status_store import report_dir_path
@@ -263,6 +263,45 @@ class SyncApi:
         """
         with self._lock:
             return dict(self._progress)
+
+    def get_history(self) -> Dict[str, Any]:
+        """返回最近 20 次运行历史摘要。
+
+        返回结构：
+        {
+            "ok": bool,
+            "runs": [
+                {"run_id": str, "started_at": str, "duration_seconds": float,
+                 "success_total": int, "failed_total": int, "skipped_total": int,
+                 "report_file": str},
+                ...
+            ]
+        }
+        """
+        _user_config, data_root, _catalog, err = self._resolve_config()
+        if err:
+            return {"ok": False, "error": err}
+
+        try:
+            log_dir = report_dir_path(data_root)
+            runs = get_run_history(log_dir, n=20)
+        except Exception as exc:
+            return {"ok": False, "error": f"历史记录读取失败：{exc}"}
+
+        return {"ok": True, "runs": runs}
+
+    def get_run_detail(self, report_file: str) -> Dict[str, Any]:
+        """返回指定运行报告的产品明细。
+
+        report_file: 报告文件绝对路径（来自 get_history 返回值）。
+        内部验证路径在 log_dir 内，防止路径遍历。
+        """
+        _user_config, data_root, _catalog, err = self._resolve_config()
+        if err:
+            return {"ok": False, "error": err}
+
+        log_dir = report_dir_path(data_root)
+        return get_run_detail(log_dir, report_file)
 
     # ------------------------------------------------------------------
     # 同步线程内部逻辑（不对外暴露）

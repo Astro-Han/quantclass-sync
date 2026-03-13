@@ -16,6 +16,9 @@ __pycache__/
 .claude/
 CLAUDE.md
 
+# GUI 本地配置
+.gui_conda_env
+
 # macOS
 .DS_Store
 

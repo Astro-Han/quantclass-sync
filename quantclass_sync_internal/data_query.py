@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -179,3 +180,54 @@ def get_run_history(log_dir: Path, n: int = 10) -> List[Dict[str, Any]]:
             "report_file": str(path),
         })
     return history
+
+
+def get_run_detail(log_dir: Path, report_file: str) -> Dict[str, Any]:
+    """读取指定运行报告的产品明细。
+
+    安全检查：report_file 必须在 log_dir 内，防止路径遍历。
+
+    返回结构:
+    {
+        "ok": True/False,
+        "started_at": "...",
+        "duration_seconds": 123,
+        "success_total": N, "failed_total": N, "skipped_total": N,
+        "products": [{"product": str, "status": str, "elapsed_seconds": float, "error": str}, ...]
+    }
+    """
+    # 路径安全检查：必须在 log_dir 内
+    report_path = Path(report_file).resolve()
+    log_dir_resolved = log_dir.resolve()
+    if not str(report_path).startswith(str(log_dir_resolved) + os.sep) and report_path != log_dir_resolved:
+        return {"ok": False, "error": "非法路径：报告文件不在日志目录内"}
+
+    if not report_path.exists():
+        return {"ok": False, "error": "报告文件不存在"}
+
+    try:
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {"ok": False, "error": f"报告文件读取失败：{exc}"}
+
+    # 提取产品列表，失败排前面
+    products = []
+    for item in data.get("products", []):
+        products.append({
+            "product": item.get("product", ""),
+            "status": item.get("status", ""),
+            "elapsed_seconds": item.get("elapsed_seconds", 0),
+            "error": item.get("error", ""),
+        })
+    status_order = {"error": 0, "skipped": 1, "ok": 2}
+    products.sort(key=lambda p: status_order.get(p["status"], 3))
+
+    return {
+        "ok": True,
+        "started_at": data.get("started_at", ""),
+        "duration_seconds": data.get("duration_seconds", 0),
+        "success_total": data.get("success_total", 0),
+        "failed_total": data.get("failed_total", 0),
+        "skipped_total": data.get("skipped_total", 0),
+        "products": products,
+    }

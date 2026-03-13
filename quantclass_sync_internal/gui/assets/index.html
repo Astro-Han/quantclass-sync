@@ -26,6 +26,11 @@
           :class="{ active: tab === 'sync' }"
           @click="switchTab('sync')"
         >同步</button>
+        <button
+          class="tab"
+          :class="{ active: tab === 'history' }"
+          @click="switchTab('history')"
+        >历史</button>
       </nav>
     </header>
 
@@ -43,28 +48,38 @@
 
         <template x-if="!loading && !overviewError">
           <div>
-            <!-- 统计卡片 -->
+            <!-- 统计卡片（点击筛选） -->
             <div class="stats-cards">
-              <div class="stat-card">
+              <div class="stat-card" :class="{ 'stat-card-active': filterColor === 'green' }" @click="toggleFilter('green')">
                 <span class="stat-dot green"></span>
                 <div class="stat-count" x-text="summary.green"></div>
                 <div class="stat-label">最新</div>
               </div>
-              <div class="stat-card">
+              <div class="stat-card" :class="{ 'stat-card-active': filterColor === 'yellow' }" @click="toggleFilter('yellow')">
                 <span class="stat-dot yellow"></span>
                 <div class="stat-count" x-text="summary.yellow"></div>
                 <div class="stat-label">落后</div>
               </div>
-              <div class="stat-card">
+              <div class="stat-card" :class="{ 'stat-card-active': filterColor === 'red' }" @click="toggleFilter('red')">
                 <span class="stat-dot red"></span>
                 <div class="stat-count" x-text="summary.red"></div>
                 <div class="stat-label">异常</div>
               </div>
-              <div class="stat-card">
+              <div class="stat-card" :class="{ 'stat-card-active': filterColor === 'gray' }" @click="toggleFilter('gray')">
                 <span class="stat-dot gray"></span>
                 <div class="stat-count" x-text="summary.gray"></div>
                 <div class="stat-label">未同步</div>
               </div>
+            </div>
+
+            <!-- 搜索框 -->
+            <div class="filter-bar">
+              <input
+                type="text"
+                class="search-input"
+                placeholder="搜索产品..."
+                x-model="searchText"
+              />
             </div>
 
             <!-- 产品状态表格 -->
@@ -79,14 +94,7 @@
                 </tr>
               </thead>
               <tbody>
-                <!-- 排序: 红 -> 黄 -> 绿 -> 灰 -->
-                <template
-                  x-for="p in products.slice().sort((a, b) => {
-                    const order = { red: 0, yellow: 1, green: 2, gray: 3 };
-                    return (order[a.color] ?? 4) - (order[b.color] ?? 4);
-                  })"
-                  :key="p.name"
-                >
+                <template x-for="p in filteredProducts()" :key="p.name">
                   <tr>
                     <td><span class="status-dot" :class="p.color"></span></td>
                     <td x-text="p.name"></td>
@@ -97,6 +105,9 @@
                 </template>
               </tbody>
             </table>
+            <div class="empty-state" x-show="filteredProducts().length === 0 && products.length > 0">
+              无匹配产品
+            </div>
 
             <!-- 底部信息 -->
             <div class="footer-info">
@@ -190,6 +201,79 @@
             </div>
           </template>
           <button class="btn btn-primary" @click="resetSync()">重试</button>
+        </div>
+
+      </div>
+
+      <!-- ===== 历史页面 ===== -->
+      <div x-show="tab === 'history'">
+
+        <!-- 加载状态 -->
+        <div class="loading" x-show="historyLoading">加载中...</div>
+
+        <!-- 列表视图 -->
+        <div x-show="!historyLoading && !historyDetail">
+          <table class="product-table" x-show="historyList.length > 0">
+            <thead>
+              <tr>
+                <th>运行时间</th>
+                <th>耗时</th>
+                <th>成功</th>
+                <th>失败</th>
+                <th>跳过</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="run in historyList" :key="run.run_id">
+                <tr>
+                  <td x-text="run.started_at"></td>
+                  <td x-text="formatDuration(run.duration_seconds)"></td>
+                  <td><span class="text-green" x-text="run.success_total"></span></td>
+                  <td><span class="text-red" x-text="run.failed_total"></span></td>
+                  <td x-text="run.skipped_total"></td>
+                  <td><button class="btn-link" @click="viewDetail(run.report_file)">详情</button></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          <div class="empty-state" x-show="historyList.length === 0">暂无运行记录</div>
+        </div>
+
+        <!-- 详情视图 -->
+        <div x-show="!historyLoading && historyDetail">
+          <button class="btn-back" @click="backToList()">&larr; 返回列表</button>
+          <div class="detail-header">
+            <span x-text="'运行时间: ' + historyDetail.started_at"></span>
+            <span x-text="'耗时: ' + formatDuration(historyDetail.duration_seconds)"></span>
+          </div>
+          <div class="sync-done-stats" style="margin-bottom: 16px;">
+            <span class="green" x-text="'成功: ' + historyDetail.success_total"></span>
+            <span class="red" x-text="'失败: ' + historyDetail.failed_total"></span>
+            <span class="gray" x-text="'跳过: ' + historyDetail.skipped_total"></span>
+          </div>
+          <table class="product-table">
+            <thead>
+              <tr>
+                <th>状态</th>
+                <th>产品名称</th>
+                <th>耗时</th>
+                <th>错误</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="p in historyDetail.products" :key="p.product">
+                <tr>
+                  <td>
+                    <span class="status-dot" :class="{ green: p.status === 'ok', red: p.status === 'error', gray: p.status === 'skipped' }"></span>
+                  </td>
+                  <td x-text="p.product"></td>
+                  <td x-text="formatDuration(p.elapsed_seconds)"></td>
+                  <td class="text-error" x-text="p.error || ''"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
         </div>
 
       </div>

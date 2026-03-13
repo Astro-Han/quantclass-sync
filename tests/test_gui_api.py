@@ -493,5 +493,104 @@ class TestSyncNonZeroExitCode(unittest.TestCase):
         self.assertIn("未成功完成", final["error_message"])
 
 
+class TestGetHistory(unittest.TestCase):
+    """get_history：返回历史运行列表。"""
+
+    def test_get_history_success(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "user_config.json"
+            config_file.write_text("{}", encoding="utf-8")
+
+            mock_config = _make_mock_config(tmp_dir)
+            mock_runs = [
+                {
+                    "run_id": "run-20260313",
+                    "started_at": "2026-03-13T12:00:00Z",
+                    "duration_seconds": 5.0,
+                    "success_total": 10,
+                    "failed_total": 1,
+                    "skipped_total": 0,
+                    "report_file": "/tmp/log/run_report_20260313.json",
+                },
+            ]
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.load_user_config_or_raise", return_value=mock_config), \
+                 patch(f"{_API_MOD}.load_catalog_or_raise", return_value=["product-a"]), \
+                 patch(f"{_API_MOD}.report_dir_path", return_value=Path(tmp_dir) / "log"), \
+                 patch(f"{_API_MOD}.get_run_history", return_value=mock_runs):
+
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.get_history()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(result["runs"]), 1)
+        self.assertEqual(result["runs"][0]["run_id"], "run-20260313")
+
+    def test_get_history_no_config(self):
+        """配置缺失时返回 ok=False。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "user_config.json"
+            # 不创建配置文件
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file):
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.get_history()
+
+        self.assertFalse(result["ok"])
+        self.assertIn("未找到", result["error"])
+
+
+class TestGetRunDetail(unittest.TestCase):
+    """get_run_detail：返回运行报告产品明细。"""
+
+    def test_get_run_detail_success(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "user_config.json"
+            config_file.write_text("{}", encoding="utf-8")
+
+            mock_config = _make_mock_config(tmp_dir)
+            mock_detail = {
+                "ok": True,
+                "started_at": "2026-03-13T12:00:00Z",
+                "duration_seconds": 45.0,
+                "success_total": 2,
+                "failed_total": 1,
+                "skipped_total": 0,
+                "products": [
+                    {"product": "p-err", "status": "error", "elapsed_seconds": 5, "error": "HTTP 403"},
+                    {"product": "p-ok", "status": "ok", "elapsed_seconds": 10, "error": ""},
+                ],
+            }
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.load_user_config_or_raise", return_value=mock_config), \
+                 patch(f"{_API_MOD}.load_catalog_or_raise", return_value=["product-a"]), \
+                 patch(f"{_API_MOD}.report_dir_path", return_value=Path(tmp_dir) / "log"), \
+                 patch(f"{_API_MOD}.get_run_detail", return_value=mock_detail):
+
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.get_run_detail("/tmp/log/report.json")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["success_total"], 2)
+        self.assertEqual(len(result["products"]), 2)
+
+    def test_get_run_detail_no_config(self):
+        """配置缺失时返回 ok=False。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "user_config.json"
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file):
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.get_run_detail("/tmp/log/report.json")
+
+        self.assertFalse(result["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()
