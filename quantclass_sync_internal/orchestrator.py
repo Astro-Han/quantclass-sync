@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 import sqlite3
+import threading
 import traceback
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, Iterable, List, NoReturn, Optional, Sequence, Tuple
@@ -482,6 +485,7 @@ def _resolve_requested_dates_for_plan(
     report: RunReport,
     t_product_start: float,
     catch_up_to_latest: bool = False,
+    lock: Optional[threading.Lock] = None,
 ) -> Tuple[List[str], bool]:
     """
     解析单产品执行日期列表，并处理 timestamp 门控。
@@ -530,19 +534,21 @@ def _resolve_requested_dates_for_plan(
         if should_skip_by_timestamp(local_date, api_latest_date):
             elapsed = time.time() - t_product_start
             latest_raw = api_latest_date or ""
-            _append_result(
-                report,
-                product=product_name,
-                status="skipped",
-                strategy=plan.strategy,
-                reason_code=REASON_UP_TO_DATE,
-                date_time=api_latest_date or latest_raw,
-                mode="gate",
-                elapsed=elapsed,
-                error=f"本地 timestamp 已是最新（local={local_date}, api={api_latest_date}）。",
-                stage="GATE",
-                event_detail=f"local={local_date} api={api_latest_date}",
-            )
+            # 并发路径下 lock 由调用方传入，保护 report 写入的线程安全
+            with lock if lock is not None else contextlib.nullcontext():
+                _append_result(
+                    report,
+                    product=product_name,
+                    status="skipped",
+                    strategy=plan.strategy,
+                    reason_code=REASON_UP_TO_DATE,
+                    date_time=api_latest_date or latest_raw,
+                    mode="gate",
+                    elapsed=elapsed,
+                    error=f"本地 timestamp 已是最新（local={local_date}, api={api_latest_date}）。",
+                    stage="GATE",
+                    event_detail=f"local={local_date} api={api_latest_date}",
+                )
             log_info(
                 f"[{product_name}] timestamp 门控命中，跳过更新。",
                 event="SYNC_SKIP",
@@ -850,9 +856,6 @@ def _execute_plans(
                  stop_on_error=True 时强制串行。
     """
 
-    import threading
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     _reset_http_metrics()
     headers, hid = build_headers_or_raise(command_ctx)
     total = SyncStats()
@@ -870,9 +873,7 @@ def _execute_plans(
         plan_has_error = False
         t_product_start = time.time()
         # A. 判断这个产品本次应不应该跑（门控命中会直接 return）。
-        # 注意：_resolve_requested_dates_for_plan 内部也调用了 _append_result（gate-skip 路径），
-        # 但该调用处于网络 I/O 之后、函数签名修改代价较高，且 CPython GIL 已保证 list.append 原子性，
-        # 故不在此处加锁。本函数内所有直接调用 _append_result 的位置均已用 _lock 保护。
+        # _resolve_requested_dates_for_plan 内部的 _append_result 也通过 lock 参数保护。
         t_plan_phase = time.time()
         requested_dates_for_plan, skipped_by_gate = _resolve_requested_dates_for_plan(
             plan=plan,
@@ -884,6 +885,7 @@ def _execute_plans(
             report=report,
             t_product_start=t_product_start,
             catch_up_to_latest=catch_up_to_latest,
+            lock=_lock,
         )
         with _lock:
             report.phase_plan_seconds += max(0.0, time.time() - t_plan_phase)
@@ -935,11 +937,10 @@ def _execute_plans(
                     **process_kwargs,
                 )
                 elapsed = time.time() - t_product_start
-                with _lock:
-                    total.merge(stats)
                 if reason_code == REASON_NO_VALID_OUTPUT:
-                    # 并发路径：写 report 需加锁
+                    # 并发路径：total.merge + _append_result 在同一锁作用域，保证原子可见性
                     with _lock:
+                        total.merge(stats)
                         _append_result(
                             report,
                             product=product,
@@ -962,26 +963,21 @@ def _execute_plans(
                     )
                     continue
 
+                # 成功路径：total.merge + 状态持久化 + _append_result 在同一锁作用域
                 status_persist_warning = ""
-                try:
-                    with _lock:
+                with _lock:
+                    total.merge(stats)
+                    try:
                         _upsert_product_status_after_success(
                             conn=conn,
                             command_ctx=command_ctx,
                             product=product,
                             actual_time=actual_time,
                         )
-                except Exception as status_exc:
-                    status_persist_warning = (
-                        f"状态持久化失败（已忽略，不影响本次成功结果）: {status_exc}"
-                    )
-                    log_info(
-                        f"[{plan.name}] {status_persist_warning}",
-                        event="SYNC_WARN",
-                        reason_code=reason_code,
-                    )
-                # 并发路径：写 report 需加锁
-                with _lock:
+                    except Exception as status_exc:
+                        status_persist_warning = (
+                            f"状态持久化失败（已忽略，不影响本次成功结果）: {status_exc}"
+                        )
                     _append_result(
                         report,
                         product=product,
@@ -995,6 +991,12 @@ def _execute_plans(
                         event_detail=status_persist_warning,
                     )
                     report.phase_sync_seconds += max(0.0, time.time() - t_sync_phase)
+                if status_persist_warning:
+                    log_info(
+                        f"[{plan.name}] {status_persist_warning}",
+                        event="SYNC_WARN",
+                        reason_code=reason_code,
+                    )
                 continue
             except ProductSyncError as exc:
                 # 可预期业务错误：带有明确 reason_code。
@@ -1069,6 +1071,7 @@ def _execute_plans(
         )
         with ThreadPoolExecutor(max_workers=effective_workers) as executor:
             futures = {executor.submit(_run_one_plan, plan): plan for plan in plans}
+            # as_completed 在主线程顺序消费，has_error 写入无并发竞争，无需加锁
             for future in as_completed(futures):
                 try:
                     if future.result():

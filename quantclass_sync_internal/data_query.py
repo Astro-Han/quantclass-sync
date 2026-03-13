@@ -74,7 +74,8 @@ def _load_latest_report_products(log_dir: Path) -> Dict[str, Dict[str, Any]]:
     for item in data.get("products", []):
         name = item.get("product", "")
         if name:
-            # 同一个产品可能在报告中出现多次（回补多天），取最后一条
+            # 同一个产品可能在报告中出现多次（回补多天），取最后一条。
+            # 依赖报告写入顺序（按日期递增），若将来写入乱序需改为显式比较 date_time。
             result[name] = {
                 "status": item.get("status", ""),
                 "reason_code": item.get("reason_code", ""),

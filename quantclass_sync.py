@@ -119,6 +119,8 @@ _maybe_run_coin_preprocess_impl = _orchestrator._maybe_run_coin_preprocess
 run_update_with_settings_impl = _orchestrator.run_update_with_settings
 _request_data_impl = _http.request_data
 
+# 绑定状态缓存，用于跳过重复绑定。假设单线程调用（CLI 入口），
+# 若未来 GUI 多线程同时调用不同命令，需加 threading.Lock 保护。
 _http_bind_state: tuple[int, int] | None = None
 _orchestrator_bind_state: tuple[int, ...] | None = None
 _cli_bind_state: tuple[int, ...] | None = None

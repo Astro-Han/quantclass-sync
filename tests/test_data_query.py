@@ -74,8 +74,8 @@ class TestGetProductsOverview(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.data_root = Path(self.tmpdir.name) / "data"
         self.data_root.mkdir()
-        # 创建 log 目录（report_dir_path 返回脚本目录下的 log，
-        # 但我们的测试直接写 timestamp + report）
+        # log_dir 与 data_root 分离：report_dir_path 在生产中返回脚本目录下的 log，
+        # 测试通过 mock report_dir_path 指向这里，避免依赖真实路径结构。
         self.log_dir = Path(self.tmpdir.name) / "log"
         self.log_dir.mkdir()
 

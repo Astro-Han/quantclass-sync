@@ -245,7 +245,11 @@ class TestConcurrentErrorHandling(unittest.TestCase):
 
 
 class TestStatsAccumulation(unittest.TestCase):
-    """并发模式下统计累加的正确性。"""
+    """并发模式下统计累加的正确性。
+
+    注：_upsert_product_status_after_success（SQLite 写）在此被 mock，
+    其线程安全由 orchestrator 内部 _lock 保证，此处只验证 SyncStats 累加。
+    """
 
     @patch("quantclass_sync_internal.orchestrator.build_headers_or_raise")
     @patch("quantclass_sync_internal.orchestrator._reset_http_metrics")

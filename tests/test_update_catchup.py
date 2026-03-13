@@ -525,6 +525,7 @@ class UpdateCatchUpTests(unittest.TestCase):
             report: qcs.RunReport,
             t_product_start: float,
             catch_up_to_latest: bool = False,
+            lock=None,
         ) -> tuple[list[str], bool]:
             if plan.name == "stock-trading-data":
                 return ([], False)
@@ -583,6 +584,7 @@ class UpdateCatchUpTests(unittest.TestCase):
             report: qcs.RunReport,
             t_product_start: float,
             catch_up_to_latest: bool = False,
+            lock=None,
         ) -> tuple[list[str], bool]:
             return (["2026-02-09"], False)
 
