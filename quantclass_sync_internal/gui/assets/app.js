@@ -365,6 +365,7 @@ document.addEventListener('alpine:init', () => {
 
         // 用户确认创建目录
         async confirmCreateDir() {
+            if (!this.setupValid()) return;
             this.setupLoading = true;
             this.setupConfirmDir = '';
             try {

@@ -361,6 +361,33 @@ class TestRunSetupProbeAuthError(unittest.TestCase):
         self.assertIn("凭证", result["warning"])
 
 
+class TestRunSetupProbeOther4xx(unittest.TestCase):
+    """run_setup: 保存成功但探测返回其他 4xx（非 401/403），应提示"请求异常"。"""
+
+    def test_probe_404(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_dir = Path(tmp_dir) / "data"
+            data_dir.mkdir()
+            config_file = Path(tmp_dir) / "user_config.json"
+            secrets_file = Path(tmp_dir) / "user_secrets.env"
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 404
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.DEFAULT_USER_SECRETS_FILE", secrets_file), \
+                 patch(f"{_API_MOD}.save_setup_artifacts_atomic"), \
+                 patch(f"{_API_MOD}.requests.get", return_value=mock_resp):
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.run_setup(str(data_dir), "key", "hid")
+
+        self.assertTrue(result["ok"])
+        self.assertIn("warning", result)
+        self.assertIn("请求异常", result["warning"])
+        self.assertNotIn("凭证", result["warning"])
+
+
 class TestRunSetupProbeNetworkError(unittest.TestCase):
     """run_setup: 保存成功但网络探测失败。"""
 

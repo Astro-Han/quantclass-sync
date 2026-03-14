@@ -53,7 +53,8 @@
 
         <!-- 目录不存在确认（页内替代 window.confirm） -->
         <div class="setup-warning" x-show="setupConfirmDir">
-          <p x-text="'该目录不存在，是否创建？\n' + setupConfirmDir"></p>
+          <p>该目录不存在，是否创建？</p>
+          <p class="setup-confirm-path" x-text="setupConfirmDir"></p>
           <div class="setup-warning-actions">
             <button class="btn btn-outline" @click="cancelCreateDir()">取消</button>
             <button class="btn btn-primary" @click="confirmCreateDir()">创建</button>
