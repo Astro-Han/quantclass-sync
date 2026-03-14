@@ -221,13 +221,18 @@ document.addEventListener('alpine:init', () => {
             return Math.round(remaining / 60) + ' 分钟';
         },
 
-        // 将秒数格式化为可读时长
+        // 将秒数格式化为可读时长（自动升级到小时级别）
         formatDuration(seconds) {
             if (!seconds && seconds !== 0) return '--';
             if (seconds < 60) return Math.round(seconds) + ' 秒';
-            const m = Math.floor(seconds / 60);
-            const s = Math.round(seconds % 60);
-            return m + ' 分 ' + s + ' 秒';
+            if (seconds < 3600) {
+                const m = Math.floor(seconds / 60);
+                const s = Math.round(seconds % 60);
+                return m + ' 分 ' + s + ' 秒';
+            }
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            return h + ' 小时 ' + m + ' 分';
         },
 
         // ===== 历史页方法 =====
