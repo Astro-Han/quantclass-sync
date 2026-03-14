@@ -51,8 +51,17 @@
           </div>
         </div>
 
-        <!-- 表单（无警告时显示） -->
-        <div x-show="!setupWarning">
+        <!-- 目录不存在确认（页内替代 window.confirm） -->
+        <div class="setup-warning" x-show="setupConfirmDir">
+          <p x-text="'该目录不存在，是否创建？\n' + setupConfirmDir"></p>
+          <div class="setup-warning-actions">
+            <button class="btn btn-outline" @click="cancelCreateDir()">取消</button>
+            <button class="btn btn-primary" @click="confirmCreateDir()">创建</button>
+          </div>
+        </div>
+
+        <!-- 表单（无警告且无确认时显示） -->
+        <div x-show="!setupWarning && !setupConfirmDir">
           <div class="setup-field">
             <label class="setup-label">数据存储目录</label>
             <input type="text" class="setup-input" x-model="setupDataRoot"
@@ -206,8 +215,8 @@
               <span x-text="lastRun ? '上次同步: ' + lastRun.started_at + '  耗时: ' + formatDuration(lastRun.duration_seconds) : '尚未同步'"></span>
               <span x-show="dataRoot" x-text="'数据目录: ' + dataRoot"></span>
               <a class="reconfigure-link"
-                 @click="goToSetup()"
-                 x-show="syncStatus !== 'syncing'">重新配置</a>
+                 :class="{ 'reconfigure-disabled': syncStatus === 'syncing' }"
+                 @click="syncStatus !== 'syncing' && goToSetup()">重新配置</a>
             </div>
           </div>
         </template>

@@ -19,6 +19,7 @@ document.addEventListener('alpine:init', () => {
         setupLoading: false,   // 向导提交中
         setupError: '',        // 向导错误信息
         setupWarning: '',      // 向导警告（保存成功但验证失败）
+        setupConfirmDir: '',   // 待确认创建的目录路径（非空时显示确认 UI）
 
         // ===== 筛选状态 =====
         searchText: '',        // 搜索文本（按产品名模糊匹配）
@@ -341,6 +342,7 @@ document.addEventListener('alpine:init', () => {
             this.setupLoading = true;
             this.setupError = '';
             this.setupWarning = '';
+            this.setupConfirmDir = '';
             try {
                 const result = await window.pywebview.api.run_setup(
                     this.setupDataRoot.trim(),
@@ -349,17 +351,8 @@ document.addEventListener('alpine:init', () => {
                     false
                 );
                 if (!result.ok && result.error_code === 'dir_not_found') {
-                    // 目录不存在，弹确认创建
-                    if (confirm('该目录不存在，是否创建？\n' + result.resolved_path)) {
-                        const result2 = await window.pywebview.api.run_setup(
-                            this.setupDataRoot.trim(),
-                            this.setupApiKey.trim(),
-                            this.setupHid.trim(),
-                            true
-                        );
-                        this._handleSetupResult(result2);
-                    }
-                    // 用户取消 → 留在向导页
+                    // 目录不存在，展示页内确认 UI（不用 window.confirm，pywebview 下不可靠）
+                    this.setupConfirmDir = result.resolved_path;
                 } else {
                     this._handleSetupResult(result);
                 }
@@ -368,6 +361,30 @@ document.addEventListener('alpine:init', () => {
                 this.setupError = String(e);
             }
             this.setupLoading = false;
+        },
+
+        // 用户确认创建目录
+        async confirmCreateDir() {
+            this.setupLoading = true;
+            this.setupConfirmDir = '';
+            try {
+                const result = await window.pywebview.api.run_setup(
+                    this.setupDataRoot.trim(),
+                    this.setupApiKey.trim(),
+                    this.setupHid.trim(),
+                    true
+                );
+                this._handleSetupResult(result);
+            } catch (e) {
+                console.error('confirmCreateDir failed:', e);
+                this.setupError = String(e);
+            }
+            this.setupLoading = false;
+        },
+
+        // 用户取消创建目录，留在向导页修改路径
+        cancelCreateDir() {
+            this.setupConfirmDir = '';
         },
 
         // 处理 run_setup 返回结果
@@ -403,16 +420,15 @@ document.addEventListener('alpine:init', () => {
         async goToSetup() {
             try {
                 const cfg = await window.pywebview.api.get_config();
-                if (cfg.config_exists && cfg.data_root) {
-                    this.setupDataRoot = cfg.data_root;
-                }
+                this.setupDataRoot = (cfg.data_root || '');
             } catch (e) {
-                // 忽略，用户可手动填写
+                this.setupDataRoot = '';
             }
             this.setupApiKey = '';
             this.setupHid = '';
             this.setupError = '';
             this.setupWarning = '';
+            this.setupConfirmDir = '';
             this.currentView = 'setup';
         },
     }));

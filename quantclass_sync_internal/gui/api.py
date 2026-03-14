@@ -324,13 +324,11 @@ class SyncApi:
 
         # 3. 轻量连通性探测（单次请求，10 秒超时，不重试）
         # 错误信息只返回状态码和通用描述，不返回 URL（URL 含 hid）
-        probe_url = (
-            f"{DEFAULT_API_BASE}/fetch/stock-trading-data-daily/latest"
-            f"?uuid={hid}"
-        )
+        probe_url = f"{DEFAULT_API_BASE}/fetch/stock-trading-data-daily/latest"
         try:
             resp = requests.get(
                 probe_url,
+                params={"uuid": hid},
                 headers={"api-key": api_key},
                 timeout=10,
             )

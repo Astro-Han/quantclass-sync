@@ -693,3 +693,9 @@ body {
 .reconfigure-link:hover {
   text-decoration: underline;
 }
+
+.reconfigure-disabled {
+  color: #9ca3af;
+  cursor: not-allowed;
+  pointer-events: none;
+}

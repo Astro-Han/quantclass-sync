@@ -73,8 +73,8 @@ if ! python -c "import quantclass_sync; import webview; import pandas" 2>/dev/nu
     echo "首次运行，正在安装依赖..."
     pip install -r requirements.txt
     echo ""
-    # 再次检测
-    if ! python -c "import quantclass_sync; import webview; import pandas" 2>/dev/null; then
+    # 再次检测（不静默 stderr，方便诊断安装后仍失败的原因）
+    if ! python -c "import quantclass_sync; import webview; import pandas"; then
         echo "错误：依赖安装失败，请检查网络连接或手动执行："
         echo "  pip install -r requirements.txt"
         echo ""

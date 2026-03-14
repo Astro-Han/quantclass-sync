@@ -208,6 +208,23 @@ class TestGetConfigDataRootEmpty(unittest.TestCase):
         self.assertFalse(result["config_exists"])
 
 
+class TestGetConfigDataRootKeyMissing(unittest.TestCase):
+    """get_config: config JSON 中无 data_root 字段时返回 config_exists=False。"""
+
+    def test_data_root_key_missing(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "user_config.json"
+            config_file.write_text('{"product_mode": "local_scan"}', encoding="utf-8")
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file):
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.get_config()
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["config_exists"])
+
+
 class TestGetConfigSecretsMissing(unittest.TestCase):
     """get_config: config 有效但 secrets 文件不存在时返回 config_exists=False。"""
 
