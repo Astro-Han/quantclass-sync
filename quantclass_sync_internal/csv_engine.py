@@ -361,8 +361,10 @@ def merge_payload(existing: Optional[CsvPayload], incoming: CsvPayload, rule: Da
     rows = list(merged_map.values())
 
     sort_indices = resolve_sort_indices(target_header, rule)
+    did_sort = False
     if sort_indices:
         rows.sort(key=lambda row: row_sort_key(row, sort_indices))
+        did_sort = True
 
     note = None
     if rule.has_note:
@@ -376,6 +378,7 @@ def merge_payload(existing: Optional[CsvPayload], incoming: CsvPayload, rule: Da
         rows=rows,
         encoding=incoming.encoding or (existing.encoding if existing else rule.encoding),
         delimiter=existing.delimiter if existing else incoming.delimiter,
+        pre_sorted=did_sort,
     )
     return merged, max(0, len(merged_map) - before_count)
 
@@ -465,8 +468,9 @@ def sync_payload_to_target(incoming: CsvPayload, target: Path, rule: DatasetRule
         merged, added_rows = merge_payload(existing, incoming, rule)
         merged.encoding = output_encoding
 
+        # merge_payload 已排序时跳过 is_rows_sorted 遍历（O(N) 冗余检查）
         sort_indices = resolve_sort_indices(merged.header, rule)
-        if sort_indices:
+        if sort_indices and not merged.pre_sorted:
             audit.checked_files = 1
             if not is_rows_sorted(merged.rows, sort_indices):
                 audit.violation_files = 1

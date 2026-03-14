@@ -551,7 +551,7 @@ class SyncApi:
                 force_update=False,
                 command_name="gui_update",
                 fallback_products=fallback_products,
-                max_workers=2,
+                max_workers=4,
                 progress_callback=progress_callback,
             )
 

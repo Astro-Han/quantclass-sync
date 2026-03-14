@@ -99,7 +99,8 @@ class SortRepairTests(unittest.TestCase):
 
         self.assertEqual(qcs.REASON_OK, reason_code)
         self.assertEqual(1, stats.created_files)
-        self.assertEqual(1, stats.sorted_checked_files)
+        # merge_payload 已排序后设 pre_sorted=True，跳过冗余校验
+        self.assertEqual(0, stats.sorted_checked_files)
         self.assertEqual(0, stats.sorted_violation_files)
 
         target = self.root / "stock-notices-title" / "2026-02-12.csv"

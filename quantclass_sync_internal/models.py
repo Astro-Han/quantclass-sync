@@ -130,6 +130,8 @@ class CsvPayload:
     rows: List[List[str]]
     encoding: str
     delimiter: str = ","
+    # merge_payload 排序后设为 True，sync_payload_to_target 据此跳过冗余校验
+    pre_sorted: bool = False
 
 @dataclass
 class SyncStats:
