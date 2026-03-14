@@ -199,35 +199,52 @@ def _detect_relist_segments(
     if data.empty:
         return []
 
-    times = list(data["candle_begin_time"])
+    # 用 .values 转 numpy array，避免 data.index 不连续导致位置计算错乱
+    times = data["candle_begin_time"].values  # numpy datetime64 array
+
     if len(times) == 1:
-        return [(times[0], times[0])]
+        return [(pd.Timestamp(times[0]), pd.Timestamp(times[0]))]
 
-    break_positions: List[int] = []
-    for idx in range(1, len(data)):
-        prev_row = data.iloc[idx - 1]
-        curr_row = data.iloc[idx]
-        time_delta = curr_row["candle_begin_time"] - prev_row["candle_begin_time"]
-        if time_delta <= RELIST_GAP_THRESHOLD:
-            continue
+    # 向量化计算时间差：diff()[i] = times[i] - times[i-1]，index 0 为 NaT
+    time_series = pd.Series(times)
+    time_diff = time_series.diff()  # 长度与原数组相同，index 0 为 NaT/NaN
 
-        prev_close = pd.to_numeric(pd.Series([prev_row.get("close")]), errors="coerce").iloc[0]
-        curr_open = pd.to_numeric(pd.Series([curr_row.get("open")]), errors="coerce").iloc[0]
-        if pd.isna(prev_close) or pd.isna(curr_open) or float(prev_close) == 0.0:
-            continue
-        price_change = float(curr_open) / float(prev_close) - 1.0
-        if abs(price_change) >= RELIST_CHANGE_THRESHOLD:
-            break_positions.append(idx)
+    # 向量化解析 close/open
+    close_vals = pd.to_numeric(data["close"].reset_index(drop=True), errors="coerce")
+    open_vals = pd.to_numeric(data["open"].reset_index(drop=True), errors="coerce")
+
+    # 对齐：prev_close[i] = close_vals[i-1]，index 0 为 NaN
+    prev_close = close_vals.shift(1)
+    # curr_open 直接用 open_vals（index 对应当前行）
+
+    # 条件 1：时间间隔超过阈值（index 0 因 NaT 自动 False）
+    gap_mask = time_diff > RELIST_GAP_THRESHOLD
+
+    # 条件 2：prev_close 和 curr_open 均有效，且 prev_close != 0
+    # prev_close == 0.0 时跳过（不切段），与原版 continue 行为一致
+    valid_mask = prev_close.notna() & open_vals.notna() & (prev_close != 0.0)
+
+    # 条件 3：价格变动幅度超过阈值
+    # 只在 valid_mask 成立时计算除法，避免除以零警告
+    price_change = pd.Series(float("nan"), index=close_vals.index)
+    valid_idx = valid_mask[valid_mask].index
+    price_change.loc[valid_idx] = (open_vals.loc[valid_idx] / prev_close.loc[valid_idx] - 1.0).abs()
+    change_mask = price_change >= RELIST_CHANGE_THRESHOLD
+
+    # 综合三个条件，得到切段位置（位置索引，非 label）
+    break_mask = gap_mask & valid_mask & change_mask
+    break_positions: List[int] = list(break_mask[break_mask].index.tolist())
 
     if not break_positions:
-        return [(times[0], times[-1])]
+        return [(pd.Timestamp(times[0]), pd.Timestamp(times[-1]))]
 
+    # 用位置索引切分 times 为多个段
     segments: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
-    start_idx = 0
+    start_pos = 0
     for pos in break_positions:
-        segments.append((times[start_idx], times[pos - 1]))
-        start_idx = pos
-    segments.append((times[start_idx], times[-1]))
+        segments.append((pd.Timestamp(times[start_pos]), pd.Timestamp(times[pos - 1])))
+        start_pos = pos
+    segments.append((pd.Timestamp(times[start_pos]), pd.Timestamp(times[-1])))
     return segments
 
 def _fill_standard_columns(df: pd.DataFrame, symbol_name: str, is_swap: bool) -> None:

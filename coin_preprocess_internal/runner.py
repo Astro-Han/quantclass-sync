@@ -145,24 +145,52 @@ def _has_internal_relist_break(new_raw: pd.DataFrame) -> bool:
     if new_raw.empty or len(new_raw) < 2:
         return False
 
-    ordered = new_raw.sort_values("candle_begin_time", kind="mergesort")
-    for idx in range(1, len(ordered)):
-        prev_row = ordered.iloc[idx - 1]
-        curr_row = ordered.iloc[idx]
+    ordered = new_raw.sort_values("candle_begin_time", kind="mergesort").reset_index(drop=True)
 
-        prev_time = pd.to_datetime(prev_row.get("candle_begin_time"), errors="coerce", format="mixed")
-        curr_time = pd.to_datetime(curr_row.get("candle_begin_time"), errors="coerce", format="mixed")
-        if pd.isna(prev_time) or pd.isna(curr_time):
-            continue
+    # 向量化解析时间列
+    times = pd.to_datetime(ordered["candle_begin_time"], errors="coerce", format="mixed")
 
-        prev_close = _safe_float(prev_row.get("close", pd.NA), fallback=float("nan"))
-        curr_open = _safe_float(curr_row.get("open", pd.NA), fallback=float("nan"))
-        if pd.isna(prev_close) or pd.isna(curr_open):
-            continue
+    # 向量化解析 close/open（_safe_float 对非数值返回 nan）
+    close_vals = pd.to_numeric(ordered["close"], errors="coerce")
+    open_vals = pd.to_numeric(ordered["open"], errors="coerce")
 
-        if _has_relist_break(pd.Timestamp(prev_time), prev_close, pd.Timestamp(curr_time), curr_open):
-            return True
-    return False
+    # 对齐相邻行：prev_* 取 [0..n-2]，curr_* 取 [1..n-1]
+    prev_time = times.iloc[:-1].values
+    curr_time = times.iloc[1:].values
+    prev_close = close_vals.iloc[:-1].values
+    curr_open = open_vals.iloc[1:].values
+
+    # NaN 时间或 NaN 价格的行跳过（不触发 break）
+    valid = (
+        ~pd.isnull(prev_time)
+        & ~pd.isnull(curr_time)
+        & ~pd.isnull(prev_close)
+        & ~pd.isnull(curr_open)
+    )
+
+    # 注意 _has_relist_break 逻辑：
+    #   prev_close == 0 → 直接返回 True（relist break）
+    #   时间差 <= 阈值  → 返回 False
+    #   否则按价格变动判断
+    # 向量化分三条件计算，最终取 OR
+
+    # 条件 A：prev_close == 0（且数据有效）
+    cond_zero = valid & (prev_close == 0.0)
+
+    # 条件 B：时间差超阈值 且 价格变动超阈值
+    time_diff = pd.Series(curr_time, dtype="datetime64[ns]") - pd.Series(prev_time, dtype="datetime64[ns]")
+    gap_mask = time_diff > RELIST_GAP_THRESHOLD
+
+    # 只在 prev_close != 0 且有效时计算价格变动，避免除以零
+    safe_close = pd.Series(prev_close, dtype="float64")
+    safe_open = pd.Series(curr_open, dtype="float64")
+    nonzero_valid = valid & (safe_close != 0.0) & safe_close.notna() & safe_open.notna()
+
+    change = pd.Series(float("nan"), index=safe_close.index)
+    change[nonzero_valid] = (safe_open[nonzero_valid] / safe_close[nonzero_valid] - 1.0).abs()
+    cond_change = gap_mask & (change >= RELIST_CHANGE_THRESHOLD)
+
+    return bool((cond_zero | cond_change).any())
 
 def _frame_max_candle_time(frame: pd.DataFrame) -> Optional[pd.Timestamp]:
     """返回单个 frame 的最大 candle_begin_time（脏时间自动跳过）。"""
