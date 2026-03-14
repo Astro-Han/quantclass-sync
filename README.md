@@ -3,7 +3,7 @@
 自动从 QuantClass 下载股票和币圈数据，帮你把本地数据保持最新。
 好几天没跑也没关系，一条命令就能把缺的全补上。
 
-当前版本：**v1.0**
+当前版本：**v1.1**
 
 macOS 工具。Windows 用户推荐使用 QuantClass 官方客户端。
 
@@ -226,14 +226,23 @@ ls -t <data_root>/.quantclass_sync/log/run_report_* | head -1 | xargs cat
 ## 更新记录
 
 <details>
+<summary>v1.1</summary>
+
+- 新增首次启动向导（Setup Wizard）：双击即用，自动安装依赖、引导配置，全程不需要命令行
+- `.command` 自动检测并安装依赖，首次运行零配置
+- 总览页新增"重新配置"入口，无需 CLI 即可修改凭证
+- 测试用例从 315 增加到 327 个
+
+</details>
+
+<details>
 <summary>v1.0</summary>
 
 - 新增图形界面（GUI）：总览、同步、历史三个页面
-- 新增首次启动向导：双击即用，自动安装依赖、引导配置，全程不需要命令行
 - 新增并发下载：`--workers` 参数支持 1-8 线程
 - 新增 `status` 命令：一屏查看全局同步状态
 - 新增 `.command` 双击启动 GUI（macOS）
-- 测试用例从 199 增加到 327 个
+- 测试用例从 199 增加到 315 个
 
 </details>
 
