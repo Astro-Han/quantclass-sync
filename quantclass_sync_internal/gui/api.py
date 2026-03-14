@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import requests
 import secrets as secrets_mod
 import threading
 import time
@@ -13,7 +15,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from ..config import load_user_config_or_raise, resolve_credentials_for_update
+from ..config import (
+    load_secrets_from_file,
+    load_user_config_or_raise,
+    resolve_credentials_for_update,
+    save_setup_artifacts_atomic,
+)
 from ..constants import (
     DEFAULT_API_BASE,
     DEFAULT_CATALOG_FILE,
@@ -30,7 +37,7 @@ from ..data_query import (
     get_run_detail,
     get_run_history,
 )
-from ..models import CommandContext, log_error, log_info
+from ..models import CommandContext, UserConfig, log_error, log_info
 from ..orchestrator import load_catalog_or_raise, run_update_with_settings
 from ..status_store import report_dir_path
 
@@ -190,38 +197,173 @@ class SyncApi:
         }
 
     def get_config(self) -> Dict[str, Any]:
-        """返回当前配置概要。
+        """返回当前配置状态（用于前端判断是否展示 setup 向导）。
+
+        独立检测 config + secrets 文件，不依赖 _resolve_config()。
+        任一检测失败均返回 config_exists=False，触发向导。
 
         返回结构：
         {
             "ok": bool,
-            "error": str,           # 出错时才有
-            "data_root": str,
+            "config_exists": bool,  # 配置和凭证是否完整有效
+            "data_root": str,       # config_exists=True 时有值
             "product_count": int,
-            "config_exists": bool,
         }
         """
+        _not_ready = {"ok": True, "config_exists": False, "data_root": "", "product_count": 0}
         config_file = DEFAULT_USER_CONFIG_FILE.resolve()
 
-        # 配置文件不存在时直接返回，不报错
+        # --- 1. 检测 user_config.json ---
         if not config_file.exists():
-            return {
-                "ok": True,
-                "data_root": "",
-                "product_count": 0,
-                "config_exists": False,
-            }
+            return _not_ready
 
-        user_config, data_root, catalog, err = self._resolve_config()
-        if err:
-            return {"ok": False, "error": err, "config_exists": True}
+        try:
+            raw = json.loads(config_file.read_text(encoding="utf-8"))
+        except Exception:
+            return _not_ready
+
+        if not isinstance(raw, dict):
+            return _not_ready
+
+        # 必需字段：data_root 非空字符串
+        data_root_raw = raw.get("data_root", "")
+        if not isinstance(data_root_raw, str) or not data_root_raw.strip():
+            return _not_ready
+
+        # --- 2. 检测 user_secrets.env（固定默认路径） ---
+        secrets_file = DEFAULT_USER_SECRETS_FILE.resolve()
+        if not secrets_file.exists():
+            return _not_ready
+
+        try:
+            api_key, hid = load_secrets_from_file(secrets_file)
+        except Exception:
+            return _not_ready
+
+        if not api_key or not hid:
+            return _not_ready
+
+        # --- 3. 通过：返回 config_exists=True ---
+        # 解析 data_root 路径
+        try:
+            expanded = Path(data_root_raw).expanduser()
+            if expanded.is_absolute():
+                resolved_root = str(expanded.resolve())
+            else:
+                resolved_root = str((config_file.parent / expanded).resolve())
+        except Exception:
+            resolved_root = data_root_raw
+
+        # 产品数量（不影响 config_exists 判断）
+        product_count = 0
+        try:
+            catalog = load_catalog_or_raise(DEFAULT_CATALOG_FILE.resolve())
+            product_count = len(catalog)
+        except Exception:
+            pass
 
         return {
             "ok": True,
-            "data_root": str(data_root),
-            "product_count": len(catalog) if catalog else 0,
             "config_exists": True,
+            "data_root": resolved_root,
+            "product_count": product_count,
         }
+
+    def run_setup(self, data_root: str, api_key: str, hid: str,
+                  create_dir: bool = False) -> dict:
+        """GUI setup 向导调用。先保存配置，再验证连通性。
+
+        流程：
+        1. 验证 data_root 路径合法性
+        2. 调用 save_setup_artifacts_atomic() 原子写入 config + secrets
+        3. 轻量 HTTP 探测验证连通性
+
+        返回：
+            {ok: True}                                              # 保存+验证均成功
+            {ok: True, warning: "连接验证..."}                       # 保存成功但验证失败
+            {ok: False, error: "..."}                               # 保存失败
+            {ok: False, error_code: "dir_not_found", resolved_path} # 目录不存在
+        """
+        # 1. 验证 data_root 路径
+        try:
+            dr = Path(data_root).expanduser().resolve()
+        except Exception as exc:
+            return {"ok": False, "error": f"路径无效：{exc}"}
+
+        if not dr.exists():
+            if not create_dir:
+                return {
+                    "ok": False,
+                    "error_code": "dir_not_found",
+                    "resolved_path": str(dr),
+                }
+            try:
+                dr.mkdir(parents=True, exist_ok=True)
+            except Exception as exc:
+                return {"ok": False, "error": f"创建目录失败：{exc}"}
+
+        # 2. 保存配置（原子写入 config + secrets）
+        config_file = DEFAULT_USER_CONFIG_FILE.resolve()
+        secrets_file = DEFAULT_USER_SECRETS_FILE.resolve()
+
+        try:
+            config = UserConfig(
+                data_root=str(dr),
+                product_mode="local_scan",
+                default_products=[],
+            )
+            save_setup_artifacts_atomic(
+                config_path=config_file,
+                config=config,
+                secrets_path=secrets_file,
+                api_key=api_key,
+                hid=hid,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": f"配置保存失败：{exc}"}
+
+        # 3. 轻量连通性探测（单次请求，10 秒超时，不重试）
+        # 错误信息只返回状态码和通用描述，不返回 URL（URL 含 hid）
+        probe_url = (
+            f"{DEFAULT_API_BASE}/fetch/stock-trading-data-daily/latest"
+            f"?uuid={hid}"
+        )
+        try:
+            resp = requests.get(
+                probe_url,
+                headers={"api-key": api_key},
+                timeout=10,
+            )
+            if resp.status_code < 300:
+                return {"ok": True}
+            elif resp.status_code in (401, 403):
+                return {
+                    "ok": True,
+                    "warning": (
+                        "配置已保存，但连接验证未通过：凭证可能无效"
+                        f"（HTTP {resp.status_code}）"
+                    ),
+                }
+            elif resp.status_code < 500:
+                return {
+                    "ok": True,
+                    "warning": (
+                        "配置已保存，但连接验证未通过：请求异常"
+                        f"（HTTP {resp.status_code}）"
+                    ),
+                }
+            else:
+                # 5xx 视为网络/服务端问题
+                return {
+                    "ok": True,
+                    "warning": "配置已保存，但连接验证未通过，请检查网络连接",
+                }
+        except Exception:
+            # 超时、网络错误等非 HTTP 异常
+            return {
+                "ok": True,
+                "warning": "配置已保存，但连接验证未通过，请检查网络连接",
+            }
 
     def start_sync(self) -> Dict[str, Any]:
         """启动同步线程。

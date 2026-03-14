@@ -129,19 +129,22 @@ class TestGetOverviewNoConfig(unittest.TestCase):
 
 
 class TestGetConfigSuccess(unittest.TestCase):
-    """get_config 正常路径：返回配置概要。"""
+    """get_config 配置和凭证均有效时返回 config_exists=True。"""
 
     def test_get_config_success(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_file = Path(tmp_dir) / "user_config.json"
-            config_file.write_text("{}", encoding="utf-8")
+            config_file.write_text('{"data_root": "/some/path"}', encoding="utf-8")
 
-            mock_config = _make_mock_config(tmp_dir)
-            catalog = ["product-a", "product-b"]
+            secrets_file = Path(tmp_dir) / "user_secrets.env"
+            secrets_file.write_text(
+                "QUANTCLASS_API_KEY=test-key\nQUANTCLASS_HID=test-hid\n",
+                encoding="utf-8",
+            )
 
             with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
-                 patch(f"{_API_MOD}.load_user_config_or_raise", return_value=mock_config), \
-                 patch(f"{_API_MOD}.load_catalog_or_raise", return_value=catalog):
+                 patch(f"{_API_MOD}.DEFAULT_USER_SECRETS_FILE", secrets_file), \
+                 patch(f"{_API_MOD}.load_catalog_or_raise", return_value=["product-a", "product-b"]):
 
                 from quantclass_sync_internal.gui.api import SyncApi
                 api = SyncApi()
@@ -149,10 +152,8 @@ class TestGetConfigSuccess(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["config_exists"])
-        # data_root 字段应为字符串且非空
         self.assertIsInstance(result["data_root"], str)
         self.assertTrue(len(result["data_root"]) > 0)
-        # product_count 与 catalog 长度一致
         self.assertEqual(result["product_count"], 2)
 
 
@@ -171,6 +172,221 @@ class TestGetConfigNoConfig(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["config_exists"])
         self.assertEqual(result["product_count"], 0)
+
+
+class TestGetConfigJsonInvalid(unittest.TestCase):
+    """get_config: config JSON 损坏时返回 config_exists=False。"""
+
+    def test_json_invalid(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "user_config.json"
+            config_file.write_text("{invalid json", encoding="utf-8")
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file):
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.get_config()
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["config_exists"])
+
+
+class TestGetConfigDataRootEmpty(unittest.TestCase):
+    """get_config: data_root 为空时返回 config_exists=False。"""
+
+    def test_data_root_empty(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "user_config.json"
+            config_file.write_text('{"data_root": ""}', encoding="utf-8")
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file):
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.get_config()
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["config_exists"])
+
+
+class TestGetConfigSecretsMissing(unittest.TestCase):
+    """get_config: config 有效但 secrets 文件不存在时返回 config_exists=False。"""
+
+    def test_secrets_missing(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "user_config.json"
+            config_file.write_text('{"data_root": "/some/path"}', encoding="utf-8")
+
+            # secrets 文件不存在
+            secrets_file = Path(tmp_dir) / "user_secrets.env"
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.DEFAULT_USER_SECRETS_FILE", secrets_file):
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.get_config()
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["config_exists"])
+
+
+class TestGetConfigSecretsEmpty(unittest.TestCase):
+    """get_config: secrets 文件存在但 API Key/HID 为空时返回 config_exists=False。"""
+
+    def test_secrets_empty(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "user_config.json"
+            config_file.write_text('{"data_root": "/some/path"}', encoding="utf-8")
+
+            secrets_file = Path(tmp_dir) / "user_secrets.env"
+            secrets_file.write_text(
+                "QUANTCLASS_API_KEY=\nQUANTCLASS_HID=\n", encoding="utf-8"
+            )
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.DEFAULT_USER_SECRETS_FILE", secrets_file):
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.get_config()
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["config_exists"])
+
+
+class TestRunSetupSuccess(unittest.TestCase):
+    """run_setup: 保存成功 + 连通性探测成功。"""
+
+    def test_success(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_dir = Path(tmp_dir) / "data"
+            data_dir.mkdir()
+            config_file = Path(tmp_dir) / "user_config.json"
+            secrets_file = Path(tmp_dir) / "user_secrets.env"
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.DEFAULT_USER_SECRETS_FILE", secrets_file), \
+                 patch(f"{_API_MOD}.save_setup_artifacts_atomic") as mock_save, \
+                 patch(f"{_API_MOD}.requests.get", return_value=mock_resp):
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.run_setup(str(data_dir), "test-key", "test-hid")
+
+            self.assertTrue(result["ok"])
+            self.assertNotIn("warning", result)
+            mock_save.assert_called_once()
+
+
+class TestRunSetupDirNotFound(unittest.TestCase):
+    """run_setup: 目录不存在且 create_dir=False。"""
+
+    def test_dir_not_found(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            missing_dir = Path(tmp_dir) / "nonexistent"
+
+            from quantclass_sync_internal.gui.api import SyncApi
+            api = SyncApi()
+            result = api.run_setup(str(missing_dir), "key", "hid", create_dir=False)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "dir_not_found")
+        self.assertIn("resolved_path", result)
+
+
+class TestRunSetupCreateDir(unittest.TestCase):
+    """run_setup: 目录不存在且 create_dir=True 时自动创建。"""
+
+    def test_create_dir(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            new_dir = Path(tmp_dir) / "new_data"
+            config_file = Path(tmp_dir) / "user_config.json"
+            secrets_file = Path(tmp_dir) / "user_secrets.env"
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.DEFAULT_USER_SECRETS_FILE", secrets_file), \
+                 patch(f"{_API_MOD}.save_setup_artifacts_atomic"), \
+                 patch(f"{_API_MOD}.requests.get", return_value=mock_resp):
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.run_setup(str(new_dir), "key", "hid", create_dir=True)
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(new_dir.exists())
+
+
+class TestRunSetupProbeAuthError(unittest.TestCase):
+    """run_setup: 保存成功但凭证验证失败（401/403）。"""
+
+    def test_probe_auth_error(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_dir = Path(tmp_dir) / "data"
+            data_dir.mkdir()
+            config_file = Path(tmp_dir) / "user_config.json"
+            secrets_file = Path(tmp_dir) / "user_secrets.env"
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 403
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.DEFAULT_USER_SECRETS_FILE", secrets_file), \
+                 patch(f"{_API_MOD}.save_setup_artifacts_atomic"), \
+                 patch(f"{_API_MOD}.requests.get", return_value=mock_resp):
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.run_setup(str(data_dir), "key", "hid")
+
+        self.assertTrue(result["ok"])
+        self.assertIn("warning", result)
+        self.assertIn("凭证", result["warning"])
+
+
+class TestRunSetupProbeNetworkError(unittest.TestCase):
+    """run_setup: 保存成功但网络探测失败。"""
+
+    def test_probe_network_error(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_dir = Path(tmp_dir) / "data"
+            data_dir.mkdir()
+            config_file = Path(tmp_dir) / "user_config.json"
+            secrets_file = Path(tmp_dir) / "user_secrets.env"
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.DEFAULT_USER_SECRETS_FILE", secrets_file), \
+                 patch(f"{_API_MOD}.save_setup_artifacts_atomic"), \
+                 patch(f"{_API_MOD}.requests.get", side_effect=ConnectionError("timeout")):
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.run_setup(str(data_dir), "key", "hid")
+
+        self.assertTrue(result["ok"])
+        self.assertIn("warning", result)
+        self.assertIn("网络", result["warning"])
+
+
+class TestRunSetupSaveFails(unittest.TestCase):
+    """run_setup: 配置保存失败。"""
+
+    def test_save_fails(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_dir = Path(tmp_dir) / "data"
+            data_dir.mkdir()
+            config_file = Path(tmp_dir) / "user_config.json"
+            secrets_file = Path(tmp_dir) / "user_secrets.env"
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.DEFAULT_USER_SECRETS_FILE", secrets_file), \
+                 patch(f"{_API_MOD}.save_setup_artifacts_atomic",
+                       side_effect=RuntimeError("write failed")):
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.run_setup(str(data_dir), "key", "hid")
+
+        self.assertFalse(result["ok"])
+        self.assertIn("保存失败", result["error"])
 
 
 class TestGetSyncProgressInitial(unittest.TestCase):

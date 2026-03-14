@@ -246,6 +246,7 @@ class TestS2GUISmoke(unittest.TestCase):
         expected = {
             "get_overview",
             "get_config",
+            "run_setup",
             "start_sync",
             "get_sync_progress",
             "get_history",
