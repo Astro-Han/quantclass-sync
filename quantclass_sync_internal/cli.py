@@ -215,6 +215,7 @@ def global_options(
             verbose=command_ctx.verbose,
             products=[],
             force_update=False,
+            workers=1,
         )
         raise typer.Exit(code=0)
 
