@@ -9,41 +9,36 @@ macOS 工具。Windows 用户推荐使用 QuantClass 官方客户端。
 
 ---
 
-## 三步开始用
+## 开始用
 
-### 1. 装依赖
+### 方式一：图形界面（推荐）
+
+双击 `QuantClass Sync.command`，首次运行会自动安装依赖并弹出配置向导。
+
+填三样东西：数据目录（先从官网下载数据）、API Key、HID，点"开始使用"就行了。
+
+以后每次双击直接打开总览页，点"同步"更新数据。
+
+### 方式二：命令行
 
 ```bash
+# 1. 装依赖
 python3 -m pip install -r requirements.txt
+
+# 2. 配置（填数据目录、API Key、HID）
+python3 quantclass_sync.py setup
+
+# 3. 更新数据
+python3 quantclass_sync.py
 ```
+
+搞定。后面每天只要重复第 3 步就行。
 
 如果你的数据里有 `.7z` 或 `.rar` 压缩包，还需要装一个额外依赖：
 
 ```bash
 python3 -m pip install -r requirements-archive.txt
 ```
-
-### 2. 配置
-
-```bash
-python3 quantclass_sync.py setup
-```
-
-跟着提示填三样东西就行：数据存哪（`data_root`）、`API Key`、`HID`。
-
-> 小提示：第一次直接跑 `python3 quantclass_sync.py` 也会自动引导你配置。
-
-### 3. 更新数据
-
-```bash
-# 先试跑一次，看看会做什么（不会真的写数据）
-python3 quantclass_sync.py --dry-run
-
-# 没问题就正式跑
-python3 quantclass_sync.py
-```
-
-搞定。后面每天只要重复第 3 步就行。
 
 ---
 
@@ -125,7 +120,7 @@ python3 quantclass_sync.py gui
 
 打开图形界面窗口，包含总览、同步、历史三个页面。关闭窗口后命令退出。
 
-macOS 用户也可以直接双击 `QuantClass Sync.command` 启动 GUI，不需要打开终端。首次运行会提示输入 conda 环境名。
+macOS 用户也可以直接双击 `QuantClass Sync.command` 启动 GUI，不需要打开终端。首次运行会自动安装依赖并弹出配置向导，全程不需要输入命令。
 
 ### 币圈合成（自动的，不用管）
 
@@ -198,7 +193,7 @@ ls -t <data_root>/.quantclass_sync/log/run_report_* | head -1 | xargs cat
 
 **报"未找到用户配置文件"怎么办？**
 
-先跑一次 `python3 quantclass_sync.py setup`。
+用 GUI 的话，直接双击 `.command` 启动，会自动弹出配置向导。用命令行的话，跑一次 `python3 quantclass_sync.py setup`。
 
 **跑了但是没更新任何数据？**
 
@@ -234,10 +229,11 @@ ls -t <data_root>/.quantclass_sync/log/run_report_* | head -1 | xargs cat
 <summary>v1.0</summary>
 
 - 新增图形界面（GUI）：总览、同步、历史三个页面
+- 新增首次启动向导：双击即用，自动安装依赖、引导配置，全程不需要命令行
 - 新增并发下载：`--workers` 参数支持 1-8 线程
 - 新增 `status` 命令：一屏查看全局同步状态
 - 新增 `.command` 双击启动 GUI（macOS）
-- 测试用例从 199 增加到 315 个
+- 测试用例从 199 增加到 327 个
 
 </details>
 
