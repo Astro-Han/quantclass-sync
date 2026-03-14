@@ -3,14 +3,22 @@
 document.addEventListener('alpine:init', () => {
     Alpine.data('app', () => ({
         // ===== 全局状态 =====
+        currentView: 'main',  // 视图切换: 'setup' | 'main'
         tab: 'overview',   // 当前 Tab: 'overview' | 'sync' | 'history'
         loading: true,     // 总览是否正在加载
         products: [],      // 产品列表，每项包含 name/color/local_date/behind_days/last_result
         summary: { green: 0, yellow: 0, red: 0, gray: 0 }, // 四色计数
         dataRoot: '',      // 数据目录路径
         lastRun: null,     // 上次同步时间字符串
-        configExists: false,
         overviewError: '',  // 总览加载错误信息
+
+        // ===== Setup 向导状态 =====
+        setupDataRoot: '',     // 向导表单：数据目录
+        setupApiKey: '',       // 向导表单：API Key
+        setupHid: '',          // 向导表单：HID
+        setupLoading: false,   // 向导提交中
+        setupError: '',        // 向导错误信息
+        setupWarning: '',      // 向导警告（保存成功但验证失败）
 
         // ===== 筛选状态 =====
         searchText: '',        // 搜索文本（按产品名模糊匹配）
@@ -39,16 +47,24 @@ document.addEventListener('alpine:init', () => {
         pollTimer: null,       // setTimeout 句柄
 
         // ===== 初始化 =====
-        // Alpine.js 会在组件挂载时调用 init()
-        // 优先检查 pywebview bridge 是否已完成注入，否则监听 pywebviewready 事件
+        // 先调 get_config() 判断视图：config_exists → main，否则 → setup
         init() {
+            const doInit = async () => {
+                try {
+                    const cfg = await window.pywebview.api.get_config();
+                    this.currentView = cfg.config_exists ? 'main' : 'setup';
+                    if (this.currentView === 'main') {
+                        this.loadOverview();
+                    }
+                } catch (e) {
+                    console.error('init get_config failed:', e);
+                    this.currentView = 'setup';
+                }
+            };
             if (window.pywebview && window.pywebview.api) {
-                // bridge 已就绪，延迟到下一轮事件循环确保 Alpine 组件完全挂载
-                setTimeout(() => this.loadOverview(), 0);
+                setTimeout(() => doInit(), 0);
             } else {
-                window.addEventListener('pywebviewready', () => {
-                    this.loadOverview();
-                });
+                window.addEventListener('pywebviewready', () => doInit());
             }
         },
 
@@ -66,13 +82,11 @@ document.addEventListener('alpine:init', () => {
                     this.summary = { green: 0, yellow: 0, red: 0, gray: 0 };
                     this.dataRoot = '';
                     this.lastRun = null;
-                    this.configExists = false;
                 } else {
                     this.products = data.products || [];
                     this.summary = data.summary || { green: 0, yellow: 0, red: 0, gray: 0 };
                     this.dataRoot = data.data_root || '';
                     this.lastRun = data.last_run;
-                    this.configExists = true;
                 }
             } catch (e) {
                 console.error('loadOverview failed:', e);
@@ -81,7 +95,6 @@ document.addEventListener('alpine:init', () => {
                 this.summary = { green: 0, yellow: 0, red: 0, gray: 0 };
                 this.dataRoot = '';
                 this.lastRun = null;
-                this.configExists = false;
             }
             this.loading = false;
         },
@@ -313,6 +326,94 @@ document.addEventListener('alpine:init', () => {
             } else {
                 this.historyDetail = null;
             }
+        },
+
+        // ===== Setup 向导方法 =====
+
+        // 表单验证：三个字段均非空
+        setupValid() {
+            return this.setupDataRoot.trim() && this.setupApiKey.trim() && this.setupHid.trim();
+        },
+
+        // 提交 setup 表单
+        async submitSetup() {
+            if (!this.setupValid() || this.setupLoading) return;
+            this.setupLoading = true;
+            this.setupError = '';
+            this.setupWarning = '';
+            try {
+                const result = await window.pywebview.api.run_setup(
+                    this.setupDataRoot.trim(),
+                    this.setupApiKey.trim(),
+                    this.setupHid.trim(),
+                    false
+                );
+                if (!result.ok && result.error_code === 'dir_not_found') {
+                    // 目录不存在，弹确认创建
+                    if (confirm('该目录不存在，是否创建？\n' + result.resolved_path)) {
+                        const result2 = await window.pywebview.api.run_setup(
+                            this.setupDataRoot.trim(),
+                            this.setupApiKey.trim(),
+                            this.setupHid.trim(),
+                            true
+                        );
+                        this._handleSetupResult(result2);
+                    }
+                    // 用户取消 → 留在向导页
+                } else {
+                    this._handleSetupResult(result);
+                }
+            } catch (e) {
+                console.error('submitSetup failed:', e);
+                this.setupError = String(e);
+            }
+            this.setupLoading = false;
+        },
+
+        // 处理 run_setup 返回结果
+        _handleSetupResult(result) {
+            if (!result.ok) {
+                this.setupError = result.error || '配置保存失败';
+                return;
+            }
+            if (result.warning) {
+                // 保存成功但验证失败，展示警告让用户选择
+                this.setupWarning = result.warning;
+                return;
+            }
+            // 保存+验证均成功，跳转主界面
+            this.currentView = 'main';
+            this.loadOverview();
+        },
+
+        // 验证警告后选择"仍然继续"
+        continueAnyway() {
+            this.currentView = 'main';
+            this.loadOverview();
+        },
+
+        // 验证警告后选择"重新填写"（保留 data_root，清空凭证）
+        retrySetup() {
+            this.setupWarning = '';
+            this.setupApiKey = '';
+            this.setupHid = '';
+        },
+
+        // 从主界面进入"重新配置"（预填 data_root）
+        async goToSetup() {
+            try {
+                const cfg = await window.pywebview.api.get_config();
+                if (cfg.config_exists && cfg.data_root) {
+                    this.setupDataRoot = cfg.data_root;
+                }
+            } catch (e) {
+                // 忽略，用户可手动填写
+            }
+            this.setupApiKey = '';
+            this.setupHid = '';
+            this.setupError = '';
+            this.setupWarning = '';
+            this.currentView = 'setup';
         },
     }));
 });

@@ -571,3 +571,125 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ========== Setup 向导 ========== */
+.setup-container {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 60px 24px;
+  min-height: calc(100vh - 52px);
+}
+
+.setup-card {
+  width: 100%;
+  max-width: 460px;
+  background: #ffffff;
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  padding: 36px 32px;
+}
+
+.setup-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: #111827;
+  text-align: center;
+  margin-bottom: 28px;
+}
+
+.setup-field {
+  margin-bottom: 20px;
+}
+
+.setup-label {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  color: #374151;
+  margin-bottom: 6px;
+}
+
+.setup-input {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 14px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  outline: none;
+  transition: border-color 0.15s;
+  background: #ffffff;
+}
+
+.setup-input:focus {
+  border-color: #3b82f6;
+}
+
+.setup-hint {
+  font-size: 12px;
+  color: #9ca3af;
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+.setup-submit {
+  width: 100%;
+  padding: 10px;
+  font-size: 15px;
+}
+
+.setup-submit:disabled {
+  background: #93c5fd;
+  cursor: not-allowed;
+}
+
+.setup-warning {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 20px;
+}
+
+.setup-warning p {
+  font-size: 13px;
+  color: #92400e;
+  margin-bottom: 12px;
+  line-height: 1.5;
+}
+
+.setup-warning-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+}
+
+.btn-outline {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  color: #374151;
+  transition: background 0.15s;
+}
+
+.btn-outline:hover {
+  background: #f9fafb;
+}
+
+/* 重新配置链接 */
+.reconfigure-link {
+  font-size: 12px;
+  color: #3b82f6;
+  cursor: pointer;
+}
+
+.reconfigure-link:hover {
+  text-decoration: underline;
+}

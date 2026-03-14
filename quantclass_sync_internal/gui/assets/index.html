@@ -15,7 +15,7 @@
     <!-- 顶部导航 -->
     <header class="header">
       <span class="header-title">QuantClass Sync</span>
-      <nav class="tabs">
+      <nav class="tabs" x-show="currentView === 'main'">
         <button
           class="tab"
           :class="{ active: tab === 'overview' }"
@@ -34,8 +34,61 @@
       </nav>
     </header>
 
+    <!-- ===== Setup 向导 ===== -->
+    <div x-show="currentView === 'setup'" class="setup-container">
+      <div class="setup-card">
+        <h2 class="setup-title">QuantClass Sync 初始设置</h2>
+
+        <!-- 错误提示 -->
+        <div class="error-banner" x-show="setupError" x-text="setupError"></div>
+
+        <!-- 验证警告（保存成功但连通性失败） -->
+        <div class="setup-warning" x-show="setupWarning">
+          <p x-text="setupWarning"></p>
+          <div class="setup-warning-actions">
+            <button class="btn btn-outline" @click="retrySetup()">重新填写</button>
+            <button class="btn btn-primary" @click="continueAnyway()">仍然继续</button>
+          </div>
+        </div>
+
+        <!-- 表单（无警告时显示） -->
+        <div x-show="!setupWarning">
+          <div class="setup-field">
+            <label class="setup-label">数据存储目录</label>
+            <input type="text" class="setup-input" x-model="setupDataRoot"
+                   placeholder="/Users/xxx/data" />
+            <p class="setup-hint">
+              请先从 QuantClass 官网下载数据，填入数据所在目录<br/>
+              工具会自动识别已有产品并保持更新
+            </p>
+          </div>
+
+          <div class="setup-field">
+            <label class="setup-label">API Key</label>
+            <input type="password" class="setup-input" x-model="setupApiKey" />
+          </div>
+
+          <div class="setup-field">
+            <label class="setup-label">HID</label>
+            <input type="password" class="setup-input" x-model="setupHid" />
+          </div>
+
+          <p class="setup-hint" style="margin-bottom: 20px;">
+            API Key 和 HID 可在 QuantClass 网站个人中心找到
+          </p>
+
+          <button class="btn btn-primary setup-submit"
+                  @click="submitSetup()"
+                  :disabled="!setupValid() || setupLoading">
+            <span x-show="!setupLoading">开始使用</span>
+            <span x-show="setupLoading">配置中...</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- 主内容区 -->
-    <main class="content">
+    <main class="content" x-show="currentView === 'main'">
 
       <!-- ===== 总览页面 ===== -->
       <div x-show="tab === 'overview'">
@@ -152,6 +205,9 @@
             <div class="footer-info">
               <span x-text="lastRun ? '上次同步: ' + lastRun.started_at + '  耗时: ' + formatDuration(lastRun.duration_seconds) : '尚未同步'"></span>
               <span x-show="dataRoot" x-text="'数据目录: ' + dataRoot"></span>
+              <a class="reconfigure-link"
+                 @click="goToSetup()"
+                 x-show="syncStatus !== 'syncing'">重新配置</a>
             </div>
           </div>
         </template>
