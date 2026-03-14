@@ -57,6 +57,35 @@ fi
 
 echo "已激活环境: $CONDA_ENV"
 echo "Python 路径: $(which python)"
+echo ""
+
+# 检查 requirements.txt 是否存在
+if [ ! -f "requirements.txt" ]; then
+    echo "错误：未找到 requirements.txt，请重新下载完整安装包。"
+    echo ""
+    echo "按任意键退出..."
+    read -n 1
+    exit 1
+fi
+
+# 依赖检测：验证核心包、GUI 包、数据处理包
+if ! python -c "import quantclass_sync; import webview; import pandas" 2>/dev/null; then
+    echo "首次运行，正在安装依赖..."
+    pip install -r requirements.txt
+    echo ""
+    # 再次检测
+    if ! python -c "import quantclass_sync; import webview; import pandas" 2>/dev/null; then
+        echo "错误：依赖安装失败，请检查网络连接或手动执行："
+        echo "  pip install -r requirements.txt"
+        echo ""
+        echo "按任意键退出..."
+        read -n 1
+        exit 1
+    fi
+    echo "依赖安装完成。"
+    echo ""
+fi
+
 echo "启动 QuantClass Sync GUI..."
 echo ""
 
