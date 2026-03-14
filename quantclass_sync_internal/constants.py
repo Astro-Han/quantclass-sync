@@ -29,6 +29,9 @@ SYNC_META_DIRNAME = ".quantclass_sync"
 
 DEFAULT_REPORT_RETENTION_DAYS = 365
 
+# GUI 默认并发线程数（CLI 默认 1，GUI 可适度提高）
+DEFAULT_GUI_WORKERS = 4
+
 TIMESTAMP_FILE_NAME = "timestamp.txt"
 
 PRODUCT_MODE_LOCAL_SCAN = "local_scan"

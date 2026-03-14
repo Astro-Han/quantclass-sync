@@ -174,7 +174,8 @@ def _has_internal_relist_break(new_raw: pd.DataFrame) -> bool:
     #   否则按价格变动判断
     # 向量化分三条件计算，最终取 OR
 
-    # 条件 A：prev_close == 0（且数据有效）
+    # 条件 A：prev_close == 0（且数据有效）— valid 已排除 NaN，
+    # 与 _detect_relist_segments 不同：这里 prev_close==0 触发 break（跨段边界检测）
     cond_zero = valid & (prev_close == 0.0)
 
     # 条件 B：时间差超阈值 且 价格变动超阈值
@@ -184,7 +185,8 @@ def _has_internal_relist_break(new_raw: pd.DataFrame) -> bool:
     # 只在 prev_close != 0 且有效时计算价格变动，避免除以零
     safe_close = pd.Series(prev_close, dtype="float64")
     safe_open = pd.Series(curr_open, dtype="float64")
-    nonzero_valid = valid & (safe_close != 0.0) & safe_close.notna() & safe_open.notna()
+    # valid 已排除 NaN，notna() 冗余；只需排除 prev_close == 0 的除零场景
+    nonzero_valid = valid & (safe_close != 0.0)
 
     change = pd.Series(float("nan"), index=safe_close.index)
     change[nonzero_valid] = (safe_open[nonzero_valid] / safe_close[nonzero_valid] - 1.0).abs()

@@ -199,7 +199,9 @@ def _detect_relist_segments(
     if data.empty:
         return []
 
-    # 用 .values 转 numpy array，避免 data.index 不连续导致位置计算错乱
+    # sort/drop_duplicates 后 index 可能不连续，统一 reset 保证后续向量运算对齐
+    data = data.reset_index(drop=True)
+
     times = data["candle_begin_time"].values  # numpy datetime64 array
 
     if len(times) == 1:
@@ -221,7 +223,9 @@ def _detect_relist_segments(
     gap_mask = time_diff > RELIST_GAP_THRESHOLD
 
     # 条件 2：prev_close 和 curr_open 均有效，且 prev_close != 0
-    # prev_close == 0.0 时跳过（不切段），与原版 continue 行为一致
+    # prev_close == 0.0 时跳过（不切段），与原版 continue 行为一致。
+    # 注意：_has_relist_break（runner.py）对 prev_close==0 语义相反（视为 relist break），
+    # 因为它用于跨段边界检测；本函数基于完整 K 线数组，prev_close==0 视为数据缺失跳过。
     valid_mask = prev_close.notna() & open_vals.notna() & (prev_close != 0.0)
 
     # 条件 3：价格变动幅度超过阈值

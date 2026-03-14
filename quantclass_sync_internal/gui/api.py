@@ -27,6 +27,7 @@ from ..constants import (
     DEFAULT_USER_CONFIG_FILE,
     DEFAULT_USER_SECRETS_FILE,
     DEFAULT_WORK_DIR,
+    DEFAULT_GUI_WORKERS,
     EXIT_CODE_SUCCESS,
     PRODUCT_MODE_EXPLICIT_LIST,
 )
@@ -551,7 +552,7 @@ class SyncApi:
                 force_update=False,
                 command_name="gui_update",
                 fallback_products=fallback_products,
-                max_workers=4,
+                max_workers=DEFAULT_GUI_WORKERS,
                 progress_callback=progress_callback,
             )
 

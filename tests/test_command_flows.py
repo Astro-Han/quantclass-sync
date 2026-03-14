@@ -208,6 +208,7 @@ class CommandFlowTests(unittest.TestCase):
                 verbose=False,
                 products=[],
                 force_update=False,
+                workers=1,
             )
         run_mock.assert_called_once()
 
@@ -227,6 +228,7 @@ class CommandFlowTests(unittest.TestCase):
                     verbose=False,
                     products=[],
                     force_update=False,
+                    workers=1,
                 )
         self.assertEqual(2, cm.exception.exit_code)
 
@@ -251,6 +253,7 @@ class CommandFlowTests(unittest.TestCase):
                 verbose=False,
                 products=[],
                 force_update=False,
+                workers=1,
             )
 
         secrets_guard.assert_not_called()
@@ -277,6 +280,7 @@ class CommandFlowTests(unittest.TestCase):
                 verbose=False,
                 products=[],
                 force_update=False,
+                workers=1,
             )
 
         secrets_guard.assert_not_called()
@@ -304,6 +308,7 @@ class CommandFlowTests(unittest.TestCase):
                 verbose=False,
                 products=[],
                 force_update=False,
+                workers=1,
             )
 
         secrets_guard.assert_not_called()
@@ -328,6 +333,7 @@ class CommandFlowTests(unittest.TestCase):
                     verbose=False,
                     products=[],
                     force_update=False,
+                    workers=1,
                 )
 
         self.assertEqual(1, cm.exception.exit_code)
@@ -348,6 +354,7 @@ class CommandFlowTests(unittest.TestCase):
                 verbose=None,
                 products=[],
                 force_update=False,
+                workers=1,
             )
 
         run_mock.assert_called_once()
@@ -369,6 +376,7 @@ class CommandFlowTests(unittest.TestCase):
                 verbose=False,
                 products=[],
                 force_update=False,
+                workers=1,
             )
 
         run_mock.assert_called_once()
@@ -417,6 +425,7 @@ class CommandFlowTests(unittest.TestCase):
                 verbose=False,
                 products=[],
                 force_update=False,
+                workers=1,
             )
 
         self.assertEqual(expected_secrets_file, resolve_mock.call_args.kwargs["secrets_file"])
