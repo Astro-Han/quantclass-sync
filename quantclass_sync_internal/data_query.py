@@ -80,6 +80,8 @@ def get_products_overview(
 
     api_latest_dates: 传入时用 API 实时日期作为参考，跳过缓存和宽限期逻辑。
     """
+    if today is None:
+        today = date.today()
     log_dir = report_dir_path(data_root)
     last_results = read_or_backfill_product_last_status(log_dir)
 
