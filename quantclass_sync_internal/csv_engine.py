@@ -140,6 +140,69 @@ def parse_csv_line(line: str, delimiter: str = ",") -> List[str]:
 
     return next(csv.reader([line], delimiter=delimiter))
 
+def _parse_header_from_lines(
+    lines: Sequence[str],
+) -> Optional[Tuple[Optional[str], List[str], str]]:
+    """
+    从文本前几行识别 note、header 和 delimiter。
+
+    返回 (note, header, delimiter)，无法识别时返回 None。
+    仅被 _read_head_header 调用（read_csv_payload 保持独立逻辑不变）。
+    """
+    sample = [line for line in lines if line.strip()][:3]
+    if not sample:
+        return None
+
+    delimiter = detect_delimiter(sample)
+    parsed: List[List[str]] = []
+    for row in csv.reader(sample, delimiter=delimiter):
+        if row and any(cell.strip() for cell in row):
+            parsed.append(list(row))
+    if not parsed:
+        return None
+
+    first = parsed[0]
+    second = parsed[1] if len(parsed) > 1 else []
+
+    if looks_like_header(first):
+        return None, first, delimiter
+    elif looks_like_header(second):
+        note = lines[0].lstrip("\ufeff") if lines else ""
+        return note, second, delimiter
+    else:
+        return None, first, delimiter
+
+
+# 快捷路径：头部读取缓冲区大小
+_HEAD_READ_BYTES = 2048
+
+def _read_head_header(
+    target: Path,
+    rule: DatasetRule,
+) -> Optional[Tuple[List[str], str]]:
+    """
+    读取文件前 _HEAD_READ_BYTES 字节，识别表头和分隔符。
+
+    返回 (header, delimiter)，失败返回 None。
+    """
+    try:
+        with target.open("rb") as f:
+            raw = f.read(_HEAD_READ_BYTES)
+        if not raw:
+            return None
+        text = raw.decode(rule.encoding, errors="ignore")
+        lines = [line for line in text.splitlines() if line.strip()][:3]
+        result = _parse_header_from_lines(lines)
+        if result is None:
+            return None
+        _note, header, delimiter = result
+        if not header:
+            return None
+        return header, delimiter
+    except Exception:
+        return None
+
+
 def read_csv_payload(path: Path, preferred_encoding: Optional[str] = None) -> CsvPayload:
     """
     读取 CSV，兼容两种结构：
