@@ -625,6 +625,38 @@ def sync_payload_to_target(incoming: CsvPayload, target: Path, rule: DatasetRule
     lock_path = target.parent / f".{target.name}.lock"
     lock_ctx = _locked_target(lock_path) if not dry_run else nullcontext()
     with lock_ctx:
+        # --- 追加快捷路径（在锁内执行）---
+        # 条件：有 sort_cols、非 dry_run、目标文件已存在、incoming 有行数据
+        if rule.sort_cols and not dry_run and target.exists() and incoming.rows:
+            head_result = _read_head_header(target, rule)
+            if head_result is not None:
+                existing_header, existing_delimiter = head_result
+                # 表头和分隔符完全匹配才可追加
+                if (_headers_equal(existing_header, incoming.header)
+                        and existing_delimiter == incoming.delimiter):
+                    sort_indices = resolve_sort_indices(existing_header, rule)
+                    if sort_indices:
+                        # incoming 内部必须严格递增（无重复、有序）
+                        if _is_strictly_increasing(incoming.rows, sort_indices):
+                            existing_max = _read_tail_sort_key(
+                                target, existing_header, rule, existing_delimiter
+                            )
+                            if existing_max is not None:
+                                incoming_min = min(
+                                    row_sort_key(r, sort_indices)
+                                    for r in incoming.rows
+                                )
+                                # incoming 最小键严格大于已有最大键 -- 无重叠，可直接追加
+                                if incoming_min > existing_max:
+                                    if _file_ends_with_newline(target):
+                                        _append_csv_rows(
+                                            target, incoming.rows,
+                                            existing_delimiter, rule.encoding,
+                                        )
+                                        audit.checked_files = 1
+                                        return "updated", len(incoming.rows), audit
+
+        # --- 原有完整合并路径（不变）---
         existing = read_csv_payload(target, preferred_encoding=incoming.encoding or rule.encoding) if target.exists() else None
         output_encoding = choose_output_encoding(existing=existing, incoming=incoming, rule=rule)
         merged, added_rows = merge_payload(existing, incoming, rule)

@@ -177,10 +177,11 @@ class EncodingStrategyTests(unittest.TestCase):
         target = self.root / "atomic-failure.csv"
         self._write_csv_text(target, encoding="utf-8", with_bom=False)
         before = target.read_text(encoding="utf-8")
+        # 日期与 existing 相同（绕过追加快捷路径）但数值不同（触发 write_csv_payload）
         incoming = CsvPayload(
             note=None,
             header=list(self.header),
-            rows=[["2024-01-02", "2", "2", "2", "2", "20", "20", "sh000300"]],
+            rows=[["2024-01-01", "2", "2", "2", "2", "20", "20", "sh000300"]],
             encoding="utf-8",
             delimiter=",",
         )

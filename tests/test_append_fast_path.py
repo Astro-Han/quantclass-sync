@@ -4,6 +4,7 @@ import csv
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from quantclass_sync_internal.csv_engine import (
     _read_head_header,
@@ -13,8 +14,10 @@ from quantclass_sync_internal.csv_engine import (
     _is_strictly_increasing,
     _file_ends_with_newline,
     _append_csv_rows,
+    read_csv_payload,
+    sync_payload_to_target,
 )
-from quantclass_sync_internal.models import DatasetRule
+from quantclass_sync_internal.models import CsvPayload, DatasetRule, SortAudit
 
 
 class TestReadHeadHeader(unittest.TestCase):
@@ -197,6 +200,160 @@ class TestAppendCsvRows(unittest.TestCase):
             _append_csv_rows(p, [["sh600001", "2024-01-02"]], ",", "gb18030")
             text = p.read_text(encoding="gb18030")
             self.assertIn("sh600001", text)
+
+
+class TestSyncPayloadFastPath(unittest.TestCase):
+    """sync_payload_to_target 追加快捷路径。"""
+
+    RULE = DatasetRule(
+        name="test-product", encoding="utf-8", has_note=False,
+        key_cols=("code", "date"), sort_cols=("date",),
+    )
+    HEADER = ["code", "date", "value"]
+
+    def _write_existing(self, path, rows):
+        with path.open("w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f, lineterminator="\n")
+            w.writerow(self.HEADER)
+            w.writerows(rows)
+
+    def _make_incoming(self, rows):
+        return CsvPayload(
+            note=None, header=list(self.HEADER), rows=rows,
+            encoding="utf-8", delimiter=",",
+        )
+
+    def test_fast_path_hit(self):
+        """incoming 日期严格大于已有最大值 -- 命中快捷路径。"""
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "test.csv"
+            self._write_existing(target, [
+                ["A", "2024-01-08", "1"],
+                ["A", "2024-01-09", "2"],
+                ["A", "2024-01-10", "3"],
+            ])
+            incoming = self._make_incoming([["A", "2024-01-11", "4"]])
+            # 用 mock 确认走的是快捷路径
+            with patch(
+                "quantclass_sync_internal.csv_engine._append_csv_rows",
+                wraps=_append_csv_rows,
+            ) as mock_append:
+                status, added, audit = sync_payload_to_target(
+                    incoming, target, self.RULE, dry_run=False
+                )
+                mock_append.assert_called_once()
+            self.assertEqual(status, "updated")
+            self.assertEqual(added, 1)
+            self.assertEqual(audit.checked_files, 1)
+            payload = read_csv_payload(target)
+            self.assertEqual(len(payload.rows), 4)
+            self.assertEqual(payload.rows[-1][1], "2024-01-11")
+
+    def test_fast_path_miss_overlap(self):
+        """incoming 日期 <= 已有最大值 -- 回退完整合并。"""
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "test.csv"
+            self._write_existing(target, [["A", "2024-01-10", "3"]])
+            incoming = self._make_incoming([["A", "2024-01-10", "3_updated"]])
+            status, added, audit = sync_payload_to_target(
+                incoming, target, self.RULE, dry_run=False
+            )
+            self.assertIn(status, ("updated", "unchanged"))
+
+    def test_fast_path_miss_new_file(self):
+        """target 不存在 -- 正常创建。"""
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "new.csv"
+            incoming = self._make_incoming([["A", "2024-01-10", "1"]])
+            status, added, audit = sync_payload_to_target(
+                incoming, target, self.RULE, dry_run=False
+            )
+            self.assertEqual(status, "created")
+
+    def test_fast_path_miss_no_sort_cols(self):
+        """无 sort_cols 的规则 -- 走完整合并。"""
+        rule = DatasetRule(
+            name="nosort", encoding="utf-8", has_note=False,
+            key_cols=(), sort_cols=(),
+        )
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "test.csv"
+            self._write_existing(target, [["A", "2024-01-10", "1"]])
+            incoming = self._make_incoming([["A", "2024-01-11", "2"]])
+            status, added, audit = sync_payload_to_target(
+                incoming, target, rule, dry_run=False
+            )
+            self.assertEqual(status, "updated")
+
+    def test_fast_path_miss_header_mismatch(self):
+        """表头不匹配 -- 回退完整合并。"""
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "test.csv"
+            self._write_existing(target, [["A", "2024-01-10", "1"]])
+            incoming = CsvPayload(
+                note=None, header=["code", "date", "new_col"],
+                rows=[["A", "2024-01-11", "2"]],
+                encoding="utf-8", delimiter=",",
+            )
+            status, added, audit = sync_payload_to_target(
+                incoming, target, self.RULE, dry_run=False
+            )
+            self.assertIn(status, ("updated", "created"))
+
+    def test_fast_path_miss_duplicate_keys(self):
+        """incoming 有重复排序键 -- 回退完整合并。"""
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "test.csv"
+            self._write_existing(target, [["A", "2024-01-10", "1"]])
+            incoming = self._make_incoming([
+                ["A", "2024-01-11", "2"],
+                ["A", "2024-01-11", "3"],
+            ])
+            status, added, audit = sync_payload_to_target(
+                incoming, target, self.RULE, dry_run=False
+            )
+            self.assertEqual(status, "updated")
+
+    def test_fast_path_miss_incoming_unsorted(self):
+        """incoming 内部逆序 -- 回退完整合并。"""
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "test.csv"
+            self._write_existing(target, [["A", "2024-01-10", "1"]])
+            incoming = self._make_incoming([
+                ["A", "2024-01-12", "3"],
+                ["A", "2024-01-11", "2"],
+            ])
+            status, added, audit = sync_payload_to_target(
+                incoming, target, self.RULE, dry_run=False
+            )
+            self.assertEqual(status, "updated")
+            payload = read_csv_payload(target)
+            dates = [r[1] for r in payload.rows]
+            self.assertEqual(dates, sorted(dates))
+
+    def test_fast_path_miss_delimiter_mismatch(self):
+        """分隔符不匹配 -- 回退完整合并。"""
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "test.csv"
+            target.write_text("code\tdate\tvalue\nA\t2024-01-10\t1\n")
+            incoming = self._make_incoming([["A", "2024-01-11", "2"]])
+            status, added, audit = sync_payload_to_target(
+                incoming, target, self.RULE, dry_run=False
+            )
+            self.assertIn(status, ("updated", "created", "unchanged"))
+
+    def test_fast_path_miss_no_trailing_newline(self):
+        """文件末尾无换行 -- 回退完整合并。"""
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "test.csv"
+            target.write_bytes(b"code,date,value\nA,2024-01-10,1")
+            incoming = self._make_incoming([["A", "2024-01-11", "2"]])
+            status, added, audit = sync_payload_to_target(
+                incoming, target, self.RULE, dry_run=False
+            )
+            self.assertEqual(status, "updated")
+            payload = read_csv_payload(target)
+            self.assertEqual(len(payload.rows), 2)
 
 
 if __name__ == "__main__":
