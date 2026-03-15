@@ -16,7 +16,6 @@ from rich.table import Table
 from . import models as models_module
 from .config import (
     build_product_plan,
-    discover_local_products,
     ensure_data_root_ready,
     load_user_config_or_raise,
     load_user_secrets_or_raise,
