@@ -356,5 +356,77 @@ class TestSyncPayloadFastPath(unittest.TestCase):
             self.assertEqual(len(payload.rows), 2)
 
 
+from quantclass_sync_internal.csv_engine import merge_payload, write_csv_payload
+
+
+class TestAppendEquivalence(unittest.TestCase):
+    """验收标准：快捷追加与完整合并产生完全相同的文件内容。"""
+
+    RULE = DatasetRule(
+        name="test-equiv", encoding="utf-8", has_note=False,
+        key_cols=("code", "date"), sort_cols=("date",),
+    )
+    HEADER = ["code", "date", "value"]
+
+    def _write_existing(self, path, rows):
+        with path.open("w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f, lineterminator="\n")
+            w.writerow(self.HEADER)
+            w.writerows(rows)
+
+    def _make_incoming(self, rows):
+        return CsvPayload(
+            note=None, header=list(self.HEADER), rows=rows,
+            encoding="utf-8", delimiter=",",
+        )
+
+    def test_single_day_equivalence(self):
+        """单天追加 vs 完整合并 -- 结果一致。"""
+        base_rows = [["A", f"2024-01-{d:02d}", str(d)] for d in range(1, 11)]
+        new_rows = [["A", "2024-01-11", "11"]]
+
+        with tempfile.TemporaryDirectory() as d:
+            # 路径 A：快捷追加
+            fast = Path(d) / "fast.csv"
+            self._write_existing(fast, base_rows)
+            sync_payload_to_target(self._make_incoming(new_rows), fast, self.RULE, False)
+
+            # 路径 B：直接调 merge_payload + write_csv_payload（绕过快捷路径）
+            full = Path(d) / "full.csv"
+            self._write_existing(full, base_rows)
+            existing = read_csv_payload(full)
+            merged, _ = merge_payload(existing, self._make_incoming(new_rows), self.RULE)
+            write_csv_payload(full, merged, self.RULE, dry_run=False)
+
+            fast_payload = read_csv_payload(fast)
+            full_payload = read_csv_payload(full)
+            self.assertEqual(fast_payload.header, full_payload.header)
+            self.assertEqual(fast_payload.rows, full_payload.rows)
+
+    def test_five_day_catchup_equivalence(self):
+        """5 天连续追加 vs 一次性完整合并 -- 结果一致。"""
+        base_rows = [["A", f"2024-01-{d:02d}", str(d)] for d in range(1, 11)]
+
+        with tempfile.TemporaryDirectory() as d:
+            # 路径 A：5 次追加
+            fast = Path(d) / "fast.csv"
+            self._write_existing(fast, base_rows)
+            for day in range(11, 16):
+                incoming = self._make_incoming([["A", f"2024-01-{day:02d}", str(day)]])
+                sync_payload_to_target(incoming, fast, self.RULE, False)
+
+            # 路径 B：直接调 merge_payload
+            full = Path(d) / "full.csv"
+            self._write_existing(full, base_rows)
+            existing = read_csv_payload(full)
+            all_new = [["A", f"2024-01-{day:02d}", str(day)] for day in range(11, 16)]
+            merged, _ = merge_payload(existing, self._make_incoming(all_new), self.RULE)
+            write_csv_payload(full, merged, self.RULE, dry_run=False)
+
+            fast_payload = read_csv_payload(fast)
+            full_payload = read_csv_payload(full)
+            self.assertEqual(fast_payload.rows, full_payload.rows)
+
+
 if __name__ == "__main__":
     unittest.main()
