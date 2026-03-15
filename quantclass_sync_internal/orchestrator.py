@@ -547,8 +547,6 @@ def _resolve_requested_dates_for_plan(
                     mode="gate",
                     elapsed=elapsed,
                     error=f"本地 timestamp 已是最新（local={local_date}, api={api_latest_date}）。",
-                    stage="GATE",
-                    event_detail=f"local={local_date} api={api_latest_date}",
                 )
             log_info(
                 f"[{product_name}] timestamp 门控命中，跳过更新。",
@@ -755,7 +753,6 @@ def _maybe_run_coin_preprocess(
                 reason_code=REASON_PREPROCESS_SKIPPED_NO_DELTA,
                 mode="postprocess",
                 error="源产品无有效增量（created/updated/rows_added 均为 0），跳过预处理。",
-                stage="PREPROCESS",
             )
             log_info(
                 "预处理跳过：源产品无有效增量。",
@@ -773,7 +770,6 @@ def _maybe_run_coin_preprocess(
                 reason_code=REASON_PREPROCESS_DRY_RUN,
                 mode="postprocess",
                 error="dry-run 模式：未执行预处理命令。",
-                stage="PREPROCESS",
             )
             log_info("dry-run 模式下跳过预处理执行。", event="PREPROCESS", target=PREPROCESS_PRODUCT)
             return False
@@ -802,7 +798,6 @@ def _maybe_run_coin_preprocess(
                 date_time=actual_time,
                 mode="postprocess",
                 source_path=raw_cmd,
-                stage="PREPROCESS",
             )
             log_info(
                 "预处理执行成功。",
@@ -825,7 +820,6 @@ def _maybe_run_coin_preprocess(
                 mode="postprocess",
                 error=message,
                 source_path=raw_cmd,
-                stage="PREPROCESS",
             )
             log_error(f"预处理执行异常: {message}", event="PREPROCESS")
             if command_ctx.verbose:
@@ -910,8 +904,6 @@ def _execute_plans(
                         elapsed=elapsed,
                         mode="gate",
                         error="catch-up 日期队列为空，已跳过本产品。",
-                        stage="PLAN",
-                        event_detail="catchup_dates=0",
                     )
                 log_info(
                     f"[{plan.name}] catch-up 日期队列为空，已跳过。",
@@ -956,8 +948,6 @@ def _execute_plans(
                             stats=stats,
                             source_path=source_path,
                             error="同步未产生可用输出，已跳过状态推进。",
-                            stage="SYNC",
-                            event_detail="no_valid_output",
                         )
                         report.phase_sync_seconds += max(0.0, time.time() - t_sync_phase)
                     log_info(
@@ -992,7 +982,6 @@ def _execute_plans(
                         elapsed=elapsed,
                         stats=stats,
                         source_path=source_path,
-                        event_detail=status_persist_warning,
                     )
                     report.phase_sync_seconds += max(0.0, time.time() - t_sync_phase)
                 if status_persist_warning:

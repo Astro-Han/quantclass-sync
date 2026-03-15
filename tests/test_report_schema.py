@@ -26,9 +26,9 @@ class ReportSchemaTests(unittest.TestCase):
             dry_run=True,
         )
 
-    def test_report_schema_31_contains_new_and_legacy_fields(self) -> None:
+    def test_report_schema_32_contains_new_and_legacy_fields(self) -> None:
         report = _new_report("rid-schema", mode="network")
-        self.assertEqual("3.1", report.schema_version)
+        self.assertEqual("3.2", report.schema_version)
 
         _append_result(
             report,
@@ -47,7 +47,7 @@ class ReportSchemaTests(unittest.TestCase):
             date_time="2026-02-11",
         )
 
-        report_path = self.root / "run_report_schema_31.json"
+        report_path = self.root / "run_report_schema_32.json"
         exit_code = _finalize_and_write_report(
             report=report,
             total=SyncStats(),
@@ -58,7 +58,7 @@ class ReportSchemaTests(unittest.TestCase):
         self.assertEqual(0, exit_code)
 
         payload = json.loads(report_path.read_text(encoding="utf-8"))
-        self.assertEqual("3.1", payload["schema_version"])
+        self.assertEqual("3.2", payload["schema_version"])
         self.assertIn("reason_code_counts", payload)
         self.assertIn("phase_plan_seconds", payload)
         self.assertIn("phase_sync_seconds", payload)

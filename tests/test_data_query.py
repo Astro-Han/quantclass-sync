@@ -92,7 +92,7 @@ class TestGetProductsOverview(unittest.TestCase):
     def _write_report(self, filename: str, products: list):
         """写入一个 run_report JSON，同时更新 product_last_status.json。"""
         report = {
-            "schema_version": "3.1",
+            "schema_version": "3.2",
             "run_id": "test",
             "started_at": "2026-03-13T00:00:00Z",
             "mode": "network",
@@ -402,7 +402,7 @@ class TestReportDirIsolationByDataRoot(unittest.TestCase):
         """在指定 log_dir 写入 run_report JSON 和 product_last_status.json。"""
         log_dir.mkdir(parents=True, exist_ok=True)
         report = {
-            "schema_version": "3.1",
+            "schema_version": "3.2",
             "run_id": "test",
             "started_at": "2026-03-13T00:00:00Z",
             "mode": "network",
@@ -489,7 +489,7 @@ class TestReportHistoryScanRetainsOldProducts(unittest.TestCase):
         """在指定 log_dir 写入 run_report JSON 和累积更新 product_last_status.json。"""
         log_dir.mkdir(parents=True, exist_ok=True)
         report = {
-            "schema_version": "3.1",
+            "schema_version": "3.2",
             "run_id": "test",
             "started_at": "2026-03-13T00:00:00Z",
             "mode": "network",
@@ -580,7 +580,7 @@ class TestUpdateProductLastStatus(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             report = RunReport(
-                schema_version="3.1", run_id="test", started_at="", mode="network",
+                schema_version="3.2", run_id="test", started_at="", mode="network",
             )
             # 同产品 p1 先 error 后 ok（模拟 catch-up：第一天失败，第二天成功）
             report.products = [
@@ -613,7 +613,7 @@ class TestUpdateProductLastStatus(unittest.TestCase):
             log_dir = Path(tmpdir)
 
             # 第一轮：p1 error, p2 ok
-            r1 = RunReport(schema_version="3.1", run_id="r1", started_at="", mode="network")
+            r1 = RunReport(schema_version="3.2", run_id="r1", started_at="", mode="network")
             r1.products = [
                 ProductRunResult(
                     product="p1", status="error", strategy="merge_known",
@@ -627,7 +627,7 @@ class TestUpdateProductLastStatus(unittest.TestCase):
             _update_product_last_status(log_dir, r1)
 
             # 第二轮：只有 p2
-            r2 = RunReport(schema_version="3.1", run_id="r2", started_at="", mode="network")
+            r2 = RunReport(schema_version="3.2", run_id="r2", started_at="", mode="network")
             r2.products = [
                 ProductRunResult(
                     product="p2", status="ok", strategy="merge_known",
@@ -668,7 +668,7 @@ class TestBackfillFromReports(unittest.TestCase):
 
             # 只写 run_report，不写 product_last_status.json（模拟升级过渡期）
             report = {
-                "schema_version": "3.1",
+                "schema_version": "3.2",
                 "run_id": "old-run",
                 "started_at": "2026-03-12T00:00:00Z",
                 "mode": "network",
@@ -724,7 +724,7 @@ class TestBackfillFromReports(unittest.TestCase):
 
             # 报告1：p1 error
             r1 = {
-                "schema_version": "3.1", "run_id": "r1",
+                "schema_version": "3.2", "run_id": "r1",
                 "started_at": "2026-03-12T00:00:00Z", "mode": "network",
                 "products": [
                     {"product": "p1", "status": "error",
@@ -737,7 +737,7 @@ class TestBackfillFromReports(unittest.TestCase):
 
             # 报告2（更新）：p1 ok
             r2 = {
-                "schema_version": "3.1", "run_id": "r2",
+                "schema_version": "3.2", "run_id": "r2",
                 "started_at": "2026-03-13T00:00:00Z", "mode": "network",
                 "products": [
                     {"product": "p1", "status": "ok",
@@ -763,7 +763,7 @@ def _concurrent_status_worker(product_name: str, log_dir_str: str):
 
     work_dir = Path(log_dir_str)
     report = RunReport(
-        schema_version="3.1", run_id=f"run-{product_name}",
+        schema_version="3.2", run_id=f"run-{product_name}",
         started_at="", mode="network",
     )
     report.products = [
@@ -847,7 +847,7 @@ class TestCorruptedStatusFileSelfHealing(unittest.TestCase):
 
             # 写一份正常的 run_report
             report = {
-                "schema_version": "3.1", "run_id": "r1",
+                "schema_version": "3.2", "run_id": "r1",
                 "started_at": "2026-03-12T00:00:00Z", "mode": "network",
                 "products": [
                     {"product": "p1", "status": "error",

@@ -21,7 +21,7 @@ from .constants import (
     REASON_UNKNOWN_LOCAL_PRODUCT,
 )
 from .http_client import _http_metrics_for_product
-from .models import CommandContext, RunEvent, RunReport, SyncStats, ProductRunResult, run_report_to_dict, utc_now_iso, log_info
+from .models import CommandContext, RunReport, SyncStats, ProductRunResult, run_report_to_dict, utc_now_iso, log_info
 from .status_store import report_dir_path
 
 try:
@@ -56,18 +56,6 @@ def write_run_report(path: Path, report: RunReport) -> None:
     with atomic_temp_path(path, tag="report") as tmp:
         tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def _append_run_event(report: RunReport, product: str, stage: str, status: str, reason_code: str, detail: str) -> None:
-    report.events.append(
-        RunEvent(
-            ts=utc_now_iso(),
-            product=product,
-            stage=stage,
-            status=status,
-            reason_code=reason_code,
-            detail=detail,
-        )
-    )
-
 def _append_result(
     report: RunReport,
     *,
@@ -81,13 +69,10 @@ def _append_result(
     stats: Optional[SyncStats] = None,
     source_path: str = "",
     error: str = "",
-    stage: str = "SYNC",
-    event_detail: str = "",
 ) -> None:
-    """统一把产品结果写入 report.products 并触发 RunEvent。
+    """统一把产品结果写入 report.products。
 
     - stats 为 None 时用空 SyncStats（避免调用方每次都显式传 SyncStats()）
-    - event_detail 为空时自动推导：有 error 用 error，否则用 elapsed 信息
     """
     http_attempts, http_failures = _http_metrics_for_product(product)
     report.products.append(
@@ -106,9 +91,6 @@ def _append_result(
             http_failures=http_failures,
         )
     )
-    if not event_detail:
-        event_detail = error if error else f"elapsed={elapsed:.2f}s"
-    _append_run_event(report, product, stage, status, reason_code, event_detail)
 
 def _record_discovery_skips(report: RunReport, unknown_local: Sequence[str], invalid_explicit: Sequence[str]) -> None:
     """把“本地未知目录/无效显式产品”写入报告。"""
@@ -122,8 +104,6 @@ def _record_discovery_skips(report: RunReport, unknown_local: Sequence[str], inv
             reason_code=REASON_UNKNOWN_LOCAL_PRODUCT,
             mode="discover",
             error="本地目录不在 catalog 产品清单中，已跳过。",
-            stage="DISCOVER",
-            event_detail="本地目录不在 catalog",
         )
 
     for product in sorted(invalid_explicit):
@@ -135,8 +115,6 @@ def _record_discovery_skips(report: RunReport, unknown_local: Sequence[str], inv
             reason_code=REASON_INVALID_EXPLICIT_PRODUCT,
             mode="explicit",
             error="显式指定产品不在 catalog 清单中，已跳过。",
-            stage="PLAN",
-            event_detail="显式产品不在 catalog",
         )
 
 def resolve_report_path(ctx: CommandContext, command: str) -> Path:
@@ -339,4 +317,4 @@ def _finalize_and_write_report(
     return decide_exit_code(report=report, has_error=has_error)
 
 def _new_report(run_id: str, mode: str) -> RunReport:
-    return RunReport(schema_version="3.1", run_id=run_id, started_at=utc_now_iso(), mode=mode)
+    return RunReport(schema_version="3.2", run_id=run_id, started_at=utc_now_iso(), mode=mode)

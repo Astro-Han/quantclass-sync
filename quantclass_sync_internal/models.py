@@ -195,17 +195,6 @@ class ProductPlan:
     strategy: str
 
 @dataclass
-class RunEvent:
-    """运行事件（用于后续审计和可观测性）。"""
-
-    ts: str
-    product: str
-    stage: str
-    status: str
-    reason_code: str
-    detail: str
-
-@dataclass
 class ProductRunResult:
     """单产品执行结果。"""
 
@@ -245,7 +234,6 @@ class RunReport:
     phase_sync_seconds: float = 0.0
     phase_postprocess_seconds: float = 0.0
     products: List[ProductRunResult] = field(default_factory=list)
-    events: List[RunEvent] = field(default_factory=list)
     summary: SyncStats = field(default_factory=SyncStats)
 
 @dataclass(frozen=True)
