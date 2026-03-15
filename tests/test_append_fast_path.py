@@ -5,7 +5,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from quantclass_sync_internal.csv_engine import _read_head_header, _read_tail_sort_key, row_sort_key, resolve_sort_indices
+from quantclass_sync_internal.csv_engine import (
+    _read_head_header,
+    _read_tail_sort_key,
+    row_sort_key,
+    resolve_sort_indices,
+    _is_strictly_increasing,
+    _file_ends_with_newline,
+    _append_csv_rows,
+)
 from quantclass_sync_internal.models import DatasetRule
 
 
@@ -113,6 +121,82 @@ class TestReadTailSortKey(unittest.TestCase):
             header = ["股票代码", "交易日期"]
             result = _read_tail_sort_key(p, header, self._make_rule(), ",")
             self.assertIsNotNone(result)
+
+
+class TestIsStrictlyIncreasing(unittest.TestCase):
+
+    def _sort_indices(self, header, sort_cols):
+        rule = DatasetRule(name="t", encoding="utf-8", has_note=False,
+                          key_cols=(), sort_cols=sort_cols)
+        return resolve_sort_indices(header, rule)
+
+    def test_strictly_increasing(self):
+        header = ["date", "val"]
+        indices = self._sort_indices(header, ("date",))
+        rows = [["2024-01-01", "a"], ["2024-01-02", "b"], ["2024-01-03", "c"]]
+        self.assertTrue(_is_strictly_increasing(rows, indices))
+
+    def test_equal_keys_rejected(self):
+        header = ["date", "val"]
+        indices = self._sort_indices(header, ("date",))
+        rows = [["2024-01-01", "a"], ["2024-01-01", "b"]]
+        self.assertFalse(_is_strictly_increasing(rows, indices))
+
+    def test_decreasing_rejected(self):
+        header = ["date", "val"]
+        indices = self._sort_indices(header, ("date",))
+        rows = [["2024-01-02", "a"], ["2024-01-01", "b"]]
+        self.assertFalse(_is_strictly_increasing(rows, indices))
+
+    def test_single_row(self):
+        header = ["date"]
+        indices = self._sort_indices(header, ("date",))
+        self.assertTrue(_is_strictly_increasing([["2024-01-01"]], indices))
+
+    def test_empty(self):
+        self.assertTrue(_is_strictly_increasing([], [0]))
+
+
+class TestFileEndsWithNewline(unittest.TestCase):
+
+    def test_ends_with_newline(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "test.csv"
+            p.write_text("a,b\n1,2\n")
+            self.assertTrue(_file_ends_with_newline(p))
+
+    def test_no_trailing_newline(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "test.csv"
+            p.write_bytes(b"a,b\n1,2")
+            self.assertFalse(_file_ends_with_newline(p))
+
+    def test_empty_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "test.csv"
+            p.write_text("")
+            self.assertFalse(_file_ends_with_newline(p))
+
+
+class TestAppendCsvRows(unittest.TestCase):
+
+    def test_append_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "test.csv"
+            p.write_text("col_a,col_b\n1,2\n")
+            _append_csv_rows(p, [["3", "4"], ["5", "6"]], ",", "utf-8")
+            lines = p.read_text().strip().split("\n")
+            self.assertEqual(len(lines), 4)  # header + 3 data rows
+            self.assertEqual(lines[2], "3,4")
+            self.assertEqual(lines[3], "5,6")
+
+    def test_preserves_encoding(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "test.csv"
+            p.write_text("股票代码,日期\nsh600000,2024-01-01\n", encoding="gb18030")
+            _append_csv_rows(p, [["sh600001", "2024-01-02"]], ",", "gb18030")
+            text = p.read_text(encoding="gb18030")
+            self.assertIn("sh600001", text)
 
 
 if __name__ == "__main__":

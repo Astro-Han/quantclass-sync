@@ -412,6 +412,61 @@ def is_rows_sorted(rows: Sequence[Sequence[str]], sort_indices: Sequence[int]) -
         prev = current
     return True
 
+def _is_strictly_increasing(
+    rows: Sequence[Sequence[str]],
+    sort_indices: Sequence[int],
+) -> bool:
+    """
+    判断行数据是否按排序键严格递增（不允许相等）。
+
+    与 is_rows_sorted（非递减，允许相等）不同：相等排序键也视为违规。
+    用于追加快捷路径，防止追加重复行或乱序行。
+    """
+    if not sort_indices:
+        return True
+    prev: Optional[Tuple[Tuple[int, object], ...]] = None
+    for row in rows:
+        current = row_sort_key(row, sort_indices)
+        if prev is not None and current <= prev:
+            return False
+        prev = current
+    return True
+
+
+def _file_ends_with_newline(target: Path) -> bool:
+    """检查文件最后一个字节是否为换行符。"""
+    try:
+        size = target.stat().st_size
+        if size == 0:
+            return False
+        with target.open("rb") as f:
+            f.seek(size - 1)
+            return f.read(1) == b"\n"
+    except Exception:
+        return False
+
+
+def _append_csv_rows(
+    target: Path,
+    rows: List[List[str]],
+    delimiter: str,
+    encoding: str,
+) -> None:
+    """
+    以 append 模式追加 CSV 数据行（不写表头/note）。
+
+    前置条件（由调用方保证）：
+    - 文件末尾以 \\n 结尾
+    - 调用方持有文件锁
+
+    注意（跨层依赖）：中断恢复依赖 orchestrator 层在 sync
+    完整成功后才更新 timestamp。
+    """
+    with target.open("a", encoding=encoding, newline="") as f:
+        writer = csv.writer(f, delimiter=delimiter, lineterminator="\n")
+        writer.writerows(rows)
+
+
 def merge_payload(existing: Optional[CsvPayload], incoming: CsvPayload, rule: DatasetRule) -> Tuple[CsvPayload, int]:
     """
     增量合并（只追加或覆盖变化部分，不重写全部历史）。
