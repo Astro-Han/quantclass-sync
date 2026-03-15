@@ -120,6 +120,7 @@ class TestGetProductsOverview(unittest.TestCase):
                     "status": item.get("status", ""),
                     "reason_code": item.get("reason_code", ""),
                     "error": item.get("error", ""),
+                    "date_time": item.get("date_time", ""),
                 }
         status_path.write_text(
             json.dumps(existing, ensure_ascii=False), encoding="utf-8"
@@ -159,6 +160,34 @@ class TestGetProductsOverview(unittest.TestCase):
         self.assertEqual(overview[2]["name"], "new-product")
         self.assertIsNone(overview[2]["local_date"])
         self.assertEqual(overview[2]["status_color"], "gray")
+
+    def test_overview_uses_api_date_instead_of_today(self):
+        """已追平 API 时应显示绿色，即使 today 在 API 日期之后（周末/假日）。
+
+        回归测试 issue #1：落后天数应对比 API 最新日期而非 date.today()。
+        """
+        # 产品在周五(3/13)已同步到 API 最新
+        self._write_timestamp("stock-trading-data", "2026-03-13")
+        self._write_report("run_report_20260313_update.json", [
+            {"product": "stock-trading-data", "status": "ok", "reason_code": "ok",
+             "error": "", "date_time": "2026-03-13"},
+        ])
+
+        import unittest.mock
+        with unittest.mock.patch(
+            "quantclass_sync_internal.data_query.report_dir_path",
+            return_value=self.log_dir,
+        ):
+            # 周日查看（today=3/15），本地仍是 3/13
+            overview = get_products_overview(
+                self.data_root,
+                ["stock-trading-data"],
+                today=date(2026, 3, 15),
+            )
+
+        # 应显示 0 天落后（对比 API 日期），而非 2 天落后（对比 today）
+        self.assertEqual(overview[0]["days_behind"], 0)
+        self.assertEqual(overview[0]["status_color"], "green")
 
     def test_overview_with_error_product(self):
         """产品上次失败时应为红色。"""
@@ -430,6 +459,7 @@ class TestReportDirIsolationByDataRoot(unittest.TestCase):
                     "status": item.get("status", ""),
                     "reason_code": item.get("reason_code", ""),
                     "error": item.get("error", ""),
+                    "date_time": item.get("date_time", ""),
                 }
         status_path.write_text(
             json.dumps(existing, ensure_ascii=False), encoding="utf-8"
@@ -517,6 +547,7 @@ class TestReportHistoryScanRetainsOldProducts(unittest.TestCase):
                     "status": item.get("status", ""),
                     "reason_code": item.get("reason_code", ""),
                     "error": item.get("error", ""),
+                    "date_time": item.get("date_time", ""),
                 }
         status_path.write_text(
             json.dumps(existing, ensure_ascii=False), encoding="utf-8"

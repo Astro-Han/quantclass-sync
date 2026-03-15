@@ -80,9 +80,11 @@ def get_products_overview(
     overview: List[Dict[str, Any]] = []
     for product in catalog_products:
         local_date = read_local_timestamp_date(data_root, product)
-        behind = _days_behind(local_date, today)
         last = last_results.get(product, {})
         last_status = last.get("status", "")
+        # 优先用上次同步记录的 API 最新日期作为参考，避免周末/假日误报落后
+        ref_date = _parse_date(last.get("date_time", "")) or today
+        behind = _days_behind(local_date, ref_date)
         color = _status_color(behind, last_status)
         overview.append({
             "name": product,

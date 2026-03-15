@@ -395,6 +395,7 @@ def _scan_reports_for_backfill(log_dir: Path) -> Dict[str, Dict[str, str]]:
                     "status": item.get("status", ""),
                     "reason_code": item.get("reason_code", ""),
                     "error": item.get("error", ""),
+                    "date_time": item.get("date_time", ""),
                 }
     return result
 
@@ -469,6 +470,7 @@ def _update_product_last_status(log_dir: Path, report: RunReport) -> None:
                 "status": item.status,
                 "reason_code": item.reason_code,
                 "error": item.error,
+                "date_time": item.date_time,
             }
         # 原子写入
         with atomic_temp_path(status_path, tag="last_status") as tmp:
