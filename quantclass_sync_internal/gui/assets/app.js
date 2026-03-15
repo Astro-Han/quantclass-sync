@@ -129,7 +129,7 @@ document.addEventListener('alpine:init', () => {
         // 切换到总览时自动刷新数据（同步进行中不刷新，避免干扰）
         switchTab(name) {
             this.tab = name;
-            if (name === 'overview' && this.syncStatus !== 'syncing') {
+            if (name === 'overview' && this.syncStatus !== 'syncing' && !this.checkUpdateResult) {
                 this.loadOverview();
             }
             if (name === 'history' && !this.historyLoaded && !this.historyLoading) {
@@ -182,6 +182,7 @@ document.addEventListener('alpine:init', () => {
                         this.syncStatus = 'done';
                         this.runSummary = p.run_summary;
                         this.historyLoaded = false; // 有新运行，下次切历史页时刷新
+                        this.checkUpdateResult = null; // 同步后清除检查更新结果
                         this.pollTimer = null;
                         return; // 终态，不再调度下次轮询
                     } else if (p.status === 'error') {
