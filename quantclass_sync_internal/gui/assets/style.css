@@ -1,3 +1,6 @@
+/* Alpine.js 初始化前隐藏带 x-cloak 的元素，防止闪烁 */
+[x-cloak] { display: none !important; }
+
 /* ========== 全局重置与基础 ========== */
 *, *::before, *::after {
   box-sizing: border-box;
