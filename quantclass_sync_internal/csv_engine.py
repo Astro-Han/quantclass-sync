@@ -260,7 +260,7 @@ def sortable_value(value: str) -> Tuple[int, object]:
             return (1, numeric)
         # nan/inf 排序不稳定，统一按普通字符串处理。
         return (2, value)
-    except Exception:
+    except (ValueError, TypeError):
         return (2, value)
 
 SORT_TIE_BREAKER_COLS: Dict[str, Tuple[str, ...]] = {

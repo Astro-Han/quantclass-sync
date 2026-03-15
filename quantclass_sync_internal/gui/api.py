@@ -6,12 +6,9 @@
 from __future__ import annotations
 
 import json
-import os
 import requests
-import secrets as secrets_mod
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -19,6 +16,7 @@ from ..config import (
     load_secrets_from_file,
     load_user_config_or_raise,
     resolve_credentials_for_update,
+    resolve_path_from_config,
     save_setup_artifacts_atomic,
 )
 from ..constants import (
@@ -38,15 +36,23 @@ from ..data_query import (
     get_run_detail,
     get_run_history,
 )
-from ..models import CommandContext, UserConfig, log_error, log_info
+from ..models import CommandContext, UserConfig, log_error, log_info, new_run_id
 from ..orchestrator import load_catalog_or_raise, run_update_with_settings
 from ..status_store import report_dir_path
 
 
-def _new_run_id() -> str:
-    """生成高冲突安全的 run_id（微秒时间戳 + pid + 短随机后缀）。"""
-    now = datetime.now()
-    return f"{now.strftime('%Y%m%d-%H%M%S-%f')}-p{os.getpid()}-{secrets_mod.token_hex(4)}"
+def _format_run_summary(raw_run: Dict[str, Any]) -> Dict[str, Any]:
+    """把 run_report 原始 dict 转换为前端友好格式。"""
+    return {
+        "ok": raw_run.get("success_total", 0),
+        "error": raw_run.get("failed_total", 0),
+        "skipped": raw_run.get("skipped_total", 0),
+        "duration_seconds": raw_run.get("duration_seconds", 0),
+        "started_at": raw_run.get("started_at", ""),
+        "failed_products": [
+            fp.get("product", "") for fp in raw_run.get("failed_products", [])
+        ],
+    }
 
 
 # _progress 的初始结构，每次 start_sync 前重置为此形态
@@ -76,39 +82,43 @@ class SyncApi:
     # 内部辅助方法
     # ------------------------------------------------------------------
 
+    def _resolve_data_root(self) -> Tuple[Optional[object], Optional[Path], Optional[str]]:
+        """读取 user_config 并解析 data_root（不加载 catalog）。
+
+        返回 (user_config, data_root, error_message)。
+        出错时 user_config/data_root 均为 None，error_message 为描述字符串。
+        """
+        config_file = DEFAULT_USER_CONFIG_FILE.resolve()
+
+        if not config_file.exists():
+            return None, None, (
+                f"未找到用户配置文件：{config_file}；请先执行 setup 命令完成初始化。"
+            )
+
+        try:
+            user_config = load_user_config_or_raise(config_file)
+        except Exception as exc:
+            return None, None, f"用户配置读取失败：{exc}"
+
+        try:
+            data_root = resolve_path_from_config(
+                Path(user_config.data_root), config_file=config_file,
+            )
+        except Exception as exc:
+            return None, None, f"data_root 路径解析失败：{exc}"
+
+        return user_config, data_root, None
+
     def _resolve_config(self) -> Tuple[Optional[object], Optional[Path], Optional[list], Optional[str]]:
         """读取 user_config、解析 data_root、加载 catalog。
 
         返回 (user_config, data_root, catalog, error_message)。
         出错时 user_config/data_root/catalog 均为 None，error_message 为描述字符串。
         """
-        config_file = DEFAULT_USER_CONFIG_FILE.resolve()
+        user_config, data_root, err = self._resolve_data_root()
+        if err:
+            return None, None, None, err
 
-        # 检查配置文件是否存在
-        if not config_file.exists():
-            return None, None, None, (
-                f"未找到用户配置文件：{config_file}；请先执行 setup 命令完成初始化。"
-            )
-
-        # 加载用户配置
-        try:
-            user_config = load_user_config_or_raise(config_file)
-        except Exception as exc:
-            return None, None, None, f"用户配置读取失败：{exc}"
-
-        # 解析 data_root（相对路径按配置文件目录展开）
-        try:
-            raw_root = Path(user_config.data_root)
-            expanded = raw_root.expanduser()
-            if expanded.is_absolute():
-                data_root = expanded.resolve()
-            else:
-                # 相对路径相对于配置文件所在目录
-                data_root = (config_file.parent / expanded).resolve()
-        except Exception as exc:
-            return None, None, None, f"data_root 路径解析失败：{exc}"
-
-        # 加载产品 catalog
         try:
             catalog = load_catalog_or_raise(DEFAULT_CATALOG_FILE.resolve())
         except Exception as exc:
@@ -176,18 +186,7 @@ class SyncApi:
         except Exception:
             raw_run = None
 
-        last_run = None
-        if raw_run:
-            last_run = {
-                "ok": raw_run.get("success_total", 0),
-                "error": raw_run.get("failed_total", 0),
-                "skipped": raw_run.get("skipped_total", 0),
-                "duration_seconds": raw_run.get("duration_seconds", 0),
-                "started_at": raw_run.get("started_at", ""),
-                "failed_products": [
-                    fp.get("product", "") for fp in raw_run.get("failed_products", [])
-                ],
-            }
+        last_run = _format_run_summary(raw_run) if raw_run else None
 
         return {
             "ok": True,
@@ -247,11 +246,9 @@ class SyncApi:
         # --- 3. 通过：返回 config_exists=True ---
         # 解析 data_root 路径
         try:
-            expanded = Path(data_root_raw).expanduser()
-            if expanded.is_absolute():
-                resolved_root = str(expanded.resolve())
-            else:
-                resolved_root = str((config_file.parent / expanded).resolve())
+            resolved_root = str(resolve_path_from_config(
+                Path(data_root_raw), config_file=config_file,
+            ))
         except Exception:
             resolved_root = data_root_raw
 
@@ -425,8 +422,7 @@ class SyncApi:
             ]
         }
         """
-        # 复用 _resolve_config() 获取 data_root，catalog 未使用但避免提取额外轻量方法
-        _user_config, data_root, _catalog, err = self._resolve_config()
+        _user_config, data_root, err = self._resolve_data_root()
         if err:
             return {"ok": False, "error": err}
 
@@ -444,7 +440,7 @@ class SyncApi:
         report_file: 报告文件绝对路径（来自 get_history 返回值）。
         内部验证路径在 log_dir 内，防止路径遍历。
         """
-        _user_config, data_root, _catalog, err = self._resolve_config()
+        _user_config, data_root, err = self._resolve_data_root()
         if err:
             return {"ok": False, "error": err}
 
@@ -493,7 +489,7 @@ class SyncApi:
                     "请确认 user_secrets.env 已写入，或设置 QUANTCLASS_API_KEY / QUANTCLASS_HID 环境变量。"
                 )
 
-            run_id = _new_run_id()
+            run_id = new_run_id()
 
             # 构造运行上下文
             command_ctx = CommandContext(
@@ -563,16 +559,7 @@ class SyncApi:
                 log_dir = report_dir_path(data_root)
                 raw_run = get_latest_run_summary(log_dir)
                 if raw_run:
-                    run_summary = {
-                        "ok": raw_run.get("success_total", 0),
-                        "error": raw_run.get("failed_total", 0),
-                        "skipped": raw_run.get("skipped_total", 0),
-                        "duration_seconds": raw_run.get("duration_seconds", 0),
-                        "started_at": raw_run.get("started_at", ""),
-                        "failed_products": [
-                            fp.get("product", "") for fp in raw_run.get("failed_products", [])
-                        ],
-                    }
+                    run_summary = _format_run_summary(raw_run)
             except Exception as summary_exc:
                 log_error(f"同步完成但运行摘要读取失败：{summary_exc}", event="GUI_SYNC")
 

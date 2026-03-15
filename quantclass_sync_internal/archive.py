@@ -12,13 +12,13 @@ from pathlib import Path
 # 可选依赖：如果压缩包是 .7z，需要 py7zr 才能解压。
 try:
     import py7zr  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
+except ImportError:  # pragma: no cover - optional dependency
     py7zr = None
 
 # 可选依赖：如果压缩包是 .rar，需要 rarfile 才能解压。
 try:
     import rarfile  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
+except ImportError:  # pragma: no cover - optional dependency
     rarfile = None
 
 def _ensure_within(base: Path, target: Path) -> None:

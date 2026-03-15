@@ -243,6 +243,9 @@ _CSV_CHECK_LIMIT = 100
 # 状态目录名（工具自身写入的元数据，不参与健康检查）
 _META_DIR_NAME = ".quantclass_sync"
 
+# 健康检查支持的问题类型集合
+_KNOWN_TYPES = {"missing_data", "csv_unreadable", "orphan_temp"}
+
 
 def _check_missing_data(
     data_root: Path, catalog_products: Sequence[str],
@@ -402,7 +405,6 @@ def check_data_health(
             log_error(f"健康检查子任务 {check_fn.__name__} 异常：{exc}", event="HEALTH_CHECK")
 
     # 统计各类型计数（只统计已知类型，确保 total = 三类之和）
-    _KNOWN_TYPES = {"missing_data", "csv_unreadable", "orphan_temp"}
     summary: Dict[str, int] = {"missing_data": 0, "csv_unreadable": 0, "orphan_temp": 0}
     for issue in issues:
         issue_type = issue["type"]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import IO, Dict, Iterable, Optional, Protocol, Sequence
 
@@ -297,9 +297,10 @@ def _finalize_and_write_report(
     report.summary = total
     report.ended_at = utc_now_iso()
     report.duration_seconds = round(time.time() - t_run_start, 2)
-    report.success_total = sum(1 for x in report.products if x.status == "ok")
-    report.failed_total = sum(1 for x in report.products if x.status == "error")
-    report.skipped_total = sum(1 for x in report.products if x.status == "skipped")
+    status_counts = Counter(x.status for x in report.products)
+    report.success_total = status_counts.get("ok", 0)
+    report.failed_total = status_counts.get("error", 0)
+    report.skipped_total = status_counts.get("skipped", 0)
     report.reason_code_counts = build_reason_code_counts(report.products)
     report.sorted_checked_files = total.sorted_checked_files
     report.sorted_violation_files = total.sorted_violation_files

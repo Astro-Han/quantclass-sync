@@ -21,7 +21,8 @@ OUTPUT_PIVOT_SPOT = "market_pivot_spot.pkl"
 
 OUTPUT_PIVOT_SWAP = "market_pivot_swap.pkl"
 
-TIMESTAMP_FILE_NAME = "timestamp.txt"
+# 复用主包常量，避免两处维护
+from quantclass_sync_internal.constants import TIMESTAMP_FILE_NAME  # noqa: E402
 
 CSV_ENCODINGS = ("gbk", "utf-8-sig", "utf-8")
 

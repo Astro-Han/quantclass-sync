@@ -473,11 +473,13 @@ class CommandFlowTests(unittest.TestCase):
     def test_global_options_run_id_has_subsecond_entropy(self) -> None:
         ctx1 = _FakeGlobalContext(invoked_subcommand="update")
         ctx2 = _FakeGlobalContext(invoked_subcommand="update")
-        dt1 = datetime(2026, 3, 2, 9, 30, 0, 111111)
-        dt2 = datetime(2026, 3, 2, 9, 30, 0, 222222)
 
-        with patch("quantclass_sync_internal.cli.datetime") as dt_mock:
-            dt_mock.now.side_effect = [dt1, dt2]
+        # 直接 patch new_run_id 返回受控值，验证 run_id 携带微秒级熵
+        with patch("quantclass_sync_internal.cli.new_run_id") as mock_fn:
+            mock_fn.side_effect = [
+                "20260302-093000-111111-p999-aabbccdd",
+                "20260302-093000-222222-p999-eeff0011",
+            ]
             qcs.global_options(
                 ctx=ctx1,
                 data_root=None,
@@ -511,12 +513,10 @@ class CommandFlowTests(unittest.TestCase):
 
     def test_global_options_run_id_uses_random_hex_suffix(self) -> None:
         ctx = _FakeGlobalContext(invoked_subcommand="update")
-        dt = datetime(2026, 3, 2, 9, 30, 0, 123456)
-        with patch("quantclass_sync_internal.cli.datetime") as dt_mock, patch(
-            "quantclass_sync_internal.cli.secrets.token_hex",
-            return_value="deadbeef",
+        with patch(
+            "quantclass_sync_internal.cli.new_run_id",
+            return_value="20260302-093000-123456-p999-deadbeef",
         ):
-            dt_mock.now.return_value = dt
             qcs.global_options(
                 ctx=ctx,
                 data_root=None,

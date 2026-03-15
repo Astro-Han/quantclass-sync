@@ -28,6 +28,15 @@ from .models import (
 )
 
 
+def resolve_path_from_config(raw_path: Path, *, config_file: Path) -> Path:
+    """把配置里的路径统一解析为绝对路径（相对路径按配置文件目录解析）。"""
+
+    expanded = raw_path.expanduser()
+    if expanded.is_absolute():
+        return expanded.resolve()
+    return (config_file.parent / expanded).resolve()
+
+
 def ensure_data_root_ready(data_root: Path, create_if_missing: bool = False) -> Path:
     """校验 data_root；需要时可自动创建目录。"""
 
@@ -169,10 +178,10 @@ def save_setup_artifacts_atomic(
     """
     setup 双文件写入（带回滚）。
 
-    任一文件写失败时，把配置和密钥都恢复到写入前状态，避免“半成功”。
+    任一文件写失败时，把配置和密钥都恢复到写入前状态，避免"半成功"。
     """
 
-    # 先拍快照：后续任何写入失败时，都可以恢复“调用 setup 前”的文件状态。
+    # 先拍快照：后续任何写入失败时，都可以恢复"调用 setup 前"的文件状态。
     config_snapshot = snapshot_text_file(config_path)
     secrets_snapshot = snapshot_text_file(secrets_path)
     try:
@@ -250,12 +259,12 @@ def _dir_has_data_files(path: Path) -> bool:
     """
     判断目录内是否存在数据文件（.csv/.ts）。
 
-    这里使用“递归查找任意一个命中即返回”，
-    避免把空目录误认为“已有产品”。
+    使用针对性 glob 模式，找到任意一个命中即返回，
+    避免把空目录误认为"已有产品"。
     """
 
-    for candidate in path.rglob("*"):
-        if candidate.is_file() and candidate.suffix.lower() in {".csv", ".ts"}:
+    for pattern in ("**/*.csv", "**/*.ts"):
+        if next(path.glob(pattern), None) is not None:
             return True
     return False
 
@@ -264,7 +273,7 @@ def discover_local_products(data_root: Path, catalog_products: Sequence[str]) ->
     扫描 data_root 一级目录，识别本地已有产品。
 
     定义：
-    - 目录下递归存在 .csv/.ts，才算“本地已有产品”。
+    - 目录下递归存在 .csv/.ts，才算"本地已有产品"。
     - 是否有效（valid）由 catalog 产品集合判定。
     """
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import secrets
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -31,6 +33,12 @@ def utc_now_iso() -> str:
     """返回 UTC 时间字符串（ISO 格式）。"""
 
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+def new_run_id() -> str:
+    """生成高冲突安全的 run_id（微秒 + pid + 短随机后缀）。"""
+
+    now = datetime.now()
+    return f"{now.strftime('%Y%m%d-%H%M%S-%f')}-p{os.getpid()}-{secrets.token_hex(4)}"
 
 class ConsoleLogger:
     """极简日志器（中文 message + 英文事件码）。"""

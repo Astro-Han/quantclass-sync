@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import os
-import secrets
 import sys
 import time
 import traceback
-from datetime import datetime
 from functools import wraps
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -23,6 +20,7 @@ from .config import (
     load_user_config_or_raise,
     load_user_secrets_or_raise,
     resolve_credentials_for_update,
+    resolve_path_from_config,
     save_setup_artifacts_atomic,
     validate_run_mode,
 )
@@ -59,6 +57,7 @@ from .models import (
     log_debug,
     log_error,
     log_info,
+    new_run_id,
     normalize_product_name,
     split_products,
     utc_now_iso,
@@ -85,12 +84,6 @@ app = typer.Typer(
     pretty_exceptions_enable=False,
 )
 
-def _new_run_id() -> str:
-    """生成高冲突安全的 run_id（微秒 + pid + 短随机后缀）。"""
-
-    now = datetime.now()
-    return f"{now.strftime('%Y%m%d-%H%M%S-%f')}-p{os.getpid()}-{secrets.token_hex(4)}"
-
 def _sync_logger_runtime(logger: ConsoleLogger, progress_every: Optional[int] = None) -> None:
     """同步 CLI 层与 models 层的日志运行时上下文。"""
 
@@ -101,14 +94,6 @@ def _sync_logger_runtime(logger: ConsoleLogger, progress_every: Optional[int] = 
         normalized = max(1, progress_every)
         PROGRESS_EVERY = normalized
         models_module.PROGRESS_EVERY = normalized
-
-def _resolve_path_from_config(raw_path: Path, *, config_file: Path) -> Path:
-    """把配置里的路径统一解析为绝对路径（相对路径按配置文件目录解析）。"""
-
-    expanded = raw_path.expanduser()
-    if expanded.is_absolute():
-        return expanded.resolve()
-    return (config_file.parent / expanded).resolve()
 
 @app.callback(invoke_without_command=True)
 def global_options(
@@ -135,7 +120,7 @@ def global_options(
     3) 把运行上下文写入 ctx.obj，供后续子命令复用
     """
 
-    run_id = _new_run_id()
+    run_id = new_run_id()
     _sync_logger_runtime(
         ConsoleLogger(level="DEBUG" if verbose else "INFO", run_id=run_id),
         progress_every=DEFAULT_PROGRESS_EVERY,
@@ -358,10 +343,10 @@ def _resolve_command_paths(
 
     if user_config is not None:
         if not base_ctx.data_root_from_cli:
-            data_root = _resolve_path_from_config(user_config.data_root, config_file=base_ctx.config_file)
+            data_root = resolve_path_from_config(user_config.data_root, config_file=base_ctx.config_file)
             data_root_source = "config"
         if not base_ctx.secrets_file_from_cli:
-            secrets_file = _resolve_path_from_config(user_config.secrets_file, config_file=base_ctx.config_file)
+            secrets_file = resolve_path_from_config(user_config.secrets_file, config_file=base_ctx.config_file)
             secrets_source = "config"
 
     return data_root.resolve(), secrets_file.resolve(), user_config, data_root_source, secrets_source
@@ -450,7 +435,7 @@ def cmd_setup(
     if base_ctx.secrets_file_from_cli:
         secrets_path = base_ctx.secrets_file
     elif existing_config is not None:
-        secrets_path = _resolve_path_from_config(existing_config.secrets_file, config_file=base_ctx.config_file)
+        secrets_path = resolve_path_from_config(existing_config.secrets_file, config_file=base_ctx.config_file)
     else:
         secrets_path = DEFAULT_USER_SECRETS_FILE.resolve()
 
