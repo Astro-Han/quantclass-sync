@@ -24,3 +24,4 @@ CLAUDE.md
 
 # 本地文档（计划 / 审查 / 发布草稿，不进仓库）
 docs/
+.firecrawl/
