@@ -203,6 +203,50 @@ def _read_head_header(
         return None
 
 
+# 快捷路径：尾部读取缓冲区大小
+_TAIL_READ_BYTES = 4096
+
+def _read_tail_sort_key(
+    target: Path,
+    header: Sequence[str],
+    rule: DatasetRule,
+    delimiter: str = ",",
+) -> Optional[Tuple[Tuple[int, object], ...]]:
+    """
+    读取文件末尾 _TAIL_READ_BYTES 字节，解析最后一行的排序键。
+
+    header 参数必须是从 target 文件读取的 existing_header（非 incoming.header）。
+    delimiter 必须是从 _read_head_header 检测到的实际分隔符。
+    任何异常返回 None（触发回退到完整合并路径）。
+    """
+    try:
+        size = target.stat().st_size
+        if size == 0:
+            return None
+        read_size = min(size, _TAIL_READ_BYTES)
+        with target.open("rb") as f:
+            f.seek(max(0, size - read_size))
+            raw = f.read(read_size)
+        text = raw.decode(rule.encoding, errors="ignore")
+        # 取最后一行非空文本
+        last_line = ""
+        for line in reversed(text.splitlines()):
+            if line.strip():
+                last_line = line.strip()
+                break
+        if not last_line:
+            return None
+        row = next(csv.reader([last_line], delimiter=delimiter))
+        if not row:
+            return None
+        sort_indices = resolve_sort_indices(header, rule)
+        if not sort_indices:
+            return None
+        return row_sort_key(row, sort_indices)
+    except Exception:
+        return None
+
+
 def read_csv_payload(path: Path, preferred_encoding: Optional[str] = None) -> CsvPayload:
     """
     读取 CSV，兼容两种结构：
