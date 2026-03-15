@@ -241,6 +241,97 @@ class TestGetProductsOverview(unittest.TestCase):
         self.assertEqual(overview[0]["days_behind"], 4)
         self.assertEqual(overview[0]["status_color"], "red")
 
+    def test_overview_api_latest_dates_overrides_cache(self):
+        """传入 api_latest_dates 时，用 API 日期替代缓存/today。"""
+        self._write_timestamp("stock-trading-data", "2026-03-10")
+        self._write_report("run_report_20260310_update.json", [
+            {"product": "stock-trading-data", "status": "ok", "reason_code": "ok",
+             "error": "", "date_time": "2026-03-10"},
+        ])
+
+        import unittest.mock
+        with unittest.mock.patch(
+            "quantclass_sync_internal.data_query.report_dir_path",
+            return_value=self.log_dir,
+        ):
+            overview = get_products_overview(
+                self.data_root,
+                ["stock-trading-data"],
+                today=date(2026, 3, 15),
+                api_latest_dates={"stock-trading-data": "2026-03-14"},
+            )
+
+        # API 说最新是 3/14，本地是 3/10，应落后 4 天（红色）
+        self.assertEqual(overview[0]["days_behind"], 4)
+        self.assertEqual(overview[0]["status_color"], "red")
+
+    def test_overview_api_latest_dates_partial(self):
+        """api_latest_dates 只覆盖部分产品，其余保持宽限期逻辑。"""
+        self._write_timestamp("stock-trading-data", "2026-03-13")
+        self._write_timestamp("coin-cap", "2026-03-13")
+        self._write_report("run_report_20260313_update.json", [
+            {"product": "stock-trading-data", "status": "ok", "reason_code": "ok",
+             "error": "", "date_time": "2026-03-13"},
+            {"product": "coin-cap", "status": "ok", "reason_code": "ok",
+             "error": "", "date_time": "2026-03-13"},
+        ])
+
+        import unittest.mock
+        with unittest.mock.patch(
+            "quantclass_sync_internal.data_query.report_dir_path",
+            return_value=self.log_dir,
+        ):
+            overview = get_products_overview(
+                self.data_root,
+                ["stock-trading-data", "coin-cap"],
+                today=date(2026, 3, 15),
+                api_latest_dates={"stock-trading-data": "2026-03-14"},
+            )
+
+        by_name = {p["name"]: p for p in overview}
+        # stock-trading-data: API 说 3/14，本地 3/13 -> 落后 1 天
+        self.assertEqual(by_name["stock-trading-data"]["days_behind"], 1)
+        # coin-cap: 不在 api_latest_dates 中，用宽限期缓存(3/13)，本地 3/13 -> 0 天
+        self.assertEqual(by_name["coin-cap"]["days_behind"], 0)
+
+    def test_overview_api_latest_dates_equal_local(self):
+        """API 日期等于本地日期时 behind=0。"""
+        self._write_timestamp("stock-trading-data", "2026-03-14")
+
+        import unittest.mock
+        with unittest.mock.patch(
+            "quantclass_sync_internal.data_query.report_dir_path",
+            return_value=self.log_dir,
+        ):
+            overview = get_products_overview(
+                self.data_root,
+                ["stock-trading-data"],
+                today=date(2026, 3, 15),
+                api_latest_dates={"stock-trading-data": "2026-03-14"},
+            )
+
+        self.assertEqual(overview[0]["days_behind"], 0)
+        self.assertEqual(overview[0]["status_color"], "green")
+
+    def test_overview_api_latest_dates_earlier_than_local(self):
+        """API 日期早于本地日期时 behind=0（max(0, diff) 截断）。"""
+        self._write_timestamp("stock-trading-data", "2026-03-14")
+
+        import unittest.mock
+        with unittest.mock.patch(
+            "quantclass_sync_internal.data_query.report_dir_path",
+            return_value=self.log_dir,
+        ):
+            overview = get_products_overview(
+                self.data_root,
+                ["stock-trading-data"],
+                today=date(2026, 3, 15),
+                api_latest_dates={"stock-trading-data": "2026-03-12"},
+            )
+
+        self.assertEqual(overview[0]["days_behind"], 0)
+        self.assertEqual(overview[0]["status_color"], "green")
+
     def test_overview_with_error_product(self):
         """产品上次失败时应为红色。"""
         self._write_timestamp("stock-fin-data-xbx", "2026-03-13")
