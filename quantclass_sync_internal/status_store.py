@@ -489,12 +489,15 @@ def update_api_latest_dates(log_dir: Path, api_latest_dates: Dict[str, str]) -> 
 
     with open(lock_path, "w") as lock_fd:
         _flock_exclusive(lock_fd)
+        # 文件缺失或损坏时先从历史报告回填，避免覆盖丢失已有状态
         existing: Dict[str, Dict[str, str]] = {}
         if status_path.exists():
             try:
                 existing = json.loads(status_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
-                pass
+                existing = _scan_reports_for_backfill(log_dir)
+        else:
+            existing = _scan_reports_for_backfill(log_dir)
         for product, date_str in api_latest_dates.items():
             if product in existing:
                 existing[product]["date_time"] = date_str
