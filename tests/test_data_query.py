@@ -574,7 +574,7 @@ class TestUpdateProductLastStatus(unittest.TestCase):
 
     def test_same_product_multiple_times_takes_last(self):
         """同一报告内同产品出现多次时（catch-up），应取最后一条。"""
-        from quantclass_sync_internal.reporting import _update_product_last_status, PRODUCT_LAST_STATUS_FILE
+        from quantclass_sync_internal.status_store import _update_product_last_status, PRODUCT_LAST_STATUS_FILE
         from quantclass_sync_internal.models import RunReport, ProductRunResult, SyncStats
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -606,7 +606,7 @@ class TestUpdateProductLastStatus(unittest.TestCase):
 
     def test_accumulates_across_runs(self):
         """多次运行后，未参与本轮的产品保留上次状态。"""
-        from quantclass_sync_internal.reporting import _update_product_last_status, PRODUCT_LAST_STATUS_FILE
+        from quantclass_sync_internal.status_store import _update_product_last_status, PRODUCT_LAST_STATUS_FILE
         from quantclass_sync_internal.models import RunReport, ProductRunResult, SyncStats
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -758,7 +758,7 @@ class TestBackfillFromReports(unittest.TestCase):
 def _concurrent_status_worker(product_name: str, log_dir_str: str):
     """并发测试 worker：每个进程写入一个独占产品到 product_last_status.json。"""
     import time
-    from quantclass_sync_internal.reporting import _update_product_last_status
+    from quantclass_sync_internal.status_store import _update_product_last_status
     from quantclass_sync_internal.models import RunReport, ProductRunResult, SyncStats
 
     work_dir = Path(log_dir_str)
@@ -789,7 +789,7 @@ class TestConcurrentProductLastStatusWrite(unittest.TestCase):
     def test_concurrent_writes_no_lost_updates(self):
         """多进程并发更新，最终文件应包含所有进程写入的产品。"""
         import multiprocessing
-        from quantclass_sync_internal.reporting import PRODUCT_LAST_STATUS_FILE
+        from quantclass_sync_internal.status_store import PRODUCT_LAST_STATUS_FILE
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
@@ -889,8 +889,9 @@ class TestDryRunDoesNotWriteProductLastStatus(unittest.TestCase):
     def test_dry_run_skips_status_update(self):
         """dry_run=True 时，写 run_report 但不写 product_last_status.json。"""
         from quantclass_sync_internal.reporting import (
-            _finalize_and_write_report, _new_report, PRODUCT_LAST_STATUS_FILE, _append_result,
+            _finalize_and_write_report, _new_report, _append_result,
         )
+        from quantclass_sync_internal.status_store import PRODUCT_LAST_STATUS_FILE
         from quantclass_sync_internal.models import SyncStats
         import time
 
@@ -917,8 +918,9 @@ class TestDryRunDoesNotWriteProductLastStatus(unittest.TestCase):
     def test_non_dry_run_writes_status(self):
         """dry_run=False 时，正常写入 product_last_status.json。"""
         from quantclass_sync_internal.reporting import (
-            _finalize_and_write_report, _new_report, PRODUCT_LAST_STATUS_FILE, _append_result,
+            _finalize_and_write_report, _new_report, _append_result,
         )
+        from quantclass_sync_internal.status_store import PRODUCT_LAST_STATUS_FILE
         from quantclass_sync_internal.models import SyncStats
         import time
 
@@ -951,8 +953,9 @@ class TestLogDirOverridesReportPathParent(unittest.TestCase):
     def test_log_dir_used_for_status_file(self):
         """log_dir 指定时，product_last_status.json 写入 log_dir 而非 report_path.parent。"""
         from quantclass_sync_internal.reporting import (
-            _finalize_and_write_report, _new_report, PRODUCT_LAST_STATUS_FILE, _append_result,
+            _finalize_and_write_report, _new_report, _append_result,
         )
+        from quantclass_sync_internal.status_store import PRODUCT_LAST_STATUS_FILE
         from quantclass_sync_internal.models import SyncStats
         import time
 
@@ -988,8 +991,9 @@ class TestEmptyProductsSentinelWrite(unittest.TestCase):
     def test_empty_products_writes_sentinel(self):
         """报告无产品记录时，_finalize_and_write_report 仍写入空 {} 到 product_last_status.json。"""
         from quantclass_sync_internal.reporting import (
-            _finalize_and_write_report, _new_report, PRODUCT_LAST_STATUS_FILE,
+            _finalize_and_write_report, _new_report,
         )
+        from quantclass_sync_internal.status_store import PRODUCT_LAST_STATUS_FILE
         from quantclass_sync_internal.models import SyncStats
         import time
 

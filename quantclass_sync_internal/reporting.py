@@ -6,9 +6,9 @@ import json
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import IO, Dict, Iterable, Optional, Protocol, Sequence
+from typing import Dict, Iterable, Optional, Protocol, Sequence
 
-from .config import atomic_temp_path
+from .config import atomic_temp_path  # write_run_report 仍使用原子写入
 from .constants import (
     EXIT_CODE_GENERAL_FAILURE,
     EXIT_CODE_NETWORK_OR_REMOTE_DATA_FAILURE,
@@ -22,12 +22,7 @@ from .constants import (
 )
 from .http_client import _http_metrics_for_product
 from .models import CommandContext, RunReport, SyncStats, ProductRunResult, run_report_to_dict, utc_now_iso, log_info
-from .status_store import report_dir_path
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover — Windows 无 fcntl
-    fcntl = None  # type: ignore[assignment]
+from .status_store import report_dir_path, _update_product_last_status
 
 
 class HasReasonCode(Protocol):
@@ -146,116 +141,6 @@ def decide_exit_code(
     if failed_reason_codes and failed_reason_codes.issubset(NETWORK_OR_REMOTE_FAILURE_REASONS):
         return EXIT_CODE_NETWORK_OR_REMOTE_DATA_FAILURE
     return EXIT_CODE_GENERAL_FAILURE
-
-PRODUCT_LAST_STATUS_FILE = "product_last_status.json"
-
-_LOCK_FILE = "product_last_status.lock"
-
-
-def _flock_exclusive(fd: IO) -> None:
-    """对文件描述符加排他锁。Windows 无 fcntl 时降级为无锁（与旧版行为一致）。"""
-    if fcntl is not None:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-
-
-def _scan_reports_for_backfill(log_dir: Path) -> Dict[str, Dict[str, str]]:
-    """扫描历史 run_report 构建产品状态（内部函数，调用方负责加锁）。
-
-    按文件名字典序升序扫描，后写报告覆盖先写报告，与正常累积逻辑一致。
-    """
-    report_files = sorted(log_dir.glob("run_report_*.json"))
-    result: Dict[str, Dict[str, str]] = {}
-    for path in report_files:
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        for item in data.get("products", []):
-            name = item.get("product", "")
-            if name:
-                result[name] = {
-                    "status": item.get("status", ""),
-                    "reason_code": item.get("reason_code", ""),
-                    "error": item.get("error", ""),
-                }
-    return result
-
-
-def read_or_backfill_product_last_status(log_dir: Path) -> Dict[str, Dict[str, str]]:
-    """读取累积状态文件，缺失或损坏时从历史报告回填。
-
-    与 _update_product_last_status 共享同一把文件锁，避免回填与同步写入竞争。
-    流程：
-    1. 快路径（无锁）：文件存在且可解析，直接返回。
-    2. 慢路径（加锁）：双重检查后，扫描历史报告回填并原子写入。
-       即使结果为空 dict 也落盘，作为"已回填"哨兵，避免重复扫描。
-    """
-    status_path = log_dir / PRODUCT_LAST_STATUS_FILE
-
-    # 快路径：文件存在且可解析，无需加锁
-    if status_path.exists():
-        try:
-            result = json.loads(status_path.read_text(encoding="utf-8"))
-            if isinstance(result, dict):
-                return result
-        except (OSError, json.JSONDecodeError):
-            pass  # 损坏，走慢路径修复
-
-    # 慢路径：加锁回填（或修复损坏文件）
-    log_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = log_dir / _LOCK_FILE
-    with open(lock_path, "w") as lock_fd:
-        _flock_exclusive(lock_fd)
-        # 双重检查：等锁期间另一个进程可能已完成写入
-        if status_path.exists():
-            try:
-                result = json.loads(status_path.read_text(encoding="utf-8"))
-                if isinstance(result, dict):
-                    return result
-            except (OSError, json.JSONDecodeError):
-                pass  # 仍然损坏，继续回填修复
-        # 从历史报告回填
-        result = _scan_reports_for_backfill(log_dir)
-        # 原子写入（即使为空 dict，也作为哨兵标记避免重复扫描）
-        with atomic_temp_path(status_path, tag="last_status") as tmp:
-            tmp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-        return result
-
-
-def _update_product_last_status(log_dir: Path, report: RunReport) -> None:
-    """累积更新每产品最后状态文件。
-
-    每次运行后把本轮涉及的产品状态写入 product_last_status.json，
-    未涉及的产品保留上次的状态。同一报告内同产品出现多次时取最后一条（catch-up 场景）。
-
-    使用 fcntl.flock 排他锁保护读-合并-写循环，防止并发进程丢更新。
-    原子写入防写半截，文件锁防丢更新，职责正交。
-    """
-    status_path = log_dir / PRODUCT_LAST_STATUS_FILE
-    lock_path = log_dir / _LOCK_FILE
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    with open(lock_path, "w") as lock_fd:
-        # 进程级排他锁：同一时刻只有一个进程能进入读-合并-写循环
-        _flock_exclusive(lock_fd)
-        # 读取已有累积状态
-        existing: Dict[str, Dict[str, str]] = {}
-        if status_path.exists():
-            try:
-                existing = json.loads(status_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                pass
-        # 用本轮结果覆盖（同产品多次出现时后面的覆盖前面的）
-        for item in report.products:
-            existing[item.product] = {
-                "status": item.status,
-                "reason_code": item.reason_code,
-                "error": item.error,
-            }
-        # 原子写入
-        with atomic_temp_path(status_path, tag="last_status") as tmp:
-            tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
-
 
 def _finalize_and_write_report(
     report: RunReport,

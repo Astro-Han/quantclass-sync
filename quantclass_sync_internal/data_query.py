@@ -13,8 +13,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from .constants import ENCODING_CANDIDATES, KNOWN_DATASETS, TIMESTAMP_FILE_NAME
 from .models import log_error
-from .reporting import read_or_backfill_product_last_status
-from .status_store import read_local_timestamp_date, report_dir_path
+from .status_store import read_local_timestamp_date, read_or_backfill_product_last_status, report_dir_path
 
 # --- 产品状态总览 ---
 
@@ -60,18 +59,6 @@ def _status_color(days_behind: Optional[int], last_status: str) -> str:
     return "red"
 
 
-def _load_latest_report_products(log_dir: Path) -> Dict[str, Dict[str, Any]]:
-    """读取每产品累积状态文件，返回 {product_name: {status, reason_code, error}}。
-
-    委托 reporting.read_or_backfill_product_last_status 处理：
-    - 正常读取：直接解析 product_last_status.json
-    - 升级过渡：文件缺失时从历史 run_report 回填并持久化
-    - 损坏自愈：JSON 损坏时重新回填修复
-    所有写入与 _update_product_last_status 共享同一把文件锁。
-    """
-    return read_or_backfill_product_last_status(log_dir)
-
-
 def get_products_overview(
     data_root: Path,
     catalog_products: Sequence[str],
@@ -88,7 +75,7 @@ def get_products_overview(
     - status_color: 状态颜色 ("green" / "yellow" / "red" / "gray")
     """
     log_dir = report_dir_path(data_root)
-    last_results = _load_latest_report_products(log_dir)
+    last_results = read_or_backfill_product_last_status(log_dir)
 
     overview: List[Dict[str, Any]] = []
     for product in catalog_products:
