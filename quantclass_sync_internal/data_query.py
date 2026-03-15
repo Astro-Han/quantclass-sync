@@ -97,12 +97,15 @@ def get_products_overview(
             ref_date = api_date
         else:
             # 用缓存的 API 日期作为参考，避免周末/假日误报落后；
-            # 缓存超过宽限期或无缓存时降级回 today，提示可能有新数据
+            # 缓存超过宽限期或无缓存时降级回 today，提示可能有新数据。
+            # 宽限期从"上次查询/同步时间"算起（checked_at 优先，降级到 date_time）
             cached_api_date = _parse_date(last.get("date_time", ""))
+            freshness_anchor = _parse_date(last.get("checked_at", "")) or cached_api_date
             cache_fresh = (
                 cached_api_date is not None
+                and freshness_anchor is not None
                 and today is not None
-                and (today - cached_api_date).days <= _STALE_GRACE_DAYS
+                and (today - freshness_anchor).days <= _STALE_GRACE_DAYS
             )
             ref_date = cached_api_date if cache_fresh else today
 

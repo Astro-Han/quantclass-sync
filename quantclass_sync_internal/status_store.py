@@ -498,10 +498,12 @@ def update_api_latest_dates(log_dir: Path, api_latest_dates: Dict[str, str]) -> 
                 existing = _scan_reports_for_backfill(log_dir)
         else:
             existing = _scan_reports_for_backfill(log_dir)
+        checked_at = datetime.now().strftime("%Y-%m-%d")
         for product, date_str in api_latest_dates.items():
             if product in existing:
                 existing[product]["date_time"] = date_str
+                existing[product]["checked_at"] = checked_at
             else:
-                existing[product] = {"status": "", "reason_code": "", "error": "", "date_time": date_str}
+                existing[product] = {"status": "", "reason_code": "", "error": "", "date_time": date_str, "checked_at": checked_at}
         with atomic_temp_path(status_path, tag="last_status") as tmp:
             tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
