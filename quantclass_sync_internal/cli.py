@@ -17,7 +17,7 @@ from . import models as models_module
 from .config import (
     build_product_plan,
     discover_local_products,
-    ensure_data_root_ready as ensure_data_root_ready_impl,
+    ensure_data_root_ready,
     load_user_config_or_raise,
     load_user_secrets_or_raise,
     resolve_credentials_for_update,
@@ -50,7 +50,6 @@ from .models import (
     LOGGER,
     PROGRESS_EVERY,
     ProductPlan,
-    ProductStatus,
     ProductSyncError,
     RICH_CONSOLE,
     SyncStats,
@@ -70,12 +69,10 @@ from .status_store import (
     cleanup_report_logs,
     cleanup_work_cache_aggressive,
     export_status_json,
-    load_product_status,
     open_status_db,
     report_dir_path,
     resolve_runtime_paths,
     status_json_path,
-    upsert_product_status,
 )
 
 app = typer.Typer(
@@ -289,11 +286,6 @@ def command_guard(command_name: str):
         return wrapper
 
     return decorator
-
-def ensure_data_root_ready(data_root: Path, create_if_missing: bool = False) -> Path:
-    """兼容导出：内部实现已下沉到 config 模块。"""
-
-    return ensure_data_root_ready_impl(data_root, create_if_missing=create_if_missing)
 
 def _build_command_ctx_with_overrides(base_ctx: CommandContext, data_root: Path, secrets_file: Path) -> CommandContext:
     """基于基础上下文生成覆盖后的运行上下文。"""
@@ -750,51 +742,6 @@ def cmd_status(ctx: typer.Context) -> None:
         )
     RICH_CONSOLE.print(f"  数据目录: {command_ctx.data_root}")
     RICH_CONSOLE.print()
-
-@app.command("init")
-@command_guard("init")
-def cmd_init(ctx: typer.Context) -> None:
-    """
-    初始化产品状态快照（兼容命令）。
-
-    这一步只更新状态文件，不下载数据。
-    """
-
-    command_ctx = _init_command(ctx, "init")
-    ensure_data_root_ready(command_ctx.data_root, create_if_missing=True)
-    t0 = time.time()
-    log_info("开始执行 init。", event="CMD_START")
-
-    catalog = load_catalog_or_raise(command_ctx.catalog_file)
-    discovered = discover_local_products(command_ctx.data_root, catalog)
-    local_set = {x.name for x in discovered}
-
-    if command_ctx.dry_run:
-        elapsed = time.time() - t0
-        log_info(
-            "dry-run：init 仅完成状态扫描预演，未写入状态库与状态 JSON。",
-            event="CMD_DONE",
-            products=len(catalog),
-            discovered_local=len(local_set),
-            elapsed=round(elapsed, 2),
-        )
-        return
-
-    with open_status_db(command_ctx.data_root) as conn:
-        for product in catalog:
-            old = load_product_status(conn, product)
-            status = old or ProductStatus(name=product, display_name=product)
-            status.display_name = status.display_name or product
-            status.is_listed = 1
-            status.can_auto_update = 1
-            if product in local_set:
-                status.last_update_time = utc_now_iso()
-            upsert_product_status(conn, status, commit_immediately=False)
-        conn.commit()
-        export_status_json(conn, status_json_path(command_ctx.data_root))
-
-    elapsed = time.time() - t0
-    log_info("init 执行完成。", event="CMD_DONE", products=len(catalog), elapsed=round(elapsed, 2))
 
 @app.command("one_data")
 @command_guard("one_data")

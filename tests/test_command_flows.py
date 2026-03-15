@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import typer
 
-from quantclass_sync_internal.cli import app, cmd_all_data, cmd_init, cmd_one_data, cmd_repair_sort, cmd_setup, cmd_update, global_options
+from quantclass_sync_internal.cli import app, cmd_all_data, cmd_one_data, cmd_repair_sort, cmd_setup, cmd_update, global_options
 from quantclass_sync_internal.config import load_user_config_or_raise, save_user_config_atomic, save_user_secrets_atomic
 from quantclass_sync_internal.constants import DEFAULT_CATALOG_FILE, EXIT_CODE_NO_EXECUTABLE_PRODUCTS, PRODUCT_MODE_LOCAL_SCAN
 from quantclass_sync_internal.models import CommandContext, SyncStats, UserConfig
@@ -600,47 +600,6 @@ class CommandFlowTests(unittest.TestCase):
         self.assertIn("repair_sort", commands)
         self.assertIn("repair-sort", commands)
         self.assertIs(commands["repair_sort"], commands["repair-sort"])
-
-    def test_cmd_init_dry_run_executes_without_name_error(self) -> None:
-        ctx = _DummyTyperContext(self._base_ctx())
-        with patch("quantclass_sync_internal.cli.load_catalog_or_raise", return_value=["stock-trading-data"]), patch(
-            "quantclass_sync_internal.cli.discover_local_products",
-            return_value=[],
-        ):
-            cmd_init(ctx=ctx)
-
-    def test_cmd_init_writes_with_single_commit(self) -> None:
-        ctx = _DummyTyperContext(self._base_ctx().model_copy(update={"dry_run": False}))
-        conn = _FakeConn()
-
-        @contextmanager
-        def _open_status_db():
-            try:
-                yield conn
-            finally:
-                conn.close()
-
-        with patch("quantclass_sync_internal.cli.load_catalog_or_raise", return_value=["p1", "p2"]), patch(
-            "quantclass_sync_internal.cli.discover_local_products",
-            return_value=[],
-        ), patch(
-            "quantclass_sync_internal.cli.open_status_db",
-            return_value=_open_status_db(),
-        ), patch(
-            "quantclass_sync_internal.cli.load_product_status",
-            return_value=None,
-        ), patch(
-            "quantclass_sync_internal.cli.export_status_json",
-        ), patch(
-            "quantclass_sync_internal.cli.upsert_product_status",
-        ) as upsert_mock:
-            cmd_init(ctx=ctx)
-
-        self.assertEqual(2, upsert_mock.call_count)
-        for call in upsert_mock.call_args_list:
-            self.assertIs(False, call.kwargs.get("commit_immediately"))
-        self.assertEqual(1, conn.commit_calls)
-        self.assertTrue(conn.closed)
 
     def test_cmd_one_data_executes_single_plan(self) -> None:
         ctx = _DummyTyperContext(self._base_ctx())
