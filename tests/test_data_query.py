@@ -152,10 +152,10 @@ class TestGetProductsOverview(unittest.TestCase):
         self.assertEqual(overview[0]["name"], "stock-trading-data")
         self.assertEqual(overview[0]["days_behind"], 0)
         self.assertEqual(overview[0]["status_color"], "green")
-        # coin-cap: 落后 3 天，黄色
+        # coin-cap: 上次同步成功(status=ok)，视为已追平，绿色
         self.assertEqual(overview[1]["name"], "coin-cap")
-        self.assertEqual(overview[1]["days_behind"], 3)
-        self.assertEqual(overview[1]["status_color"], "yellow")
+        self.assertEqual(overview[1]["days_behind"], 0)
+        self.assertEqual(overview[1]["status_color"], "green")
         # new-product: 无 timestamp，灰色
         self.assertEqual(overview[2]["name"], "new-product")
         self.assertIsNone(overview[2]["local_date"])

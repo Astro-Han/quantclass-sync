@@ -82,9 +82,14 @@ def get_products_overview(
         local_date = read_local_timestamp_date(data_root, product)
         last = last_results.get(product, {})
         last_status = last.get("status", "")
-        # 优先用上次同步记录的 API 最新日期作为参考，避免周末/假日误报落后
-        ref_date = _parse_date(last.get("date_time", "")) or today
-        behind = _days_behind(local_date, ref_date)
+        last_reason = last.get("reason_code", "")
+        # 上次同步成功或门控确认已追平 → 直接视为 0 天落后
+        # 否则用上次记录的 API 日期作为参考，无记录时降级回 today
+        if last_status == "ok" or last_reason == "up_to_date":
+            behind = 0
+        else:
+            ref_date = _parse_date(last.get("date_time", "")) or today
+            behind = _days_behind(local_date, ref_date)
         color = _status_color(behind, last_status)
         overview.append({
             "name": product,
