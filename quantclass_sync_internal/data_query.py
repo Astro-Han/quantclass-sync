@@ -20,6 +20,9 @@ from .status_store import read_local_timestamp_date, read_or_backfill_product_la
 # 状态颜色阈值（自然日）
 _DAYS_YELLOW = 1  # >= 1 天落后: 黄色
 _DAYS_RED = 4     # >= 4 天落后: 红色
+# 缓存宽限期：上次同步记录的 API 日期在此天数内视为可信，超出后降级回 today。
+# 3 天覆盖普通周末和含周一假期的三天长周末。
+_STALE_GRACE_DAYS = 3
 
 
 def _parse_date(date_str: Optional[str]) -> Optional[date]:
@@ -82,15 +85,16 @@ def get_products_overview(
         local_date = read_local_timestamp_date(data_root, product)
         last = last_results.get(product, {})
         last_status = last.get("status", "")
-        last_reason = last.get("reason_code", "")
-        # 门控确认已追平（up_to_date）且本地有数据 → 直接视为 0 天落后
-        # 其他情况用上次记录的 API 日期作为参考；
-        # 旧安装无 date_time 字段时 _parse_date 返回 None，降级回 today（等价修复前行为）
-        if last_reason == "up_to_date" and local_date is not None:
-            behind = 0
-        else:
-            ref_date = _parse_date(last.get("date_time", "")) or today
-            behind = _days_behind(local_date, ref_date)
+        # 用缓存的 API 日期作为参考，避免周末/假日误报落后；
+        # 缓存超过宽限期或无缓存时降级回 today，提示可能有新数据
+        cached_api_date = _parse_date(last.get("date_time", ""))
+        cache_fresh = (
+            cached_api_date is not None
+            and today is not None
+            and (today - cached_api_date).days <= _STALE_GRACE_DAYS
+        )
+        ref_date = cached_api_date if cache_fresh else today
+        behind = _days_behind(local_date, ref_date)
         color = _status_color(behind, last_status)
         overview.append({
             "name": product,

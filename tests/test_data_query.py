@@ -214,6 +214,33 @@ class TestGetProductsOverview(unittest.TestCase):
         self.assertEqual(overview[0]["days_behind"], 0)
         self.assertEqual(overview[0]["status_color"], "green")
 
+    def test_overview_stale_cache_degrades_to_today(self):
+        """缓存的 API 日期超过宽限期后，降级回 today 比较。
+
+        回归测试：防止长期未同步的产品永远显示绿色。
+        """
+        self._write_timestamp("stock-trading-data", "2026-03-10")
+        self._write_report("run_report_20260310_update.json", [
+            {"product": "stock-trading-data", "status": "ok", "reason_code": "ok",
+             "error": "", "date_time": "2026-03-10"},
+        ])
+
+        import unittest.mock
+        with unittest.mock.patch(
+            "quantclass_sync_internal.data_query.report_dir_path",
+            return_value=self.log_dir,
+        ):
+            # 4 天后查看（超出 3 天宽限期），应降级回 today
+            overview = get_products_overview(
+                self.data_root,
+                ["stock-trading-data"],
+                today=date(2026, 3, 14),
+            )
+
+        # today - local = 4 天，应显示红色
+        self.assertEqual(overview[0]["days_behind"], 4)
+        self.assertEqual(overview[0]["status_color"], "red")
+
     def test_overview_with_error_product(self):
         """产品上次失败时应为红色。"""
         self._write_timestamp("stock-fin-data-xbx", "2026-03-13")
