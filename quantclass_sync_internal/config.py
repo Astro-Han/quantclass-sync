@@ -259,12 +259,13 @@ def _dir_has_data_files(path: Path) -> bool:
     """
     判断目录内是否存在数据文件（.csv/.ts）。
 
-    使用针对性 glob 模式，找到任意一个命中即返回，
+    递归查找任意一个命中即返回，用 .suffix.lower() 保持大小写不敏感，
     避免把空目录误认为"已有产品"。
     """
 
-    for pattern in ("**/*.csv", "**/*.ts"):
-        if next(path.glob(pattern), None) is not None:
+    _DATA_SUFFIXES = {".csv", ".ts"}
+    for candidate in path.rglob("*"):
+        if candidate.is_file() and candidate.suffix.lower() in _DATA_SUFFIXES:
             return True
     return False
 
