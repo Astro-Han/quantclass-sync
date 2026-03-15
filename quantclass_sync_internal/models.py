@@ -460,6 +460,22 @@ RULES: Dict[str, DatasetRule] = {
         key_cols=("公告日期", "股票代码", "公告标题"),
         sort_cols=("公告日期", "股票代码", "公告标题"),
     ),
+    # 币安现货 1h K线（coin_preprocess 产出，按 symbol 拆分为单文件）
+    "coin-binance-candle-csv-1h": DatasetRule(
+        name="coin-binance-candle-csv-1h",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("candle_begin_time", "symbol"),
+        sort_cols=("candle_begin_time",),
+    ),
+    # 币安合约 1h K线（同上，多 fundingRate 列）
+    "coin-binance-swap-candle-csv-1h": DatasetRule(
+        name="coin-binance-swap-candle-csv-1h",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("candle_begin_time", "symbol"),
+        sort_cols=("candle_begin_time",),
+    ),
     # 币圈市值快照：按 symbol 拆分后，以 日期+symbol 为主键增量合并
     "coin-cap": DatasetRule(
         name="coin-cap",

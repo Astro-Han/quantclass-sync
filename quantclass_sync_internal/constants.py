@@ -67,7 +67,15 @@ AGGREGATE_SPLIT_COLS: Dict[str, str] = {
     "coin-cap": "symbol",
 }
 
-KNOWN_DATASETS = tuple(sorted(set(AGGREGATE_SPLIT_COLS) | {"stock-fin-data-xbx"}))
+# 非聚合拆分但需要增量合并的产品（不在 AGGREGATE_SPLIT_COLS 中）
+_INDIVIDUAL_MERGE_PRODUCTS = {
+    "stock-fin-data-xbx",
+    "stock-notices-title",
+    "coin-binance-candle-csv-1h",
+    "coin-binance-swap-candle-csv-1h",
+}
+
+KNOWN_DATASETS = tuple(sorted(set(AGGREGATE_SPLIT_COLS) | _INDIVIDUAL_MERGE_PRODUCTS))
 
 ENCODING_CANDIDATES = ("utf-8-sig", "gb18030", "utf-8", "gbk")
 
