@@ -39,7 +39,7 @@ from ..data_query import (
 from ..http_client import get_latest_time
 from ..models import CommandContext, FatalRequestError, UserConfig, log_error, log_info, new_run_id
 from ..orchestrator import _build_headers, load_catalog_or_raise, run_update_with_settings
-from ..status_store import report_dir_path
+from ..status_store import report_dir_path, update_api_latest_dates
 
 
 def _format_run_summary(raw_run: Dict[str, Any]) -> Dict[str, Any]:
@@ -551,6 +551,14 @@ class SyncApi:
         for product in catalog:
             if product not in api_latest_dates and product not in failed_products:
                 failed_products.append(product)
+
+        # 持久化查到的 API 日期，下次打开 GUI 时宽限期逻辑可用
+        if api_latest_dates:
+            try:
+                log_dir = report_dir_path(data_root)
+                update_api_latest_dates(log_dir, api_latest_dates)
+            except Exception:
+                pass  # 持久化失败不影响本次结果
 
         # 用 API 日期生成实时 overview
         try:

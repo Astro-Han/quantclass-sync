@@ -475,3 +475,30 @@ def _update_product_last_status(log_dir: Path, report: RunReport) -> None:
         # 原子写入
         with atomic_temp_path(status_path, tag="last_status") as tmp:
             tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def update_api_latest_dates(log_dir: Path, api_latest_dates: Dict[str, str]) -> None:
+    """将检查更新查到的 API 最新日期写入累积状态文件的 date_time 字段。
+
+    只更新 api_latest_dates 中有的产品，其他产品保持不变。
+    使用与 _update_product_last_status 相同的文件锁，避免并发冲突。
+    """
+    status_path = log_dir / PRODUCT_LAST_STATUS_FILE
+    lock_path = log_dir / _LOCK_FILE
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    with open(lock_path, "w") as lock_fd:
+        _flock_exclusive(lock_fd)
+        existing: Dict[str, Dict[str, str]] = {}
+        if status_path.exists():
+            try:
+                existing = json.loads(status_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                pass
+        for product, date_str in api_latest_dates.items():
+            if product in existing:
+                existing[product]["date_time"] = date_str
+            else:
+                existing[product] = {"status": "", "reason_code": "", "error": "", "date_time": date_str}
+        with atomic_temp_path(status_path, tag="last_status") as tmp:
+            tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
