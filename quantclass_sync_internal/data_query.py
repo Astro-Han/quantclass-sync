@@ -104,7 +104,6 @@ def get_products_overview(
             cache_fresh = (
                 cached_api_date is not None
                 and freshness_anchor is not None
-                and today is not None
                 and (today - freshness_anchor).days <= _STALE_GRACE_DAYS
             )
             ref_date = cached_api_date if cache_fresh else today

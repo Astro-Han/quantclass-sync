@@ -471,6 +471,7 @@ def _update_product_last_status(log_dir: Path, report: RunReport) -> None:
                 "reason_code": item.reason_code,
                 "error": item.error,
                 "date_time": item.date_time,
+                "checked_at": datetime.now().strftime("%Y-%m-%d"),
             }
         # 原子写入
         with atomic_temp_path(status_path, tag="last_status") as tmp:
