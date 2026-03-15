@@ -32,6 +32,11 @@ document.addEventListener('alpine:init', () => {
         historyError: '',      // 历史页错误信息
         historyLoaded: false,  // 历史列表是否已加载过（避免重复请求）
 
+        // ===== 检查更新状态 =====
+        checkUpdateLoading: false,
+        checkUpdateConfirmVisible: false,
+        checkUpdateResult: null,         // {message, isError} 或 null
+
         // ===== 健康检查状态 =====
         healthReport: null,        // 健康报告结果对象（null 表示未检查过）
         healthLoading: false,      // 是否正在检查中
@@ -296,6 +301,33 @@ document.addEventListener('alpine:init', () => {
                 this.historyDetail = null;
             }
             this.historyLoading = false;
+        },
+
+        // ===== 检查更新 =====
+
+        // 确认后执行检查更新：查询 API 获取各产品最新日期，就地刷新表格
+        async doCheckUpdates() {
+            this.checkUpdateConfirmVisible = false;
+            if (this.checkUpdateLoading) return;
+            this.checkUpdateLoading = true;
+            this.checkUpdateResult = null;
+            try {
+                const res = await window.pywebview.api.check_updates();
+                if (res.ok === false) {
+                    this.checkUpdateResult = { message: res.error, isError: true };
+                } else {
+                    // 就地刷新表格和统计卡片
+                    this.products = res.products;
+                    this.summary = res.summary;
+                    const msg = '成功查询 ' + res.checked + ' 个产品' +
+                        (res.failed > 0 ? '，' + res.failed + ' 个查询失败' : '');
+                    this.checkUpdateResult = { message: msg, isError: false };
+                }
+            } catch (e) {
+                console.error('checkUpdates failed:', e);
+                this.checkUpdateResult = { message: String(e), isError: true };
+            }
+            this.checkUpdateLoading = false;
         },
 
         // ===== 健康检查 =====

@@ -706,3 +706,20 @@ body {
   cursor: not-allowed;
   pointer-events: none;
 }
+
+/* 检查更新确认弹窗 */
+.modal-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.3); display: flex;
+  align-items: center; justify-content: center; z-index: 100;
+}
+.modal-box {
+  background: #fff; border-radius: 12px; padding: 24px;
+  max-width: 360px; text-align: center; box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+}
+.modal-actions {
+  margin-top: 16px; display: flex; gap: 12px; justify-content: center;
+}
+
+/* 检查更新结果文字 */
+.text-success { color: #16a34a; }
