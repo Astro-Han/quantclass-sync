@@ -146,7 +146,7 @@
               <button
                 class="btn btn-health"
                 @click="checkUpdateConfirmVisible = true"
-                :disabled="checkUpdateLoading"
+                :disabled="checkUpdateLoading || syncStatus === 'syncing'"
               >
                 <span x-show="!checkUpdateLoading">检查更新</span>
                 <span x-show="checkUpdateLoading">检查中...</span>
