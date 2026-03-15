@@ -2,7 +2,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import quantclass_sync as qcs
+from quantclass_sync_internal.config import build_product_plan
+from quantclass_sync_internal.constants import REASON_OK, STRATEGY_MERGE_KNOWN
+from quantclass_sync_internal.csv_engine import read_csv_payload
+from quantclass_sync_internal.file_sync import repair_sort_product_files, sync_known_product
 
 
 def _write_notices_csv(path: Path, rows: list[list[str]]) -> None:
@@ -25,9 +28,9 @@ class SortRepairTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_stock_notices_title_is_known_merge_rule(self) -> None:
-        plans = qcs.build_product_plan(["stock-notices-title"])
+        plans = build_product_plan(["stock-notices-title"])
         self.assertEqual(1, len(plans))
-        self.assertEqual(qcs.STRATEGY_MERGE_KNOWN, plans[0].strategy)
+        self.assertEqual(STRATEGY_MERGE_KNOWN, plans[0].strategy)
 
     def test_repair_sort_product_files_rewrites_unsorted_notices_csv(self) -> None:
         target = self.root / "stock-notices-title" / "2026-02-10.csv"
@@ -39,7 +42,7 @@ class SortRepairTests(unittest.TestCase):
             ],
         )
 
-        stats, error_count = qcs.repair_sort_product_files(
+        stats, error_count = repair_sort_product_files(
             product="stock-notices-title",
             data_root=self.root,
             dry_run=False,
@@ -52,7 +55,7 @@ class SortRepairTests(unittest.TestCase):
         self.assertEqual(1, stats.sorted_violation_files)
         self.assertEqual(1, stats.sorted_auto_repaired_files)
 
-        payload = qcs.read_csv_payload(target, preferred_encoding="gb18030")
+        payload = read_csv_payload(target, preferred_encoding="gb18030")
         self.assertGreaterEqual(len(payload.rows), 2)
         self.assertLessEqual(payload.rows[0][0], payload.rows[1][0])
 
@@ -67,7 +70,7 @@ class SortRepairTests(unittest.TestCase):
         )
         before = target.read_text(encoding="gb18030")
 
-        stats, error_count = qcs.repair_sort_product_files(
+        stats, error_count = repair_sort_product_files(
             product="stock-notices-title",
             data_root=self.root,
             dry_run=True,
@@ -90,21 +93,21 @@ class SortRepairTests(unittest.TestCase):
             ],
         )
 
-        stats, reason_code = qcs.sync_known_product(
+        stats, reason_code = sync_known_product(
             product="stock-notices-title",
             extract_path=extract_root,
             data_root=self.root,
             dry_run=False,
         )
 
-        self.assertEqual(qcs.REASON_OK, reason_code)
+        self.assertEqual(REASON_OK, reason_code)
         self.assertEqual(1, stats.created_files)
         # merge_payload 已排序后设 pre_sorted=True，跳过冗余校验
         self.assertEqual(0, stats.sorted_checked_files)
         self.assertEqual(0, stats.sorted_violation_files)
 
         target = self.root / "stock-notices-title" / "2026-02-12.csv"
-        payload = qcs.read_csv_payload(target, preferred_encoding="gb18030")
+        payload = read_csv_payload(target, preferred_encoding="gb18030")
         self.assertGreaterEqual(len(payload.rows), 2)
         self.assertLessEqual(payload.rows[0][0], payload.rows[1][0])
 

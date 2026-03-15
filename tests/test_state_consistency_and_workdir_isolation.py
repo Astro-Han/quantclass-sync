@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import quantclass_sync as qcs
+
 from quantclass_sync_internal.constants import REASON_OK, STRATEGY_MERGE_KNOWN, TIMESTAMP_FILE_NAME
 from quantclass_sync_internal.models import CommandContext, ProductPlan, SyncStats
 from quantclass_sync_internal import orchestrator
@@ -47,7 +47,7 @@ class StateConsistencyAndWorkdirIsolationTests(unittest.TestCase):
             return plan.name, date_time or "", SyncStats(updated_files=1), "/tmp/src", REASON_OK
 
         with patch("quantclass_sync_internal.orchestrator.process_product", side_effect=fake_process_product), patch(
-            "quantclass_sync.process_product",
+            "quantclass_sync_internal.orchestrator.process_product",
             side_effect=fake_process_product,
         ), patch(
             "quantclass_sync_internal.orchestrator._upsert_product_status_after_success",

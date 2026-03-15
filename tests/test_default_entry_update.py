@@ -1,3 +1,4 @@
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -5,7 +6,7 @@ from unittest import mock
 
 import typer
 
-import quantclass_sync as qcs
+from quantclass_sync_internal.cli import cmd_setup, cmd_update, global_options
 
 
 class _FakeContext:
@@ -25,7 +26,7 @@ class _FakeContext:
 
 class DefaultEntryUpdateTests(unittest.TestCase):
     def _call_global_options(self, ctx: _FakeContext, config_file: Path, dry_run: bool = False, verbose: bool = False) -> None:
-        qcs.global_options(
+        global_options(
             ctx=ctx,
             data_root=None,
             api_key="",
@@ -50,7 +51,7 @@ class DefaultEntryUpdateTests(unittest.TestCase):
             self.assertEqual(0, cm.exception.exit_code)
             self.assertEqual(1, len(ctx.invocations))
             func, kwargs = ctx.invocations[0]
-            self.assertEqual(qcs.cmd_update, func)
+            self.assertEqual(cmd_update, func)
             self.assertIs(kwargs.get("ctx"), ctx)
 
     def test_no_subcommand_with_config_passes_global_flags_to_update(self) -> None:
@@ -72,14 +73,14 @@ class DefaultEntryUpdateTests(unittest.TestCase):
             config_file = Path(tmpdir) / "missing.json"
             ctx = _FakeContext()
 
-            with mock.patch.object(qcs.sys.stdin, "isatty", return_value=True):
+            with mock.patch.object(sys.stdin, "isatty", return_value=True):
                 with self.assertRaises(typer.Exit) as cm:
                     self._call_global_options(ctx=ctx, config_file=config_file)
 
             self.assertEqual(0, cm.exception.exit_code)
             self.assertEqual(1, len(ctx.invocations))
             func, kwargs = ctx.invocations[0]
-            self.assertEqual(qcs.cmd_setup, func)
+            self.assertEqual(cmd_setup, func)
             self.assertIs(kwargs.get("ctx"), ctx)
 
 

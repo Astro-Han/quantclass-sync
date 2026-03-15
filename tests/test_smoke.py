@@ -332,19 +332,6 @@ class TestS3ImportChain(unittest.TestCase):
     """S3: 模块导入链测试（浅导入，不实例化对象）。"""
 
     # ------------------------------------------------------------------
-    # S3.1: quantclass_sync 顶层入口
-    # ------------------------------------------------------------------
-
-    def test_s3_1_quantclass_sync_importable(self):
-        """S3.1: import quantclass_sync 不抛异常，__all__ 中的符号均可访问。"""
-        import quantclass_sync
-        for name in quantclass_sync.__all__:
-            self.assertTrue(
-                hasattr(quantclass_sync, name),
-                f"quantclass_sync.__all__ 中的 {name} 不可访问",
-            )
-
-    # ------------------------------------------------------------------
     # S3.2: quantclass_sync_internal 所有子模块
     # ------------------------------------------------------------------
 

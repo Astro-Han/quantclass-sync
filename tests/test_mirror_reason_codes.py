@@ -2,7 +2,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import quantclass_sync as qcs
+from quantclass_sync_internal.constants import REASON_MERGE_ERROR, REASON_OK
+from quantclass_sync_internal.csv_engine import read_csv_payload
+from quantclass_sync_internal.file_sync import sync_known_product
 from quantclass_sync_internal.constants import (
     REASON_MIRROR_FALLBACK,
     REASON_MIRROR_UNKNOWN,
@@ -48,14 +50,14 @@ class MirrorReasonCodeTests(unittest.TestCase):
             # 无法映射路径 -> mirror_fallback
             _write_simple_csv(extract_root / "unmapped.csv", ["a,b", "1,2"])
 
-            _stats, reason_code = qcs.sync_known_product(
+            _stats, reason_code = sync_known_product(
                 product="stock-trading-data",
                 extract_path=extract_root,
                 data_root=data_root,
                 dry_run=False,
             )
 
-            self.assertEqual(qcs.REASON_MERGE_ERROR, reason_code)
+            self.assertEqual(REASON_MERGE_ERROR, reason_code)
 
     def test_known_product_all_skipped_returns_no_valid_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -67,7 +69,7 @@ class MirrorReasonCodeTests(unittest.TestCase):
 
             _write_simple_csv(extract_root / "not_a_symbol.csv", ["a,b", "1,2"])
 
-            _stats, reason_code = qcs.sync_known_product(
+            _stats, reason_code = sync_known_product(
                 product="stock-main-index-data",
                 extract_path=extract_root,
                 data_root=data_root,
@@ -87,7 +89,7 @@ class MirrorReasonCodeTests(unittest.TestCase):
             _write_period_offset_csv(extract_root / "period_offset.csv")
             (extract_root / "period_offset.ts").write_text("period_offset_ts_payload\n", encoding="utf-8")
 
-            stats, reason_code = qcs.sync_known_product(
+            stats, reason_code = sync_known_product(
                 product="period_offset",
                 extract_path=extract_root,
                 data_root=data_root,
@@ -95,7 +97,7 @@ class MirrorReasonCodeTests(unittest.TestCase):
             )
 
             self.assertNotEqual(REASON_MIRROR_FALLBACK, reason_code)
-            self.assertEqual(qcs.REASON_OK, reason_code)
+            self.assertEqual(REASON_OK, reason_code)
             self.assertGreaterEqual(stats.created_files, 1)
 
     def test_unknown_product_mirror_returns_mirror_unknown(self) -> None:
@@ -158,7 +160,7 @@ class MirrorReasonCodeTests(unittest.TestCase):
             )
 
             self.assertEqual(REASON_UNKNOWN_HEADER_MERGE, reason_code)
-            payload = qcs.read_csv_payload(data_root / product / "sample.csv")
+            payload = read_csv_payload(data_root / product / "sample.csv")
             self.assertEqual(2, len(payload.rows))
             self.assertEqual(["1", "2"], payload.rows[0])
             self.assertEqual(["2", "3"], payload.rows[1])

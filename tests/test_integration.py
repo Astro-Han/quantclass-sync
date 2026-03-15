@@ -175,7 +175,6 @@ class TestSyncMainChain(unittest.TestCase):
         save_file_mock = make_save_file_mock(date_to_content)
 
         with (
-            patch("quantclass_sync._bind_orchestrator_runtime"),
             patch("quantclass_sync_internal.orchestrator.build_headers_or_raise",
                   return_value=({"api-key": "fake"}, "fake-hid")),
             patch("quantclass_sync_internal.orchestrator.get_latest_times",
@@ -327,7 +326,6 @@ class TestSyncMainChain(unittest.TestCase):
 
         report = _new_report("test-integ-001", mode="network")
         with (
-            patch("quantclass_sync._bind_orchestrator_runtime"),
             patch("quantclass_sync_internal.orchestrator.build_headers_or_raise",
                   return_value=({"api-key": "fake"}, "fake-hid")),
             patch("quantclass_sync_internal.orchestrator.get_latest_times",
@@ -391,7 +389,6 @@ class TestSyncMainChain(unittest.TestCase):
 
         report = _new_report("test-integ-001", mode="network")
         with (
-            patch("quantclass_sync._bind_orchestrator_runtime"),
             patch("quantclass_sync_internal.orchestrator.build_headers_or_raise",
                   return_value=({"api-key": "fake"}, "fake-hid")),
             patch("quantclass_sync_internal.orchestrator.get_latest_times",
@@ -663,7 +660,6 @@ class TestStateConsistency(unittest.TestCase):
         save_file_mock = make_save_file_mock({"2026-03-10": CSV_2026_03_10})
 
         with (
-            patch("quantclass_sync._bind_orchestrator_runtime"),
             patch("quantclass_sync_internal.orchestrator.build_headers_or_raise",
                   return_value=({"api-key": "fake"}, "fake-hid")),
             patch("quantclass_sync_internal.orchestrator.get_latest_times",
@@ -711,7 +707,6 @@ class TestStateConsistency(unittest.TestCase):
 
         # mock write_local_timestamp 抛 RuntimeError
         with (
-            patch("quantclass_sync._bind_orchestrator_runtime"),
             patch("quantclass_sync_internal.orchestrator.build_headers_or_raise",
                   return_value=({"api-key": "fake"}, "fake-hid")),
             patch("quantclass_sync_internal.orchestrator.get_latest_times",

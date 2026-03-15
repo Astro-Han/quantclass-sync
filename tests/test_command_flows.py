@@ -9,14 +9,18 @@ from unittest.mock import patch
 
 import typer
 
-import quantclass_sync as qcs
+from quantclass_sync_internal.cli import app, cmd_all_data, cmd_init, cmd_one_data, cmd_repair_sort, cmd_setup, cmd_update, global_options
+from quantclass_sync_internal.config import load_user_config_or_raise, save_user_config_atomic, save_user_secrets_atomic
+from quantclass_sync_internal.constants import DEFAULT_CATALOG_FILE, EXIT_CODE_NO_EXECUTABLE_PRODUCTS, PRODUCT_MODE_LOCAL_SCAN
+from quantclass_sync_internal.models import CommandContext, SyncStats, UserConfig
+from quantclass_sync_internal.orchestrator import run_update_with_settings
 from quantclass_sync_internal import cli as cli_module
 from quantclass_sync_internal import config as config_module
 from quantclass_sync_internal import models as models_module
 
 
 class _DummyTyperContext:
-    def __init__(self, obj: qcs.CommandContext) -> None:
+    def __init__(self, obj: CommandContext) -> None:
         self.obj = obj
 
 
@@ -62,8 +66,8 @@ class CommandFlowTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def _base_ctx(self) -> qcs.CommandContext:
-        return qcs.CommandContext(
+    def _base_ctx(self) -> CommandContext:
+        return CommandContext(
             run_id="test-command-flow",
             data_root=self.data_root,
             data_root_from_cli=True,
@@ -75,35 +79,35 @@ class CommandFlowTests(unittest.TestCase):
             dry_run=True,
             verbose=False,
             work_dir=self.work_dir,
-            catalog_file=qcs.DEFAULT_CATALOG_FILE.resolve(),
+            catalog_file=DEFAULT_CATALOG_FILE.resolve(),
         )
 
-    def _write_user_config(self, product_mode: str = qcs.PRODUCT_MODE_LOCAL_SCAN) -> None:
-        cfg = qcs.UserConfig(
+    def _write_user_config(self, product_mode: str = PRODUCT_MODE_LOCAL_SCAN) -> None:
+        cfg = UserConfig(
             data_root=self.data_root,
             product_mode=product_mode,
             default_products=["stock-trading-data"],
             secrets_file=self.secrets_file,
         )
-        qcs.save_user_config_atomic(self.config_file, cfg)
+        save_user_config_atomic(self.config_file, cfg)
 
     def test_cmd_setup_non_interactive_success(self) -> None:
         ctx = _DummyTyperContext(self._base_ctx())
-        qcs.cmd_setup(
+        cmd_setup(
             ctx=ctx,
             non_interactive=True,
             skip_check=True,
             data_root=str(self.data_root),
             api_key="api_key_x",
             hid="hid_x",
-            product_mode=qcs.PRODUCT_MODE_LOCAL_SCAN,
+            product_mode=PRODUCT_MODE_LOCAL_SCAN,
             products=[],
         )
         self.assertTrue(self.config_file.exists())
         self.assertTrue(self.secrets_file.exists())
-        config = qcs.load_user_config_or_raise(self.config_file)
+        config = load_user_config_or_raise(self.config_file)
         self.assertEqual(self.data_root.resolve(), config.data_root.resolve())
-        self.assertEqual(qcs.PRODUCT_MODE_LOCAL_SCAN, config.product_mode)
+        self.assertEqual(PRODUCT_MODE_LOCAL_SCAN, config.product_mode)
         self.assertEqual([], config.default_products)
         self.assertEqual(self.secrets_file.resolve(), config.secrets_file.resolve())
         secrets_text = self.secrets_file.read_text(encoding="utf-8")
@@ -114,14 +118,14 @@ class CommandFlowTests(unittest.TestCase):
     def test_cmd_setup_non_interactive_missing_hid_exits(self) -> None:
         ctx = _DummyTyperContext(self._base_ctx())
         with self.assertRaises(typer.Exit) as cm:
-            qcs.cmd_setup(
+            cmd_setup(
                 ctx=ctx,
                 non_interactive=True,
                 skip_check=True,
                 data_root=str(self.data_root),
                 api_key="api_key_x",
                 hid="",
-                product_mode=qcs.PRODUCT_MODE_LOCAL_SCAN,
+                product_mode=PRODUCT_MODE_LOCAL_SCAN,
                 products=[],
             )
         self.assertEqual(1, cm.exception.exit_code)
@@ -131,21 +135,21 @@ class CommandFlowTests(unittest.TestCase):
         self.assertFalse(missing_root.exists())
         ctx = _DummyTyperContext(self._base_ctx())
         with self.assertRaises(typer.Exit):
-            qcs.cmd_setup(
+            cmd_setup(
                 ctx=ctx,
                 non_interactive=True,
                 skip_check=True,
                 data_root=str(missing_root),
                 api_key="api_key_x",
                 hid="",
-                product_mode=qcs.PRODUCT_MODE_LOCAL_SCAN,
+                product_mode=PRODUCT_MODE_LOCAL_SCAN,
                 products=[],
             )
         self.assertFalse(missing_root.exists())
 
     def test_save_user_secrets_atomic_creates_temp_with_mode_600(self) -> None:
         with patch("quantclass_sync_internal.config.os.open", wraps=os.open) as open_mock:
-            qcs.save_user_secrets_atomic(self.secrets_file, api_key="k", hid="h")
+            save_user_secrets_atomic(self.secrets_file, api_key="k", hid="h")
 
         open_modes = [call.args[2] for call in open_mock.call_args_list if len(call.args) >= 3]
         self.assertIn(0o600, open_modes)
@@ -154,7 +158,7 @@ class CommandFlowTests(unittest.TestCase):
     def test_save_user_secrets_atomic_chmod_failure_raises(self) -> None:
         with patch("quantclass_sync_internal.config.os.chmod", side_effect=PermissionError("chmod denied")):
             with self.assertRaises(PermissionError):
-                qcs.save_user_secrets_atomic(self.secrets_file, api_key="k", hid="h")
+                save_user_secrets_atomic(self.secrets_file, api_key="k", hid="h")
 
     def test_save_setup_artifacts_atomic_rollback_chmod_failure_bubbles_up(self) -> None:
         config_path = self.root / "existing_config.json"
@@ -164,9 +168,9 @@ class CommandFlowTests(unittest.TestCase):
         os.chmod(config_path, 0o600)
         os.chmod(secrets_path, 0o600)
 
-        user_config = qcs.UserConfig(
+        user_config = UserConfig(
             data_root=self.data_root,
-            product_mode=qcs.PRODUCT_MODE_LOCAL_SCAN,
+            product_mode=PRODUCT_MODE_LOCAL_SCAN,
             default_products=[],
             secrets_file=secrets_path,
         )
@@ -195,14 +199,14 @@ class CommandFlowTests(unittest.TestCase):
 
     def test_cmd_update_success_calls_run_update_with_settings(self) -> None:
         self._write_user_config()
-        qcs.save_user_secrets_atomic(self.secrets_file, api_key="k", hid="h")
+        save_user_secrets_atomic(self.secrets_file, api_key="k", hid="h")
         ctx = _DummyTyperContext(self._base_ctx())
 
         with patch(
-            "quantclass_sync.resolve_credentials_for_update",
+            "quantclass_sync_internal.cli.resolve_credentials_for_update",
             return_value=("k", "h", "setup_secrets"),
-        ), patch("quantclass_sync.run_update_with_settings", return_value=0) as run_mock:
-            qcs.cmd_update(
+        ), patch("quantclass_sync_internal.cli.run_update_with_settings", return_value=0) as run_mock:
+            cmd_update(
                 ctx=ctx,
                 dry_run=False,
                 verbose=False,
@@ -214,15 +218,15 @@ class CommandFlowTests(unittest.TestCase):
 
     def test_cmd_update_nonzero_exit_code_bubbles_up(self) -> None:
         self._write_user_config()
-        qcs.save_user_secrets_atomic(self.secrets_file, api_key="k", hid="h")
+        save_user_secrets_atomic(self.secrets_file, api_key="k", hid="h")
         ctx = _DummyTyperContext(self._base_ctx())
 
         with patch(
-            "quantclass_sync.resolve_credentials_for_update",
+            "quantclass_sync_internal.cli.resolve_credentials_for_update",
             return_value=("k", "h", "setup_secrets"),
-        ), patch("quantclass_sync.run_update_with_settings", return_value=2):
+        ), patch("quantclass_sync_internal.cli.run_update_with_settings", return_value=2):
             with self.assertRaises(typer.Exit) as cm:
-                qcs.cmd_update(
+                cmd_update(
                     ctx=ctx,
                     dry_run=False,
                     verbose=False,
@@ -244,10 +248,10 @@ class CommandFlowTests(unittest.TestCase):
         )
 
         with patch("quantclass_sync_internal.cli.load_user_secrets_or_raise") as secrets_guard, patch(
-            "quantclass_sync.run_update_with_settings",
+            "quantclass_sync_internal.cli.run_update_with_settings",
             return_value=0,
         ) as run_mock:
-            qcs.cmd_update(
+            cmd_update(
                 ctx=ctx,
                 dry_run=False,
                 verbose=False,
@@ -271,10 +275,10 @@ class CommandFlowTests(unittest.TestCase):
             {"QUANTCLASS_API_KEY": "env_api_key", "QUANTCLASS_HID": "env_hid"},
             clear=False,
         ), patch("quantclass_sync_internal.cli.load_user_secrets_or_raise") as secrets_guard, patch(
-            "quantclass_sync.run_update_with_settings",
+            "quantclass_sync_internal.cli.run_update_with_settings",
             return_value=0,
         ) as run_mock:
-            qcs.cmd_update(
+            cmd_update(
                 ctx=ctx,
                 dry_run=False,
                 verbose=False,
@@ -299,10 +303,10 @@ class CommandFlowTests(unittest.TestCase):
             {"QUANTCLASS_API_KEY": "", "QUANTCLASS_HID": "env_hid"},
             clear=False,
         ), patch("quantclass_sync_internal.cli.load_user_secrets_or_raise") as secrets_guard, patch(
-            "quantclass_sync.run_update_with_settings",
+            "quantclass_sync_internal.cli.run_update_with_settings",
             return_value=0,
         ) as run_mock:
-            qcs.cmd_update(
+            cmd_update(
                 ctx=ctx,
                 dry_run=False,
                 verbose=False,
@@ -325,9 +329,9 @@ class CommandFlowTests(unittest.TestCase):
             "os.environ",
             {"QUANTCLASS_API_KEY": "", "QUANTCLASS_HID": ""},
             clear=False,
-        ), patch("quantclass_sync.run_update_with_settings") as run_mock:
+        ), patch("quantclass_sync_internal.cli.run_update_with_settings") as run_mock:
             with self.assertRaises(typer.Exit) as cm:
-                qcs.cmd_update(
+                cmd_update(
                     ctx=ctx,
                     dry_run=False,
                     verbose=False,
@@ -347,8 +351,8 @@ class CommandFlowTests(unittest.TestCase):
             "os.environ",
             {"QUANTCLASS_API_KEY": "env_api_key", "QUANTCLASS_HID": "env_hid"},
             clear=False,
-        ), patch("quantclass_sync.run_update_with_settings", return_value=0) as run_mock:
-            qcs.cmd_update(
+        ), patch("quantclass_sync_internal.cli.run_update_with_settings", return_value=0) as run_mock:
+            cmd_update(
                 ctx=ctx,
                 dry_run=False,
                 verbose=None,
@@ -369,8 +373,8 @@ class CommandFlowTests(unittest.TestCase):
             "os.environ",
             {"QUANTCLASS_API_KEY": "env_api_key", "QUANTCLASS_HID": "env_hid"},
             clear=False,
-        ), patch("quantclass_sync.run_update_with_settings", return_value=0) as run_mock:
-            qcs.cmd_update(
+        ), patch("quantclass_sync_internal.cli.run_update_with_settings", return_value=0) as run_mock:
+            cmd_update(
                 ctx=ctx,
                 dry_run=False,
                 verbose=False,
@@ -393,12 +397,12 @@ class CommandFlowTests(unittest.TestCase):
         expected_data_root.mkdir(parents=True, exist_ok=True)
         expected_secrets_file = (config_dir / relative_secrets_file).resolve()
         expected_secrets_file.parent.mkdir(parents=True, exist_ok=True)
-        qcs.save_user_secrets_atomic(expected_secrets_file, api_key="k", hid="h")
-        qcs.save_user_config_atomic(
+        save_user_secrets_atomic(expected_secrets_file, api_key="k", hid="h")
+        save_user_config_atomic(
             config_file,
-            qcs.UserConfig(
+            UserConfig(
                 data_root=relative_data_root,
-                product_mode=qcs.PRODUCT_MODE_LOCAL_SCAN,
+                product_mode=PRODUCT_MODE_LOCAL_SCAN,
                 default_products=["stock-trading-data"],
                 secrets_file=relative_secrets_file,
             ),
@@ -416,10 +420,10 @@ class CommandFlowTests(unittest.TestCase):
         )
 
         with patch(
-            "quantclass_sync.resolve_credentials_for_update",
+            "quantclass_sync_internal.cli.resolve_credentials_for_update",
             return_value=("k", "h", "setup_secrets"),
-        ) as resolve_mock, patch("quantclass_sync.run_update_with_settings", return_value=0) as run_mock:
-            qcs.cmd_update(
+        ) as resolve_mock, patch("quantclass_sync_internal.cli.run_update_with_settings", return_value=0) as run_mock:
+            cmd_update(
                 ctx=ctx,
                 dry_run=False,
                 verbose=False,
@@ -453,7 +457,7 @@ class CommandFlowTests(unittest.TestCase):
         models_module.LOGGER = models_module.ConsoleLogger(level="INFO", run_id="old-run-id")
 
         with self.assertRaises(typer.Exit):
-            qcs.global_options(
+            global_options(
                 ctx=ctx,
                 data_root=None,
                 api_key="",
@@ -480,7 +484,7 @@ class CommandFlowTests(unittest.TestCase):
                 "20260302-093000-111111-p999-aabbccdd",
                 "20260302-093000-222222-p999-eeff0011",
             ]
-            qcs.global_options(
+            global_options(
                 ctx=ctx1,
                 data_root=None,
                 api_key="",
@@ -492,7 +496,7 @@ class CommandFlowTests(unittest.TestCase):
                 stop_on_error=False,
                 verbose=False,
             )
-            qcs.global_options(
+            global_options(
                 ctx=ctx2,
                 data_root=None,
                 api_key="",
@@ -517,7 +521,7 @@ class CommandFlowTests(unittest.TestCase):
             "quantclass_sync_internal.cli.new_run_id",
             return_value="20260302-093000-123456-p999-deadbeef",
         ):
-            qcs.global_options(
+            global_options(
                 ctx=ctx,
                 data_root=None,
                 api_key="",
@@ -532,20 +536,12 @@ class CommandFlowTests(unittest.TestCase):
 
         self.assertTrue(ctx.obj.run_id.endswith("-deadbeef"))
 
-    def test_bind_orchestrator_runtime_rebinds_after_external_override(self) -> None:
-        qcs._bind_orchestrator_runtime(probe_callable=qcs._probe_downloadable_dates)
-        qcs._orchestrator.get_latest_times = lambda *args, **kwargs: []
-
-        qcs._bind_orchestrator_runtime(probe_callable=qcs._probe_downloadable_dates)
-
-        self.assertIs(qcs.get_latest_times, qcs._orchestrator.get_latest_times)
-
     def test_run_update_with_all_invalid_explicit_products_keeps_report_consistent(self) -> None:
         report_path = self.root / "run_report_invalid_explicit.json"
         ctx = self._base_ctx().model_copy(update={"dry_run": True})
 
-        with patch("quantclass_sync.resolve_report_path", return_value=report_path), patch(
-            "quantclass_sync.load_catalog_or_raise",
+        with patch("quantclass_sync_internal.orchestrator.resolve_report_path", return_value=report_path), patch(
+            "quantclass_sync_internal.orchestrator.load_catalog_or_raise",
             return_value=["stock-trading-data"],
         ), patch(
             "quantclass_sync_internal.orchestrator.discover_local_products",
@@ -554,7 +550,7 @@ class CommandFlowTests(unittest.TestCase):
             "quantclass_sync_internal.orchestrator.resolve_products_by_mode",
             return_value=([], [], ["bad-product"]),
         ):
-            exit_code = qcs.run_update_with_settings(
+            exit_code = run_update_with_settings(
                 command_ctx=ctx,
                 mode="local",
                 products=["bad-product"],
@@ -562,7 +558,7 @@ class CommandFlowTests(unittest.TestCase):
                 command_name="update",
             )
 
-        self.assertEqual(qcs.EXIT_CODE_NO_EXECUTABLE_PRODUCTS, exit_code)
+        self.assertEqual(EXIT_CODE_NO_EXECUTABLE_PRODUCTS, exit_code)
         payload = json.loads(report_path.read_text(encoding="utf-8"))
         self.assertEqual(0, payload["failed_total"])
         self.assertEqual(1, payload["skipped_total"])
@@ -571,34 +567,34 @@ class CommandFlowTests(unittest.TestCase):
 
     def test_cmd_repair_sort_success(self) -> None:
         ctx = _DummyTyperContext(self._base_ctx())
-        with patch("quantclass_sync.resolve_report_path", return_value=self.report_path), patch(
-            "quantclass_sync.sortable_products",
+        with patch("quantclass_sync_internal.cli.resolve_report_path", return_value=self.report_path), patch(
+            "quantclass_sync_internal.cli.sortable_products",
             return_value=["stock-trading-data"],
         ), patch(
-            "quantclass_sync.repair_sort_product_files",
-            return_value=(qcs.SyncStats(updated_files=1), 0),
+            "quantclass_sync_internal.cli.repair_sort_product_files",
+            return_value=(SyncStats(updated_files=1), 0),
         ):
-            qcs.cmd_repair_sort(ctx=ctx, products=[], strict=False)
+            cmd_repair_sort(ctx=ctx, products=[], strict=False)
 
         self.assertTrue(self.report_path.exists())
 
     def test_cmd_repair_sort_strict_error_exits(self) -> None:
         ctx = _DummyTyperContext(self._base_ctx())
-        with patch("quantclass_sync.resolve_report_path", return_value=self.report_path), patch(
-            "quantclass_sync.sortable_products",
+        with patch("quantclass_sync_internal.cli.resolve_report_path", return_value=self.report_path), patch(
+            "quantclass_sync_internal.cli.sortable_products",
             return_value=["stock-trading-data"],
         ), patch(
-            "quantclass_sync.repair_sort_product_files",
+            "quantclass_sync_internal.cli.repair_sort_product_files",
             side_effect=RuntimeError("repair failed"),
         ):
             with self.assertRaises(typer.Exit) as cm:
-                qcs.cmd_repair_sort(ctx=ctx, products=[], strict=True)
+                cmd_repair_sort(ctx=ctx, products=[], strict=True)
         self.assertEqual(1, cm.exception.exit_code)
 
     def test_repair_sort_command_registers_hyphen_alias(self) -> None:
         commands = {
             cmd.name: cmd.callback
-            for cmd in qcs.app.registered_commands
+            for cmd in app.registered_commands
             if cmd.name in {"repair_sort", "repair-sort"}
         }
         self.assertIn("repair_sort", commands)
@@ -607,11 +603,11 @@ class CommandFlowTests(unittest.TestCase):
 
     def test_cmd_init_dry_run_executes_without_name_error(self) -> None:
         ctx = _DummyTyperContext(self._base_ctx())
-        with patch("quantclass_sync.load_catalog_or_raise", return_value=["stock-trading-data"]), patch(
+        with patch("quantclass_sync_internal.cli.load_catalog_or_raise", return_value=["stock-trading-data"]), patch(
             "quantclass_sync_internal.cli.discover_local_products",
             return_value=[],
         ):
-            qcs.cmd_init(ctx=ctx)
+            cmd_init(ctx=ctx)
 
     def test_cmd_init_writes_with_single_commit(self) -> None:
         ctx = _DummyTyperContext(self._base_ctx().model_copy(update={"dry_run": False}))
@@ -624,7 +620,7 @@ class CommandFlowTests(unittest.TestCase):
             finally:
                 conn.close()
 
-        with patch("quantclass_sync.load_catalog_or_raise", return_value=["p1", "p2"]), patch(
+        with patch("quantclass_sync_internal.cli.load_catalog_or_raise", return_value=["p1", "p2"]), patch(
             "quantclass_sync_internal.cli.discover_local_products",
             return_value=[],
         ), patch(
@@ -638,7 +634,7 @@ class CommandFlowTests(unittest.TestCase):
         ), patch(
             "quantclass_sync_internal.cli.upsert_product_status",
         ) as upsert_mock:
-            qcs.cmd_init(ctx=ctx)
+            cmd_init(ctx=ctx)
 
         self.assertEqual(2, upsert_mock.call_count)
         for call in upsert_mock.call_args_list:
@@ -649,11 +645,11 @@ class CommandFlowTests(unittest.TestCase):
     def test_cmd_one_data_executes_single_plan(self) -> None:
         ctx = _DummyTyperContext(self._base_ctx())
         started_at = 1234567890.0
-        with patch("quantclass_sync.resolve_report_path", return_value=self.report_path), patch(
+        with patch("quantclass_sync_internal.cli.resolve_report_path", return_value=self.report_path), patch(
             "quantclass_sync_internal.cli._execute_plans",
-            return_value=(qcs.SyncStats(), False, started_at),
+            return_value=(SyncStats(), False, started_at),
         ) as execute_mock:
-            qcs.cmd_one_data(
+            cmd_one_data(
                 ctx=ctx,
                 product="stock-trading-data",
                 date_time="",
@@ -669,7 +665,7 @@ class CommandFlowTests(unittest.TestCase):
     def test_cmd_all_data_invalid_mode_raises_bad_parameter(self) -> None:
         ctx = _DummyTyperContext(self._base_ctx())
         with self.assertRaises(typer.BadParameter):
-            qcs.cmd_all_data(ctx=ctx, mode="bad-mode", products=[], force_update=False)
+            cmd_all_data(ctx=ctx, mode="bad-mode", products=[], force_update=False)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import quantclass_sync as qcs
+from quantclass_sync_internal.config import build_product_plan
+from quantclass_sync_internal.constants import REASON_MERGE_ERROR, REASON_OK, STRATEGY_MERGE_KNOWN
+from quantclass_sync_internal.csv_engine import read_csv_payload
+from quantclass_sync_internal.file_sync import sync_known_product
 
 
 COIN_CAP_NOTE = "数据由邢不行整理，对数据字段有疑问的，可以直接微信私信邢不行，微信号：xbx297,,,,,,,,,,,"
@@ -56,9 +59,9 @@ class CoinCapSyncTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_coin_cap_is_known_merge_rule(self) -> None:
-        plans = qcs.build_product_plan(["coin-cap"])
+        plans = build_product_plan(["coin-cap"])
         self.assertEqual(1, len(plans))
-        self.assertEqual(qcs.STRATEGY_MERGE_KNOWN, plans[0].strategy)
+        self.assertEqual(STRATEGY_MERGE_KNOWN, plans[0].strategy)
 
     def test_coin_cap_daily_filter_keeps_same_day_and_splits_by_symbol(self) -> None:
         src = self.root / "extract" / "coin-cap-daily" / "2026-02-28.csv"
@@ -72,18 +75,18 @@ class CoinCapSyncTests(unittest.TestCase):
             ],
         )
 
-        stats, reason_code = qcs.sync_known_product(
+        stats, reason_code = sync_known_product(
             product="coin-cap",
             extract_path=self.root / "extract",
             data_root=self.root / "data",
             dry_run=False,
         )
 
-        self.assertEqual(qcs.REASON_OK, reason_code)
+        self.assertEqual(REASON_OK, reason_code)
         self.assertEqual(2, stats.created_files)
         self.assertEqual(0, stats.updated_files)
 
-        btc_payload = qcs.read_csv_payload(
+        btc_payload = read_csv_payload(
             self.root / "data" / "coin-cap" / "BTC-USDT.csv",
             preferred_encoding="gb18030",
         )
@@ -91,7 +94,7 @@ class CoinCapSyncTests(unittest.TestCase):
         self.assertEqual("2026-02-28", btc_payload.rows[0][0])
         self.assertEqual("11", btc_payload.rows[0][8])
 
-        eth_payload = qcs.read_csv_payload(
+        eth_payload = read_csv_payload(
             self.root / "data" / "coin-cap" / "ETH-USDT.csv",
             preferred_encoding="gb18030",
         )
@@ -121,14 +124,14 @@ class CoinCapSyncTests(unittest.TestCase):
             ],
         )
 
-        stats, reason_code = qcs.sync_known_product(
+        stats, reason_code = sync_known_product(
             product="coin-cap",
             extract_path=self.root / "extract",
             data_root=self.root / "data",
             dry_run=False,
         )
 
-        self.assertEqual(qcs.REASON_MERGE_ERROR, reason_code)
+        self.assertEqual(REASON_MERGE_ERROR, reason_code)
         self.assertEqual(1, stats.skipped_files)
         self.assertFalse((self.root / "data" / "coin-cap").exists())
 
@@ -142,14 +145,14 @@ class CoinCapSyncTests(unittest.TestCase):
             ],
         )
 
-        stats, reason_code = qcs.sync_known_product(
+        stats, reason_code = sync_known_product(
             product="coin-cap",
             extract_path=self.root / "extract",
             data_root=self.root / "data",
             dry_run=False,
         )
 
-        self.assertEqual(qcs.REASON_MERGE_ERROR, reason_code)
+        self.assertEqual(REASON_MERGE_ERROR, reason_code)
         self.assertEqual(1, stats.skipped_files)
         self.assertFalse((self.root / "data" / "coin-cap").exists())
 
@@ -165,18 +168,18 @@ class CoinCapSyncTests(unittest.TestCase):
             rows=[_coin_cap_row("2026-02-28", "BTC-USDT", 1, "Bitcoin", "12")],
         )
 
-        stats, reason_code = qcs.sync_known_product(
+        stats, reason_code = sync_known_product(
             product="coin-cap",
             extract_path=self.root / "extract",
             data_root=self.root / "data",
             dry_run=False,
         )
 
-        self.assertEqual(qcs.REASON_OK, reason_code)
+        self.assertEqual(REASON_OK, reason_code)
         self.assertEqual(0, stats.created_files)
         self.assertEqual(1, stats.updated_files)
 
-        payload = qcs.read_csv_payload(existing, preferred_encoding="gb18030")
+        payload = read_csv_payload(existing, preferred_encoding="gb18030")
         self.assertEqual(1, len(payload.rows))
         self.assertEqual("12", payload.rows[0][8])
 
@@ -191,16 +194,16 @@ class CoinCapSyncTests(unittest.TestCase):
             ],
         )
 
-        stats, reason_code = qcs.sync_known_product(
+        stats, reason_code = sync_known_product(
             product="coin-cap",
             extract_path=self.root / "extract",
             data_root=self.root / "data",
             dry_run=False,
         )
 
-        self.assertEqual(qcs.REASON_OK, reason_code)
+        self.assertEqual(REASON_OK, reason_code)
         self.assertEqual(1, stats.created_files)
-        payload = qcs.read_csv_payload(
+        payload = read_csv_payload(
             self.root / "data" / "coin-cap" / "BTC-USDT.csv",
             preferred_encoding="gb18030",
         )

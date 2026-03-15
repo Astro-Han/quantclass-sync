@@ -4,7 +4,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import quantclass_sync as qcs
+from quantclass_sync_internal.config import build_product_plan
+from quantclass_sync_internal.constants import REASON_MERGE_ERROR, REASON_NO_DATA_FOR_DATE, REASON_NO_VALID_OUTPUT, REASON_OK, STRATEGY_MERGE_KNOWN, TIMESTAMP_FILE_NAME
+from quantclass_sync_internal.http_client import parse_latest_time_candidates
+from quantclass_sync_internal.models import CommandContext, EmptyDownloadLinkError, FatalRequestError, ProductPlan, ProductSyncError, RunReport, SyncStats
+from quantclass_sync_internal.orchestrator import _execute_plans, _resolve_requested_dates_for_plan
+from quantclass_sync_internal.reporting import _new_report
+from quantclass_sync_internal.status_store import connect_status_db
 
 
 class UpdateCatchUpTests(unittest.TestCase):
@@ -16,22 +22,22 @@ class UpdateCatchUpTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def _ctx(self, dry_run: bool = False, stop_on_error: bool = False) -> qcs.CommandContext:
-        return qcs.CommandContext(
+    def _ctx(self, dry_run: bool = False, stop_on_error: bool = False) -> CommandContext:
+        return CommandContext(
             run_id="test-catchup",
             data_root=self.root,
             dry_run=dry_run,
             stop_on_error=stop_on_error,
         )
 
-    def _report(self) -> qcs.RunReport:
-        return qcs._new_report("test-catchup", mode="network")
+    def _report(self) -> RunReport:
+        return _new_report("test-catchup", mode="network")
 
-    def _plan(self) -> list[qcs.ProductPlan]:
-        return qcs.build_product_plan([self.product])
+    def _plan(self) -> list[ProductPlan]:
+        return build_product_plan([self.product])
 
     def _write_local_timestamp(self, data_date: str) -> None:
-        path = self.root / self.product / qcs.TIMESTAMP_FILE_NAME
+        path = self.root / self.product / TIMESTAMP_FILE_NAME
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"{data_date},2026-02-11 10:00:00\n", encoding="utf-8")
 
@@ -39,7 +45,7 @@ class UpdateCatchUpTests(unittest.TestCase):
         raw = "2026-02-11, 2026-02-10 20260209 2026-02-10"
         self.assertEqual(
             ["2026-02-09", "2026-02-10", "2026-02-11"],
-            qcs.parse_latest_time_candidates(raw),
+            parse_latest_time_candidates(raw),
         )
 
     def test_resolve_catchup_dates_probes_when_latest_only_has_latest(self) -> None:
@@ -57,13 +63,13 @@ class UpdateCatchUpTests(unittest.TestCase):
         ) -> str:
             if date_time in {"2026-02-07", "2026-02-10", "2026-02-11"}:
                 return f"https://example.com/{product}/{date_time}.zip"
-            raise qcs.FatalRequestError("参数错误")
+            raise FatalRequestError("参数错误")
 
-        with patch("quantclass_sync.get_latest_times", return_value=["2026-02-11"]), patch(
-            "quantclass_sync.get_download_link",
+        with patch("quantclass_sync_internal.orchestrator.get_latest_times", return_value=["2026-02-11"]), patch(
+            "quantclass_sync_internal.orchestrator.get_download_link",
             side_effect=fake_get_download_link,
         ):
-            queue, skipped = qcs._resolve_requested_dates_for_plan(
+            queue, skipped = _resolve_requested_dates_for_plan(
                 plan=plan,
                 command_ctx=ctx,
                 hid="hid",
@@ -85,10 +91,10 @@ class UpdateCatchUpTests(unittest.TestCase):
         ctx = self._ctx(dry_run=True)
 
         with patch(
-            "quantclass_sync.get_latest_times",
+            "quantclass_sync_internal.orchestrator.get_latest_times",
             return_value=["2026-02-07", "2026-02-08", "2026-02-09", "2026-02-10", "2026-02-11"],
-        ), patch("quantclass_sync._probe_downloadable_dates") as probe_mock:
-            queue, skipped = qcs._resolve_requested_dates_for_plan(
+        ), patch("quantclass_sync_internal.orchestrator._probe_downloadable_dates") as probe_mock:
+            queue, skipped = _resolve_requested_dates_for_plan(
                 plan=plan,
                 command_ctx=ctx,
                 hid="hid",
@@ -110,11 +116,11 @@ class UpdateCatchUpTests(unittest.TestCase):
         report = self._report()
         ctx = self._ctx(dry_run=True)
 
-        with patch("quantclass_sync.get_latest_times", return_value=["2026-02-07", "2026-02-11"]), patch(
-            "quantclass_sync._probe_downloadable_dates",
+        with patch("quantclass_sync_internal.orchestrator.get_latest_times", return_value=["2026-02-07", "2026-02-11"]), patch(
+            "quantclass_sync_internal.orchestrator._probe_downloadable_dates",
             return_value=["2026-02-08", "2026-02-09", "2026-02-10"],
         ) as probe_mock:
-            queue, skipped = qcs._resolve_requested_dates_for_plan(
+            queue, skipped = _resolve_requested_dates_for_plan(
                 plan=plan,
                 command_ctx=ctx,
                 hid="hid",
@@ -143,11 +149,11 @@ class UpdateCatchUpTests(unittest.TestCase):
         report = self._report()
         ctx = self._ctx(dry_run=True)
 
-        with patch("quantclass_sync.get_latest_times", return_value=["2026-02-11"]), patch(
-            "quantclass_sync._probe_downloadable_dates",
+        with patch("quantclass_sync_internal.orchestrator.get_latest_times", return_value=["2026-02-11"]), patch(
+            "quantclass_sync_internal.orchestrator._probe_downloadable_dates",
             return_value=["2026-02-07", "2026-02-10", "2026-02-11"],
         ) as probe_mock:
-            queue, skipped = qcs._resolve_requested_dates_for_plan(
+            queue, skipped = _resolve_requested_dates_for_plan(
                 plan=plan,
                 command_ctx=ctx,
                 hid="hid",
@@ -177,10 +183,10 @@ class UpdateCatchUpTests(unittest.TestCase):
         ctx = self._ctx(dry_run=True)
 
         with patch(
-            "quantclass_sync.get_latest_times",
+            "quantclass_sync_internal.orchestrator.get_latest_times",
             return_value=["2026-02-11", "2026-02-10", "20260210", "2026-02-09"],
-        ), patch("quantclass_sync._probe_downloadable_dates") as probe_mock:
-            queue, skipped = qcs._resolve_requested_dates_for_plan(
+        ), patch("quantclass_sync_internal.orchestrator._probe_downloadable_dates") as probe_mock:
+            queue, skipped = _resolve_requested_dates_for_plan(
                 plan=plan,
                 command_ctx=ctx,
                 hid="hid",
@@ -198,18 +204,18 @@ class UpdateCatchUpTests(unittest.TestCase):
 
     def test_resolve_catchup_dates_non_business_product_keeps_weekend(self) -> None:
         product = "stock-fin-data-xbx"
-        path = self.root / product / qcs.TIMESTAMP_FILE_NAME
+        path = self.root / product / TIMESTAMP_FILE_NAME
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("2026-02-06,2026-02-11 10:00:00\n", encoding="utf-8")
-        plan = qcs.build_product_plan([product])[0]
+        plan = build_product_plan([product])[0]
         report = self._report()
         ctx = self._ctx(dry_run=True)
 
-        with patch("quantclass_sync.get_latest_times", return_value=["2026-02-11"]), patch(
-            "quantclass_sync._probe_downloadable_dates",
+        with patch("quantclass_sync_internal.orchestrator.get_latest_times", return_value=["2026-02-11"]), patch(
+            "quantclass_sync_internal.orchestrator._probe_downloadable_dates",
             return_value=["2026-02-07", "2026-02-10", "2026-02-11"],
         ) as probe_mock:
-            queue, skipped = qcs._resolve_requested_dates_for_plan(
+            queue, skipped = _resolve_requested_dates_for_plan(
                 plan=plan,
                 command_ctx=ctx,
                 hid="hid",
@@ -230,8 +236,8 @@ class UpdateCatchUpTests(unittest.TestCase):
         report = self._report()
         ctx = self._ctx(dry_run=True)
         # 2026-02-07 是周六；非 catch-up 模式应保持 latest 原语义，不在这里做周末裁剪。
-        with patch("quantclass_sync.get_latest_times", return_value=["2026-02-07"]):
-            queue, skipped = qcs._resolve_requested_dates_for_plan(
+        with patch("quantclass_sync_internal.orchestrator.get_latest_times", return_value=["2026-02-07"]):
+            queue, skipped = _resolve_requested_dates_for_plan(
                 plan=plan,
                 command_ctx=ctx,
                 hid="hid",
@@ -249,21 +255,21 @@ class UpdateCatchUpTests(unittest.TestCase):
     def test_empty_download_link_maps_to_no_data_reason(self) -> None:
         from quantclass_sync_internal.orchestrator import _raise_download_stage_error
 
-        with self.assertRaises(qcs.ProductSyncError) as cm:
-            _raise_download_stage_error("stock-trading-data", qcs.EmptyDownloadLinkError("empty"))
+        with self.assertRaises(ProductSyncError) as cm:
+            _raise_download_stage_error("stock-trading-data", EmptyDownloadLinkError("empty"))
 
-        self.assertEqual(qcs.REASON_NO_DATA_FOR_DATE, cm.exception.reason_code)
+        self.assertEqual(REASON_NO_DATA_FOR_DATE, cm.exception.reason_code)
 
     def test_resolve_catchup_dates_gate_error_falls_back_to_latest(self) -> None:
         plan = self._plan()[0]
         report = self._report()
         ctx = self._ctx(dry_run=True)
 
-        with patch("quantclass_sync.get_latest_times", return_value=["2026-02-11"]), patch(
+        with patch("quantclass_sync_internal.orchestrator.get_latest_times", return_value=["2026-02-11"]), patch(
             "quantclass_sync_internal.orchestrator.read_local_timestamp_date",
             side_effect=RuntimeError("broken timestamp"),
         ):
-            queue, skipped = qcs._resolve_requested_dates_for_plan(
+            queue, skipped = _resolve_requested_dates_for_plan(
                 plan=plan,
                 command_ctx=ctx,
                 hid="hid",
@@ -285,11 +291,11 @@ class UpdateCatchUpTests(unittest.TestCase):
         ctx = self._ctx(dry_run=True)
         latest_payload = ["2025-12-01", "2025-12-15", "2025-12-31"]
 
-        with patch("quantclass_sync.get_latest_times", return_value=latest_payload), patch(
-            "quantclass_sync._probe_downloadable_dates",
+        with patch("quantclass_sync_internal.orchestrator.get_latest_times", return_value=latest_payload), patch(
+            "quantclass_sync_internal.orchestrator._probe_downloadable_dates",
             return_value=["2025-12-02", "2025-12-16", "2025-12-30"],
         ) as probe_mock:
-            queue, skipped = qcs._resolve_requested_dates_for_plan(
+            queue, skipped = _resolve_requested_dates_for_plan(
                 plan=plan,
                 command_ctx=ctx,
                 hid="hid",
@@ -310,10 +316,10 @@ class UpdateCatchUpTests(unittest.TestCase):
         report = self._report()
         ctx = self._ctx(dry_run=False)
         plans = self._plan()
-        conn = qcs.connect_status_db(self.root)
+        conn = connect_status_db(self.root)
 
         def fake_process_product(
-            plan: qcs.ProductPlan,
+            plan: ProductPlan,
             date_time: str | None,
             api_base: str,
             hid: str,
@@ -323,20 +329,20 @@ class UpdateCatchUpTests(unittest.TestCase):
             dry_run: bool,
             run_id: str = "",
         ):
-            return plan.name, date_time or "", qcs.SyncStats(updated_files=1), "/tmp/src", qcs.REASON_OK
+            return plan.name, date_time or "", SyncStats(updated_files=1), "/tmp/src", REASON_OK
 
         try:
-            with patch("quantclass_sync.build_headers_or_raise", return_value=({"api-key": "k"}, "hid")), patch(
-                "quantclass_sync._resolve_requested_dates_for_plan",
+            with patch("quantclass_sync_internal.orchestrator.build_headers_or_raise", return_value=({"api-key": "k"}, "hid")), patch(
+                "quantclass_sync_internal.orchestrator._resolve_requested_dates_for_plan",
                 return_value=(["2026-02-09"], False),
             ), patch(
-                "quantclass_sync.process_product",
+                "quantclass_sync_internal.orchestrator.process_product",
                 side_effect=fake_process_product,
             ), patch(
                 "quantclass_sync_internal.orchestrator._upsert_product_status_after_success",
                 side_effect=RuntimeError("status write failed"),
             ):
-                total, has_error, _started_at = qcs._execute_plans(
+                total, has_error, _started_at = _execute_plans(
                     plans=plans,
                     command_ctx=ctx,
                     report=report,
@@ -351,7 +357,7 @@ class UpdateCatchUpTests(unittest.TestCase):
         self.assertFalse(has_error)
         self.assertEqual(1, total.updated_files)
         self.assertEqual(["ok"], [item.status for item in report.products])
-        ts_text = (self.root / self.product / qcs.TIMESTAMP_FILE_NAME).read_text(encoding="utf-8")
+        ts_text = (self.root / self.product / TIMESTAMP_FILE_NAME).read_text(encoding="utf-8")
         self.assertTrue(ts_text.startswith("2026-02-06,"))
 
     def test_execute_plans_no_valid_output_does_not_advance_timestamp(self) -> None:
@@ -359,10 +365,10 @@ class UpdateCatchUpTests(unittest.TestCase):
         report = self._report()
         ctx = self._ctx(dry_run=False)
         plans = self._plan()
-        conn = qcs.connect_status_db(self.root)
+        conn = connect_status_db(self.root)
 
         def fake_process_product(
-            plan: qcs.ProductPlan,
+            plan: ProductPlan,
             date_time: str | None,
             api_base: str,
             hid: str,
@@ -375,20 +381,20 @@ class UpdateCatchUpTests(unittest.TestCase):
             return (
                 plan.name,
                 date_time or "",
-                qcs.SyncStats(skipped_files=1),
+                SyncStats(skipped_files=1),
                 "/tmp/src",
-                qcs.REASON_NO_VALID_OUTPUT,
+                REASON_NO_VALID_OUTPUT,
             )
 
         try:
-            with patch("quantclass_sync.build_headers_or_raise", return_value=({"api-key": "k"}, "hid")), patch(
-                "quantclass_sync._resolve_requested_dates_for_plan",
+            with patch("quantclass_sync_internal.orchestrator.build_headers_or_raise", return_value=({"api-key": "k"}, "hid")), patch(
+                "quantclass_sync_internal.orchestrator._resolve_requested_dates_for_plan",
                 return_value=(["2026-02-09"], False),
             ), patch(
-                "quantclass_sync.process_product",
+                "quantclass_sync_internal.orchestrator.process_product",
                 side_effect=fake_process_product,
             ):
-                total, has_error, _started_at = qcs._execute_plans(
+                total, has_error, _started_at = _execute_plans(
                     plans=plans,
                     command_ctx=ctx,
                     report=report,
@@ -403,8 +409,8 @@ class UpdateCatchUpTests(unittest.TestCase):
         self.assertFalse(has_error)
         self.assertEqual(1, total.skipped_files)
         self.assertEqual(["skipped"], [item.status for item in report.products])
-        self.assertEqual(qcs.REASON_NO_VALID_OUTPUT, report.products[0].reason_code)
-        ts_text = (self.root / self.product / qcs.TIMESTAMP_FILE_NAME).read_text(encoding="utf-8")
+        self.assertEqual(REASON_NO_VALID_OUTPUT, report.products[0].reason_code)
+        ts_text = (self.root / self.product / TIMESTAMP_FILE_NAME).read_text(encoding="utf-8")
         self.assertTrue(ts_text.startswith("2026-02-06,"))
 
     def test_execute_plans_catchup_stops_on_first_hard_failure(self) -> None:
@@ -412,12 +418,12 @@ class UpdateCatchUpTests(unittest.TestCase):
         report = self._report()
         ctx = self._ctx(dry_run=False)
         plans = self._plan()
-        conn = qcs.connect_status_db(self.root)
+        conn = connect_status_db(self.root)
 
         executed_dates: list[str] = []
 
         def fake_process_product(
-            plan: qcs.ProductPlan,
+            plan: ProductPlan,
             date_time: str | None,
             api_base: str,
             hid: str,
@@ -430,15 +436,15 @@ class UpdateCatchUpTests(unittest.TestCase):
             date = date_time or ""
             executed_dates.append(date)
             if date == "2026-02-09":
-                raise qcs.ProductSyncError("simulated merge failure", qcs.REASON_MERGE_ERROR)
-            return plan.name, date, qcs.SyncStats(updated_files=1), "/tmp/src", qcs.REASON_OK
+                raise ProductSyncError("simulated merge failure", REASON_MERGE_ERROR)
+            return plan.name, date, SyncStats(updated_files=1), "/tmp/src", REASON_OK
 
         try:
-            with patch("quantclass_sync.build_headers_or_raise", return_value=({"api-key": "k"}, "hid")), patch(
-                "quantclass_sync._resolve_requested_dates_for_plan",
+            with patch("quantclass_sync_internal.orchestrator.build_headers_or_raise", return_value=({"api-key": "k"}, "hid")), patch(
+                "quantclass_sync_internal.orchestrator._resolve_requested_dates_for_plan",
                 return_value=(["2026-02-07", "2026-02-08", "2026-02-09", "2026-02-10"], False),
-            ), patch("quantclass_sync.process_product", side_effect=fake_process_product):
-                _total, has_error, _started_at = qcs._execute_plans(
+            ), patch("quantclass_sync_internal.orchestrator.process_product", side_effect=fake_process_product):
+                _total, has_error, _started_at = _execute_plans(
                     plans=plans,
                     command_ctx=ctx,
                     report=report,
@@ -453,7 +459,7 @@ class UpdateCatchUpTests(unittest.TestCase):
         self.assertTrue(has_error)
         self.assertEqual(["2026-02-07", "2026-02-08", "2026-02-09"], executed_dates)
         self.assertEqual(["ok", "ok", "error"], [item.status for item in report.products])
-        ts_text = (self.root / self.product / qcs.TIMESTAMP_FILE_NAME).read_text(encoding="utf-8")
+        ts_text = (self.root / self.product / TIMESTAMP_FILE_NAME).read_text(encoding="utf-8")
         self.assertTrue(ts_text.startswith("2026-02-08,"))
 
     def test_execute_plans_catchup_skips_no_data_date_and_continues(self) -> None:
@@ -461,12 +467,12 @@ class UpdateCatchUpTests(unittest.TestCase):
         report = self._report()
         ctx = self._ctx(dry_run=False)
         plans = self._plan()
-        conn = qcs.connect_status_db(self.root)
+        conn = connect_status_db(self.root)
 
         executed_dates: list[str] = []
 
         def fake_process_product(
-            plan: qcs.ProductPlan,
+            plan: ProductPlan,
             date_time: str | None,
             api_base: str,
             hid: str,
@@ -479,15 +485,15 @@ class UpdateCatchUpTests(unittest.TestCase):
             date = date_time or ""
             executed_dates.append(date)
             if date == "2026-02-09":
-                raise qcs.ProductSyncError("simulated 404 no data", qcs.REASON_NO_DATA_FOR_DATE)
-            return plan.name, date, qcs.SyncStats(updated_files=1), "/tmp/src", qcs.REASON_OK
+                raise ProductSyncError("simulated 404 no data", REASON_NO_DATA_FOR_DATE)
+            return plan.name, date, SyncStats(updated_files=1), "/tmp/src", REASON_OK
 
         try:
-            with patch("quantclass_sync.build_headers_or_raise", return_value=({"api-key": "k"}, "hid")), patch(
-                "quantclass_sync._resolve_requested_dates_for_plan",
+            with patch("quantclass_sync_internal.orchestrator.build_headers_or_raise", return_value=({"api-key": "k"}, "hid")), patch(
+                "quantclass_sync_internal.orchestrator._resolve_requested_dates_for_plan",
                 return_value=(["2026-02-07", "2026-02-09", "2026-02-10"], False),
-            ), patch("quantclass_sync.process_product", side_effect=fake_process_product):
-                _total, has_error, _started_at = qcs._execute_plans(
+            ), patch("quantclass_sync_internal.orchestrator.process_product", side_effect=fake_process_product):
+                _total, has_error, _started_at = _execute_plans(
                     plans=plans,
                     command_ctx=ctx,
                     report=report,
@@ -502,27 +508,27 @@ class UpdateCatchUpTests(unittest.TestCase):
         self.assertFalse(has_error)
         self.assertEqual(["2026-02-07", "2026-02-09", "2026-02-10"], executed_dates)
         self.assertEqual(["ok", "skipped", "ok"], [item.status for item in report.products])
-        self.assertEqual(qcs.REASON_NO_DATA_FOR_DATE, report.products[1].reason_code)
-        ts_text = (self.root / self.product / qcs.TIMESTAMP_FILE_NAME).read_text(encoding="utf-8")
+        self.assertEqual(REASON_NO_DATA_FOR_DATE, report.products[1].reason_code)
+        ts_text = (self.root / self.product / TIMESTAMP_FILE_NAME).read_text(encoding="utf-8")
         self.assertTrue(ts_text.startswith("2026-02-10,"))
 
     def test_execute_plans_catchup_empty_queue_records_skip_and_continues_next_product(self) -> None:
         report = self._report()
         ctx = self._ctx(dry_run=True)
         plans = [
-            qcs.ProductPlan(name="stock-trading-data", strategy=qcs.STRATEGY_MERGE_KNOWN),
-            qcs.ProductPlan(name="stock-main-index-data", strategy=qcs.STRATEGY_MERGE_KNOWN),
+            ProductPlan(name="stock-trading-data", strategy=STRATEGY_MERGE_KNOWN),
+            ProductPlan(name="stock-main-index-data", strategy=STRATEGY_MERGE_KNOWN),
         ]
         executed: list[tuple[str, str]] = []
 
         def fake_resolve_requested_dates_for_plan(
-            plan: qcs.ProductPlan,
-            command_ctx: qcs.CommandContext,
+            plan: ProductPlan,
+            command_ctx: CommandContext,
             hid: str,
             headers: dict[str, str],
             requested_date_time: str,
             force_update: bool,
-            report: qcs.RunReport,
+            report: RunReport,
             t_product_start: float,
             catch_up_to_latest: bool = False,
             lock=None,
@@ -532,7 +538,7 @@ class UpdateCatchUpTests(unittest.TestCase):
             return (["2026-02-10"], False)
 
         def fake_process_product(
-            plan: qcs.ProductPlan,
+            plan: ProductPlan,
             date_time: str | None,
             api_base: str,
             hid: str,
@@ -543,13 +549,13 @@ class UpdateCatchUpTests(unittest.TestCase):
             run_id: str = "",
         ):
             executed.append((plan.name, date_time or ""))
-            return plan.name, date_time or "", qcs.SyncStats(updated_files=1), "/tmp/src", qcs.REASON_OK
+            return plan.name, date_time or "", SyncStats(updated_files=1), "/tmp/src", REASON_OK
 
-        with patch("quantclass_sync.build_headers_or_raise", return_value=({"api-key": "k"}, "hid")), patch(
-            "quantclass_sync._resolve_requested_dates_for_plan",
+        with patch("quantclass_sync_internal.orchestrator.build_headers_or_raise", return_value=({"api-key": "k"}, "hid")), patch(
+            "quantclass_sync_internal.orchestrator._resolve_requested_dates_for_plan",
             side_effect=fake_resolve_requested_dates_for_plan,
-        ), patch("quantclass_sync.process_product", side_effect=fake_process_product):
-            _total, has_error, _started_at = qcs._execute_plans(
+        ), patch("quantclass_sync_internal.orchestrator.process_product", side_effect=fake_process_product):
+            _total, has_error, _started_at = _execute_plans(
                 plans=plans,
                 command_ctx=ctx,
                 report=report,
@@ -562,26 +568,26 @@ class UpdateCatchUpTests(unittest.TestCase):
         self.assertFalse(has_error)
         self.assertEqual([("stock-main-index-data", "2026-02-10")], executed)
         self.assertEqual(["skipped", "ok"], [item.status for item in report.products])
-        self.assertEqual(qcs.REASON_NO_DATA_FOR_DATE, report.products[0].reason_code)
+        self.assertEqual(REASON_NO_DATA_FOR_DATE, report.products[0].reason_code)
 
     def test_execute_plans_stop_on_error_stops_all_products(self) -> None:
         self._write_local_timestamp("2026-02-06")
         report = self._report()
         ctx = self._ctx(dry_run=True, stop_on_error=True)
         plans = [
-            qcs.ProductPlan(name="stock-trading-data", strategy=qcs.STRATEGY_MERGE_KNOWN),
-            qcs.ProductPlan(name="stock-main-index-data", strategy=qcs.STRATEGY_MERGE_KNOWN),
+            ProductPlan(name="stock-trading-data", strategy=STRATEGY_MERGE_KNOWN),
+            ProductPlan(name="stock-main-index-data", strategy=STRATEGY_MERGE_KNOWN),
         ]
         called_products: list[str] = []
 
         def fake_resolve_requested_dates_for_plan(
-            plan: qcs.ProductPlan,
-            command_ctx: qcs.CommandContext,
+            plan: ProductPlan,
+            command_ctx: CommandContext,
             hid: str,
             headers: dict[str, str],
             requested_date_time: str,
             force_update: bool,
-            report: qcs.RunReport,
+            report: RunReport,
             t_product_start: float,
             catch_up_to_latest: bool = False,
             lock=None,
@@ -589,7 +595,7 @@ class UpdateCatchUpTests(unittest.TestCase):
             return (["2026-02-09"], False)
 
         def fake_process_product(
-            plan: qcs.ProductPlan,
+            plan: ProductPlan,
             date_time: str | None,
             api_base: str,
             hid: str,
@@ -601,14 +607,14 @@ class UpdateCatchUpTests(unittest.TestCase):
         ):
             called_products.append(plan.name)
             if plan.name == "stock-trading-data":
-                raise qcs.ProductSyncError("simulated merge failure", qcs.REASON_MERGE_ERROR)
-            return plan.name, date_time or "", qcs.SyncStats(updated_files=1), "/tmp/src", qcs.REASON_OK
+                raise ProductSyncError("simulated merge failure", REASON_MERGE_ERROR)
+            return plan.name, date_time or "", SyncStats(updated_files=1), "/tmp/src", REASON_OK
 
-        with patch("quantclass_sync.build_headers_or_raise", return_value=({"api-key": "k"}, "hid")), patch(
-            "quantclass_sync._resolve_requested_dates_for_plan",
+        with patch("quantclass_sync_internal.orchestrator.build_headers_or_raise", return_value=({"api-key": "k"}, "hid")), patch(
+            "quantclass_sync_internal.orchestrator._resolve_requested_dates_for_plan",
             side_effect=fake_resolve_requested_dates_for_plan,
-        ), patch("quantclass_sync.process_product", side_effect=fake_process_product):
-            _total, has_error, _started_at = qcs._execute_plans(
+        ), patch("quantclass_sync_internal.orchestrator.process_product", side_effect=fake_process_product):
+            _total, has_error, _started_at = _execute_plans(
                 plans=plans,
                 command_ctx=ctx,
                 report=report,

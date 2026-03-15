@@ -13,7 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import quantclass_sync as qcs
+from quantclass_sync_internal.csv_engine import read_csv_payload, sync_payload_to_target
+from quantclass_sync_internal.models import CsvPayload, RULES
 import quantclass_sync_internal.archive as archive_module
 from quantclass_sync_internal.archive import safe_extract_7z, safe_extract_rar, safe_extract_tar, safe_extract_zip
 from quantclass_sync_internal.csv_engine import read_csv_payload
@@ -27,7 +28,7 @@ except Exception:  # pragma: no cover
 
 
 def _sync_payload_lock_worker(target_path: str, started, finished) -> None:
-    payload = qcs.CsvPayload(
+    payload = CsvPayload(
         note=None,
         header=["candle_end_time", "open", "high", "low", "close", "amount", "volume", "index_code"],
         rows=[["2024-01-01", "1", "1", "1", "1", "10", "10", "sh000300"]],
@@ -35,10 +36,10 @@ def _sync_payload_lock_worker(target_path: str, started, finished) -> None:
         delimiter=",",
     )
     started.set()
-    qcs.sync_payload_to_target(
+    sync_payload_to_target(
         incoming=payload,
         target=Path(target_path),
-        rule=qcs.RULES["stock-main-index-data"],
+        rule=RULES["stock-main-index-data"],
         dry_run=False,
     )
     finished.set()
@@ -484,8 +485,8 @@ class SyncPayloadLockTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def _payload(self) -> qcs.CsvPayload:
-        return qcs.CsvPayload(
+    def _payload(self) -> CsvPayload:
+        return CsvPayload(
             note=None,
             header=["candle_end_time", "open", "high", "low", "close", "amount", "volume", "index_code"],
             rows=[["2024-01-01", "1", "1", "1", "1", "10", "10", "sh000300"]],
@@ -520,7 +521,7 @@ class SyncPayloadLockTests(unittest.TestCase):
             self.fail("sync payload worker did not exit after lock release")
 
         self.assertEqual(0, process.exitcode)
-        payload = qcs.read_csv_payload(target, preferred_encoding="utf-8")
+        payload = read_csv_payload(target, preferred_encoding="utf-8")
         self.assertEqual(1, len(payload.rows))
 
     def test_sync_payload_waits_for_fallback_lock_before_writing(self) -> None:
@@ -536,10 +537,10 @@ class SyncPayloadLockTests(unittest.TestCase):
         def worker() -> None:
             started.set()
             try:
-                qcs.sync_payload_to_target(
+                sync_payload_to_target(
                     incoming=self._payload(),
                     target=target,
-                    rule=qcs.RULES["stock-main-index-data"],
+                    rule=RULES["stock-main-index-data"],
                     dry_run=False,
                 )
             except BaseException as exc:  # pragma: no cover - 仅用于跨线程收集异常
@@ -561,7 +562,7 @@ class SyncPayloadLockTests(unittest.TestCase):
 
         self.assertFalse(thread.is_alive())
         self.assertEqual([], errors)
-        payload = qcs.read_csv_payload(target, preferred_encoding="utf-8")
+        payload = read_csv_payload(target, preferred_encoding="utf-8")
         self.assertEqual(1, len(payload.rows))
 
     def test_sync_payload_raises_when_lock_backend_unavailable(self) -> None:
@@ -571,10 +572,10 @@ class SyncPayloadLockTests(unittest.TestCase):
             "quantclass_sync_internal.csv_engine.msvcrt", None
         ), patch("quantclass_sync_internal.csv_engine.os.open", side_effect=OSError("open denied")):
             with self.assertRaises(RuntimeError):
-                qcs.sync_payload_to_target(
+                sync_payload_to_target(
                     incoming=self._payload(),
                     target=target,
-                    rule=qcs.RULES["stock-main-index-data"],
+                    rule=RULES["stock-main-index-data"],
                     dry_run=False,
                 )
 
@@ -585,10 +586,10 @@ class SyncPayloadLockTests(unittest.TestCase):
         lock_path = target.parent / f".{target.name}.lock"
 
         with patch("quantclass_sync_internal.csv_engine.fcntl", None), patch("quantclass_sync_internal.csv_engine.msvcrt", None):
-            result, added, _audit = qcs.sync_payload_to_target(
+            result, added, _audit = sync_payload_to_target(
                 incoming=self._payload(),
                 target=target,
-                rule=qcs.RULES["stock-main-index-data"],
+                rule=RULES["stock-main-index-data"],
                 dry_run=False,
             )
 
