@@ -83,10 +83,10 @@ def get_products_overview(
         last = last_results.get(product, {})
         last_status = last.get("status", "")
         last_reason = last.get("reason_code", "")
-        # 门控确认已追平（up_to_date）→ 直接视为 0 天落后
+        # 门控确认已追平（up_to_date）且本地有数据 → 直接视为 0 天落后
         # 其他情况用上次记录的 API 日期作为参考；
         # 旧安装无 date_time 字段时 _parse_date 返回 None，降级回 today（等价修复前行为）
-        if last_reason == "up_to_date":
+        if last_reason == "up_to_date" and local_date is not None:
             behind = 0
         else:
             ref_date = _parse_date(last.get("date_time", "")) or today
