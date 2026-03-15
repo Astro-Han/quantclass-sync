@@ -84,10 +84,11 @@ def get_products_overview(
         last_status = last.get("status", "")
         last_reason = last.get("reason_code", "")
         # 上次同步成功或门控确认已追平 → 直接视为 0 天落后
-        # 否则用上次记录的 API 日期作为参考，无记录时降级回 today
         if last_status == "ok" or last_reason == "up_to_date":
             behind = 0
         else:
+            # 用上次记录的 API 日期作为参考；
+            # 旧安装无 date_time 字段时 _parse_date 返回 None，降级回 today（等价修复前行为）
             ref_date = _parse_date(last.get("date_time", "")) or today
             behind = _days_behind(local_date, ref_date)
         color = _status_color(behind, last_status)

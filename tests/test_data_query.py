@@ -189,6 +189,31 @@ class TestGetProductsOverview(unittest.TestCase):
         self.assertEqual(overview[0]["days_behind"], 0)
         self.assertEqual(overview[0]["status_color"], "green")
 
+    def test_overview_up_to_date_reason_shows_green(self):
+        """门控跳过(reason=up_to_date)时应显示绿色，即使 today 在之后。
+
+        回归测试 issue #1：覆盖 skipped + up_to_date 路径。
+        """
+        self._write_timestamp("stock-trading-data", "2026-03-13")
+        self._write_report("run_report_20260313_update.json", [
+            {"product": "stock-trading-data", "status": "skipped",
+             "reason_code": "up_to_date", "error": "", "date_time": "2026-03-13"},
+        ])
+
+        import unittest.mock
+        with unittest.mock.patch(
+            "quantclass_sync_internal.data_query.report_dir_path",
+            return_value=self.log_dir,
+        ):
+            overview = get_products_overview(
+                self.data_root,
+                ["stock-trading-data"],
+                today=date(2026, 3, 15),
+            )
+
+        self.assertEqual(overview[0]["days_behind"], 0)
+        self.assertEqual(overview[0]["status_color"], "green")
+
     def test_overview_with_error_product(self):
         """产品上次失败时应为红色。"""
         self._write_timestamp("stock-fin-data-xbx", "2026-03-13")
