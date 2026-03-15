@@ -252,13 +252,11 @@ class UpdateCatchUpTests(unittest.TestCase):
         self.assertFalse(skipped)
         self.assertEqual(["2026-02-07"], queue)
 
-    def test_empty_download_link_maps_to_no_data_reason(self) -> None:
-        from quantclass_sync_internal.orchestrator import _raise_download_stage_error
+    def test_empty_download_link_is_no_data_error(self) -> None:
+        from quantclass_sync_internal.orchestrator import _is_no_data_error
 
-        with self.assertRaises(ProductSyncError) as cm:
-            _raise_download_stage_error("stock-trading-data", EmptyDownloadLinkError("empty"))
-
-        self.assertEqual(REASON_NO_DATA_FOR_DATE, cm.exception.reason_code)
+        # EmptyDownloadLinkError 应被识别为"无数据"错误
+        self.assertTrue(_is_no_data_error(EmptyDownloadLinkError("empty")))
 
     def test_resolve_catchup_dates_gate_error_falls_back_to_latest(self) -> None:
         plan = self._plan()[0]

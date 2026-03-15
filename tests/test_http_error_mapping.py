@@ -291,7 +291,7 @@ class HttpErrorMappingTests(unittest.TestCase):
             plan = ProductPlan(name="coin-cap", strategy=STRATEGY_MERGE_KNOWN)
 
             with patch(
-                "quantclass_sync_internal.orchestrator._resolve_actual_time",
+                "quantclass_sync_internal.orchestrator.get_latest_time",
                 return_value="2026-02-28",
             ), patch(
                 "quantclass_sync_internal.orchestrator._download_and_prepare_extract",

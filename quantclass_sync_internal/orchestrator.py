@@ -11,7 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, NoReturn, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .archive import extract_archive
 from .config import (
@@ -124,13 +124,19 @@ def process_product(
     log_info(f"[{product}] 开始处理，策略={plan.strategy}", event="PRODUCT_PLAN")
 
     # 第 1 步：确定本次要下载的业务日期（用户指定日期优先，否则取 latest）。
-    actual_time = _resolve_actual_time(
-        product=product,
-        date_time=date_time,
-        api_base=api_base,
-        hid=hid,
-        headers=headers,
-    )
+    if date_time:
+        actual_time = date_time
+    else:
+        try:
+            actual_time = get_latest_time(api_base=api_base, product=product, hid=hid, headers=headers)
+        except Exception as exc:
+            raise ProductSyncError(
+                message=(
+                    f"产品 {product} 获取最新时间失败；可能原因：网络异常、权限不足或接口限制；"
+                    f"建议：检查 APIKEY/HID 与网络后重试。原始错误：{exc}"
+                ),
+                reason_code=REASON_NETWORK_ERROR,
+            ) from exc
     # 第 2 步：下载文件并准备解压目录。
     download_path, extract_path = _download_and_prepare_extract(
         product=product,
@@ -144,7 +150,7 @@ def process_product(
     # 第 3 步：解压下载文件（支持 zip/tar/rar/7z）。
     _extract_product_archive(product=product, download_path=download_path, extract_path=extract_path)
 
-    # 第 4 步：把 extract 目录中的数据同步到 data_root（这是“真正写业务数据”的阶段）。
+    # 第 4 步：把 extract 目录中的数据同步到 data_root（这是"真正写业务数据"的阶段）。
     try:
         stats, reason_code = sync_from_extract(plan=plan, extract_path=extract_path, data_root=data_root, dry_run=dry_run)
     except Exception as exc:
@@ -177,31 +183,19 @@ def process_product(
 
     return product, actual_time, stats, str(extract_path), reason_code
 
-def _resolve_actual_time(
-    product: str,
-    date_time: Optional[str],
-    api_base: str,
-    hid: str,
-    headers: Dict[str, str],
-) -> str:
-    """解析单产品实际下载时间（优先用户指定，否则取 latest）。"""
+def _is_no_data_error(exc: Exception, *, allow_legacy_no_status: bool = False) -> bool:
+    """
+    判断是否属于"该日期无可下载数据"的错误，涵盖以下情况：
+    - FatalRequestError 404（标准"无数据"响应）
+    - FatalRequestError 无 status_code（历史兼容，allow_legacy_no_status=True 时启用）
+    - EmptyDownloadLinkError（API 返回空下载链接）
+    - RuntimeError 包装的 EmptyDownloadLinkError
 
-    if date_time:
-        return date_time
-    try:
-        return get_latest_time(api_base=api_base, product=product, hid=hid, headers=headers)
-    except Exception as exc:
-        raise ProductSyncError(
-            message=(
-                f"产品 {product} 获取最新时间失败；可能原因：网络异常、权限不足或接口限制；"
-                f"建议：检查 APIKEY/HID 与网络后重试。原始错误：{exc}"
-            ),
-            reason_code=REASON_NETWORK_ERROR,
-        ) from exc
+    _probe_downloadable_dates 以 allow_legacy_no_status=True 调用，用于兼容历史无 status_code 对象。
+    """
 
-def _is_no_data_request_error(exc: Exception, *, allow_legacy_no_status: bool = False) -> bool:
-    """判断是否属于“该日期无可下载数据”的请求错误。"""
-
+    if isinstance(exc, EmptyDownloadLinkError):
+        return True
     if not isinstance(exc, FatalRequestError):
         return False
     if exc.status_code == 404:
@@ -209,34 +203,8 @@ def _is_no_data_request_error(exc: Exception, *, allow_legacy_no_status: bool = 
     if not allow_legacy_no_status or exc.status_code is not None:
         return False
     request_url = (exc.request_url or "").strip()
-    # 兼容历史错误对象：可能缺少 status_code/request_url，但语义仍是“当天无数据”。
+    # 兼容历史错误对象：可能缺少 status_code/request_url，但语义仍是"当天无数据"。
     return (not request_url) or ("/get-download-link/" in request_url)
-
-
-def _is_empty_download_link_error(exc: Exception) -> bool:
-    """判断是否是"空下载链接"错误。"""
-
-    return isinstance(exc, EmptyDownloadLinkError)
-
-
-def _raise_download_stage_error(product: str, exc: Exception) -> NoReturn:
-    """把下载阶段底层异常统一映射为 ProductSyncError。"""
-
-    if _is_no_data_request_error(exc) or _is_empty_download_link_error(exc):
-        raise ProductSyncError(
-            message=(
-                f"产品 {product} 下载失败；该日期无可下载数据（HTTP 404/空下载链接）；"
-                f"建议：确认产品与日期是否匹配。原始错误：{exc}"
-            ),
-            reason_code=REASON_NO_DATA_FOR_DATE,
-        ) from exc
-    raise ProductSyncError(
-        message=(
-            f"产品 {product} 下载失败；可能原因：网络波动、下载额度限制或链接失效；"
-            f"建议：稍后重试并确认下载权限。原始错误：{exc}"
-        ),
-        reason_code=REASON_NETWORK_ERROR,
-    ) from exc
 
 
 def _download_and_prepare_extract(
@@ -256,7 +224,22 @@ def _download_and_prepare_extract(
         file_url = get_download_link(api_base=api_base, product=product, date_time=actual_time, hid=hid, headers=headers)
         file_name = build_file_name(file_url, product, actual_time)
     except Exception as exc:
-        _raise_download_stage_error(product=product, exc=exc)
+        # 获取下载链接失败：404/空链接映射为"无数据"，其它映射为网络错误。
+        if _is_no_data_error(exc):
+            raise ProductSyncError(
+                message=(
+                    f"产品 {product} 下载失败；该日期无可下载数据（HTTP 404/空下载链接）；"
+                    f"建议：确认产品与日期是否匹配。原始错误：{exc}"
+                ),
+                reason_code=REASON_NO_DATA_FOR_DATE,
+            ) from exc
+        raise ProductSyncError(
+            message=(
+                f"产品 {product} 下载失败；可能原因：网络波动、下载额度限制或链接失效；"
+                f"建议：稍后重试并确认下载权限。原始错误：{exc}"
+            ),
+            reason_code=REASON_NETWORK_ERROR,
+        ) from exc
 
     run_scope = (run_id or "").strip()
     if run_scope:
@@ -282,7 +265,22 @@ def _download_and_prepare_extract(
     try:
         _download_file_atomic(file_url=file_url, download_path=download_path, headers=headers, product=product)
     except Exception as exc:
-        _raise_download_stage_error(product=product, exc=exc)
+        # 文件下载失败：404/空链接映射为"无数据"，其它映射为网络错误。
+        if _is_no_data_error(exc):
+            raise ProductSyncError(
+                message=(
+                    f"产品 {product} 下载失败；该日期无可下载数据（HTTP 404/空下载链接）；"
+                    f"建议：确认产品与日期是否匹配。原始错误：{exc}"
+                ),
+                reason_code=REASON_NO_DATA_FOR_DATE,
+            ) from exc
+        raise ProductSyncError(
+            message=(
+                f"产品 {product} 下载失败；可能原因：网络波动、下载额度限制或链接失效；"
+                f"建议：稍后重试并确认下载权限。原始错误：{exc}"
+            ),
+            reason_code=REASON_NETWORK_ERROR,
+        ) from exc
 
     log_info(f"[{product}] 下载完成: {download_path}", event="DOWNLOAD_OK")
     return download_path, extract_path
@@ -420,8 +418,8 @@ def _probe_downloadable_dates(
     回退探测缺口日期。
 
     规则：
-    - 404（含历史兼容的无 status no-data 异常）视为“该日无数据”，继续探测下一天；
-    - 空下载链接错误视为“该日无数据”，继续探测下一天；
+    - 404（含历史兼容的无 status no-data 异常）视为"该日无数据"，继续探测下一天；
+    - 空下载链接错误视为"该日无数据"，继续探测下一天；
     - 其它错误视为硬失败，抛出异常交给严格模式处理。
     """
 
@@ -438,14 +436,9 @@ def _probe_downloadable_dates(
         try:
             get_download_link(api_base=api_base, product=product, date_time=day, hid=hid, headers=headers)
             found.append(day)
-        except FatalRequestError as exc:
-            if _is_no_data_request_error(exc, allow_legacy_no_status=True):
+        except (FatalRequestError, EmptyDownloadLinkError, RuntimeError) as exc:
+            if _is_no_data_error(exc, allow_legacy_no_status=True):
                 log_debug(f"[{product}] 探测到无数据日，已跳过: {day}", event="PROBE_SKIP")
-                continue
-            raise
-        except RuntimeError as exc:
-            if _is_empty_download_link_error(exc):
-                log_debug(f"[{product}] 探测到空下载链接，已跳过: {day}", event="PROBE_SKIP")
                 continue
             raise
     return _normalize_date_queue(found, product=product)
@@ -493,7 +486,7 @@ def _resolve_requested_dates_for_plan(
 
     返回：
     - requested_dates_for_plan: 传给下载流程的日期列表（含空字符串时代表继续走 latest）
-    - skipped_by_gate: 是否已经被门控判定为“跳过”
+    - skipped_by_gate: 是否已经被门控判定为"跳过"
     """
 
     # 用户手动指定了日期，就以用户输入为准，不再做 latest/timestamp 判断。
@@ -557,7 +550,7 @@ def _resolve_requested_dates_for_plan(
             )
             return [], True
 
-        # 非回补模式：保持“单次只跑 latest 一次”的旧行为。
+        # 非回补模式：保持"单次只跑 latest 一次"的旧行为。
         if not catch_up_to_latest:
             if api_latest_date:
                 return [api_latest_date], False
@@ -635,7 +628,7 @@ def _upsert_product_status_after_success(
 
 def _collect_preprocess_source_successes(report: RunReport) -> List[ProductRunResult]:
     """
-    收集本轮已成功更新的“预处理依赖源产品”。
+    收集本轮已成功更新的"预处理依赖源产品"。
 
     预处理只在这三个源产品至少一个真正更新成功时才触发，
     这样可以避免每次 update 都重复跑一遍重计算任务。
@@ -652,7 +645,7 @@ def _collect_preprocess_source_successes(report: RunReport) -> List[ProductRunRe
 
 def _has_effective_source_delta(item: ProductRunResult) -> bool:
     """
-    判断单个源产品是否存在“有效增量”。
+    判断单个源产品是否存在"有效增量"。
 
     只把 created/updated/rows_added 视为有效变化，
     避免仅 mtime 触发但内容未变时重复执行重计算。
@@ -695,7 +688,7 @@ def _resolve_preprocess_data_date(
     """
     计算预处理产品写入状态时使用的数据日期。
 
-    优先使用“本轮成功源产品”的 date_time；
+    优先使用"本轮成功源产品"的 date_time；
     若异常缺失，再回退读取本地 timestamp。
     """
 
