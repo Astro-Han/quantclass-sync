@@ -627,7 +627,10 @@ def sync_payload_to_target(incoming: CsvPayload, target: Path, rule: DatasetRule
     with lock_ctx:
         # --- 追加快捷路径（在锁内执行）---
         # 条件：有 sort_cols、非 dry_run、目标文件已存在、incoming 有行数据
-        if rule.sort_cols and not dry_run and target.exists() and incoming.rows:
+        # 排除 tie-breaker 产品：tie-breaker 使排序键比主键宽，incoming_min > existing_max
+        # 的比较可能产生假阳性（实际有重叠），这类产品必须走完整合并路径
+        if (rule.sort_cols and not dry_run and target.exists() and incoming.rows
+                and rule.name not in SORT_TIE_BREAKER_COLS):
             head_result = _read_head_header(target, rule)
             if head_result is not None:
                 existing_header, existing_delimiter = head_result
@@ -649,6 +652,10 @@ def sync_payload_to_target(incoming: CsvPayload, target: Path, rule: DatasetRule
                                 # incoming 最小键严格大于已有最大键 -- 无重叠，可直接追加
                                 if incoming_min > existing_max:
                                     if _file_ends_with_newline(target):
+                                        # 注意：这里用 rule.encoding 而非 choose_output_encoding。
+                                        # 对于所有已知产品，rule.encoding 与文件实际编码一致。
+                                        # 如果未来需要支持 existing 文件编码不同于 rule.encoding 的场景，
+                                        # 应扩展 _read_head_header 返回检测到的编码。
                                         _append_csv_rows(
                                             target, incoming.rows,
                                             existing_delimiter, rule.encoding,
