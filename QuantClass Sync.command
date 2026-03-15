@@ -1,13 +1,43 @@
 #!/bin/bash
 # QuantClass Sync GUI 启动脚本（macOS 双击运行）
-# 首次运行会提示输入 conda 环境名并保存到 .gui_conda_env
+# conda 环境名存储在 user_config.json 的 conda_env 字段
 
 cd "$(dirname "$0")" || exit 1
 
-ENV_FILE=".gui_conda_env"
+CONFIG_FILE="user_config.json"
 
-# 首次运行：提示输入 conda 环境名
-if [ ! -f "$ENV_FILE" ]; then
+# 从 user_config.json 读取 conda_env（用 python 解析 JSON，避免依赖 jq）
+_read_conda_env() {
+    python3 -c "
+import json, sys
+try:
+    data = json.load(open('$CONFIG_FILE'))
+    env = data.get('conda_env', '')
+    print(env if env else '', end='')
+except Exception:
+    print('', end='')
+" 2>/dev/null
+}
+
+# 将 conda_env 写入 user_config.json（保留其他字段）
+_write_conda_env() {
+    python3 -c "
+import json, sys
+env = '$1'
+try:
+    data = json.load(open('$CONFIG_FILE'))
+except Exception:
+    data = {}
+data['conda_env'] = env
+with open('$CONFIG_FILE', 'w') as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+    f.write('\n')
+" 2>/dev/null
+}
+
+# 读取或首次设置 conda 环境名
+CONDA_ENV=$(_read_conda_env)
+if [ -z "$CONDA_ENV" ]; then
     echo "=== QuantClass Sync 首次启动 ==="
     echo ""
     echo "请输入用于运行本项目的 conda 环境名（如 base、quant 等）："
@@ -18,13 +48,10 @@ if [ ! -f "$ENV_FILE" ]; then
         read -n 1
         exit 1
     fi
-    echo "$CONDA_ENV" > "$ENV_FILE"
+    _write_conda_env "$CONDA_ENV"
     echo "已保存环境名: $CONDA_ENV"
     echo ""
 fi
-
-# 读取环境名并去除首尾空白
-CONDA_ENV=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' "$ENV_FILE")
 
 # 激活 conda 环境
 # 尝试常见的 conda 初始化路径
@@ -48,7 +75,7 @@ fi
 
 if ! conda activate "$CONDA_ENV"; then
     echo "错误：无法激活 conda 环境 '$CONDA_ENV'。"
-    echo "请检查环境名是否正确，或删除 $ENV_FILE 后重新运行。"
+    echo "请检查环境名是否正确，或编辑 $CONFIG_FILE 中的 conda_env 字段。"
     echo ""
     echo "按任意键退出..."
     read -n 1
