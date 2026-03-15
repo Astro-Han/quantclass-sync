@@ -476,6 +476,156 @@ RULES: Dict[str, DatasetRule] = {
         key_cols=("candle_begin_time", "symbol"),
         sort_cols=("candle_begin_time",),
     ),
+    # --- 以下为批量新增产品规则 ---
+    # 因子系列（按股票代码拆分，以交易日期增量合并）
+    "stock-anti-trend-factors": DatasetRule(
+        name="stock-anti-trend-factors",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("股票代码", "交易日期"),
+        sort_cols=("交易日期",),
+    ),
+    "stock-energy-factors": DatasetRule(
+        name="stock-energy-factors",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("股票代码", "交易日期"),
+        sort_cols=("交易日期",),
+    ),
+    "stock-multi-factor-series": DatasetRule(
+        name="stock-multi-factor-series",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("股票代码", "交易日期"),
+        sort_cols=("交易日期",),
+    ),
+    "stock-oscillator-factors": DatasetRule(
+        name="stock-oscillator-factors",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("股票代码", "交易日期"),
+        sort_cols=("交易日期",),
+    ),
+    "stock-technical-factors": DatasetRule(
+        name="stock-technical-factors",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("股票代码", "交易日期"),
+        sort_cols=("交易日期",),
+    ),
+    "stock-trend-factors": DatasetRule(
+        name="stock-trend-factors",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("股票代码", "交易日期"),
+        sort_cols=("交易日期",),
+    ),
+    "stock-volume-price-factors": DatasetRule(
+        name="stock-volume-price-factors",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("股票代码", "交易日期"),
+        sort_cols=("交易日期",),
+    ),
+    # 资金流（按股票代码拆分）
+    "stock-money-flow": DatasetRule(
+        name="stock-money-flow",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("股票代码", "交易日期"),
+        sort_cols=("交易日期",),
+    ),
+    # 分时收盘价（按股票代码拆分）
+    "stock-15m-close-price": DatasetRule(
+        name="stock-15m-close-price",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("股票代码", "交易日期"),
+        sort_cols=("交易日期",),
+    ),
+    "stock-5m-close-price": DatasetRule(
+        name="stock-5m-close-price",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("股票代码", "交易日期"),
+        sort_cols=("交易日期",),
+    ),
+    # 非 A 股交易数据（按股票代码拆分）
+    "stock-hk-stock-data": DatasetRule(
+        name="stock-hk-stock-data",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("股票代码", "交易日期"),
+        sort_cols=("交易日期",),
+    ),
+    "stock-us-trading-data": DatasetRule(
+        name="stock-us-trading-data",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("股票代码", "交易日期"),
+        sort_cols=("交易日期",),
+    ),
+    # 可转债（按债券代码拆分）
+    "stock-basic-bond": DatasetRule(
+        name="stock-basic-bond",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("债券代码", "交易日期"),
+        sort_cols=("交易日期",),
+    ),
+    # 指数（按 index_code 拆分）
+    "stock-1h-index-data": DatasetRule(
+        name="stock-1h-index-data",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("index_code", "candle_end_time"),
+        sort_cols=("candle_end_time",),
+    ),
+    "stock-us-main-index-data": DatasetRule(
+        name="stock-us-main-index-data",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("index_code", "candle_end_time"),
+        sort_cols=("candle_end_time",),
+    ),
+    "stock-asset-classification": DatasetRule(
+        name="stock-asset-classification",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("index_code", "date"),
+        sort_cols=("date",),
+    ),
+    # 币种行情快照（按 symbol 拆分，symbol 在 key_cols index=1）
+    "coin-coinmarketcap": DatasetRule(
+        name="coin-coinmarketcap",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("candle_begin_time", "symbol"),
+        sort_cols=("candle_begin_time",),
+    ),
+    # ETF（按基金代码拆分）
+    "stock-etf-trading-data": DatasetRule(
+        name="stock-etf-trading-data",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("基金代码", "交易日期"),
+        sort_cols=("交易日期",),
+    ),
+    # 策略（按策略名称拆分）
+    "stock-equity": DatasetRule(
+        name="stock-equity",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("策略名称", "交易日期"),
+        sort_cols=("交易日期",),
+    ),
+    "stock-ind-element-equity": DatasetRule(
+        name="stock-ind-element-equity",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("策略名称", "交易日期"),
+        sort_cols=("交易日期",),
+    ),
     # 币圈市值快照：按 symbol 拆分后，以 日期+symbol 为主键增量合并
     "coin-cap": DatasetRule(
         name="coin-cap",
@@ -496,7 +646,8 @@ RULES: Dict[str, DatasetRule] = {
 }
 
 # 拆分列配置与规则联动校验：避免 AGGREGATE_SPLIT_COLS 与 RULES 长期漂移。
-_SPLIT_COL_KEY_INDEX = {"coin-cap": 1}
+# 拆分列不在 key_cols[0] 的产品需在此注册索引
+_SPLIT_COL_KEY_INDEX = {"coin-cap": 1, "coin-coinmarketcap": 1}
 for _product_name, _split_col in AGGREGATE_SPLIT_COLS.items():
     _rule = RULES.get(_product_name)
     if _rule is None:

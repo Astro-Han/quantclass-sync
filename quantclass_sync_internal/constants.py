@@ -65,6 +65,36 @@ AGGREGATE_SPLIT_COLS: Dict[str, str] = {
     "stock-trading-date": "股票代码",
     "stock-interest-rate": "指标名称",
     "coin-cap": "symbol",
+    # --- 以下为批量新增的日聚合拆分产品 ---
+    # 因子系列（按股票代码拆分）
+    "stock-anti-trend-factors": "股票代码",
+    "stock-energy-factors": "股票代码",
+    "stock-multi-factor-series": "股票代码",
+    "stock-oscillator-factors": "股票代码",
+    "stock-technical-factors": "股票代码",
+    "stock-trend-factors": "股票代码",
+    "stock-volume-price-factors": "股票代码",
+    # 资金流（按股票代码拆分）
+    "stock-money-flow": "股票代码",
+    # 分时收盘价（按股票代码拆分）
+    "stock-15m-close-price": "股票代码",
+    "stock-5m-close-price": "股票代码",
+    # 非 A 股交易数据（按股票代码拆分）
+    "stock-hk-stock-data": "股票代码",
+    "stock-us-trading-data": "股票代码",
+    # 可转债（按债券代码拆分）
+    "stock-basic-bond": "债券代码",
+    # 指数（按 index_code 拆分）
+    "stock-1h-index-data": "index_code",
+    "stock-us-main-index-data": "index_code",
+    "stock-asset-classification": "index_code",
+    # 币种行情（按 symbol 拆分）
+    "coin-coinmarketcap": "symbol",
+    # ETF（按基金代码拆分）
+    "stock-etf-trading-data": "基金代码",
+    # 策略（按策略名称拆分）
+    "stock-equity": "策略名称",
+    "stock-ind-element-equity": "策略名称",
 }
 
 # 非聚合拆分但需要增量合并的产品（不在 AGGREGATE_SPLIT_COLS 中）
