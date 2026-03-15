@@ -471,7 +471,6 @@ class SyncApi:
         并发查询，总超时 30 秒。区分全局错误（401/403 立即中止）
         和单产品错误（跳过计入失败列表）。
         """
-        import threading as _threading
         from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
         from datetime import date as _date
 
@@ -505,7 +504,7 @@ class SyncApi:
         api_latest_dates: Dict[str, str] = {}
         failed_products: list = []
         # 全局中止信号：401/403 时通知其他 worker 提前退出
-        abort_event = _threading.Event()
+        abort_event = threading.Event()
         global_error_holder: list = []
 
         def _query_one(product: str) -> tuple:

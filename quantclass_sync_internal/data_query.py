@@ -105,6 +105,7 @@ def get_products_overview(
             ref_date = cached_api_date if cache_fresh else today
 
         behind = _days_behind(local_date, ref_date)
+        # last_status=error 时 _status_color 强制返回 red，不被 api_latest_dates 覆盖（符合预期）
         color = _status_color(behind, last_status)
         overview.append({
             "name": product,

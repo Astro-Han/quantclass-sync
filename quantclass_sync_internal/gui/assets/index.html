@@ -403,14 +403,15 @@
       </div>
 
     </main>
-  </div>
-  <!-- 检查更新确认弹窗 -->
-  <div class="modal-overlay" x-show="checkUpdateConfirmVisible" x-cloak>
-    <div class="modal-box">
-      <p>此操作会消耗 API 访问次数，是否继续？</p>
-      <div class="modal-actions">
-        <button class="btn btn-health" @click="doCheckUpdates()">确认</button>
-        <button class="btn" @click="checkUpdateConfirmVisible = false">取消</button>
+
+    <!-- 检查更新确认弹窗（须在 x-data 作用域内） -->
+    <div class="modal-overlay" x-show="checkUpdateConfirmVisible" x-cloak>
+      <div class="modal-box">
+        <p>此操作会消耗 API 访问次数，是否继续？</p>
+        <div class="modal-actions">
+          <button class="btn btn-health" @click="doCheckUpdates()">确认</button>
+          <button class="btn" @click="checkUpdateConfirmVisible = false">取消</button>
+        </div>
       </div>
     </div>
   </div>
