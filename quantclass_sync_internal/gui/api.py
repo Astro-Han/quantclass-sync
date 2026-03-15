@@ -36,8 +36,9 @@ from ..data_query import (
     get_run_detail,
     get_run_history,
 )
-from ..models import CommandContext, UserConfig, log_error, log_info, new_run_id
-from ..orchestrator import load_catalog_or_raise, run_update_with_settings
+from ..http_client import get_latest_time
+from ..models import CommandContext, FatalRequestError, UserConfig, log_error, log_info, new_run_id
+from ..orchestrator import _build_headers, load_catalog_or_raise, run_update_with_settings
 from ..status_store import report_dir_path
 
 
@@ -463,6 +464,131 @@ class SyncApi:
             return {"ok": False, "error": f"健康检查执行失败：{exc}"}
 
         return {"ok": True, "health": health}
+
+    def check_updates(self) -> Dict[str, Any]:
+        """查询 API 获取各产品最新日期，返回实时 overview。
+
+        并发查询，总超时 30 秒。区分全局错误（401/403 立即中止）
+        和单产品错误（跳过计入失败列表）。
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+        from datetime import date as _date
+
+        user_config, data_root, catalog, err = self._resolve_config()
+        if err:
+            return {"ok": False, "error": err}
+
+        if not catalog:
+            return {
+                "ok": True, "products": [],
+                "summary": {"green": 0, "yellow": 0, "red": 0, "gray": 0},
+                "checked": 0, "failed": 0, "failed_products": [],
+            }
+
+        # 解析凭证
+        secrets_file = DEFAULT_USER_SECRETS_FILE.resolve()
+        try:
+            api_key, hid, _ = resolve_credentials_for_update(
+                cli_api_key="", cli_hid="", secrets_file=secrets_file,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": f"凭证解析失败：{exc}"}
+
+        if not api_key or not hid:
+            return {"ok": False, "error": "未找到有效凭证（API Key / HID），请先完成配置。"}
+
+        headers = _build_headers(api_key)
+        api_base = DEFAULT_API_BASE
+
+        # 并发查询各产品 API 最新日期
+        api_latest_dates: Dict[str, str] = {}
+        failed_products: list = []
+        # 全局中止信号：401/403 时通知其他 worker 提前退出
+        abort_event = threading.Event()
+        global_error_holder: list = []
+
+        def _query_one(product: str) -> tuple:
+            """查询单个产品，返回 (product, date_str, error)。"""
+            if abort_event.is_set():
+                return (product, None, "已中止")
+            try:
+                latest = get_latest_time(api_base, product, hid, headers)
+                return (product, latest, None)
+            except FatalRequestError as exc:
+                if exc.status_code in (401, 403):
+                    abort_event.set()
+                    global_error_holder.append(exc)
+                    return (product, None, str(exc))
+                return (product, None, str(exc))
+            except Exception as exc:
+                return (product, None, str(exc))
+
+        executor = ThreadPoolExecutor(max_workers=max(1, min(8, len(catalog))))
+        try:
+            futures = {executor.submit(_query_one, p): p for p in catalog}
+            for future in as_completed(futures, timeout=30):
+                product, latest, error = future.result()
+                if error:
+                    failed_products.append(product)
+                else:
+                    api_latest_dates[product] = latest
+                # 检测到全局错误后不再等待剩余 future
+                if abort_event.is_set():
+                    break
+        except FuturesTimeoutError:
+            pass  # 超时后下面统一处理未完成的产品
+        except Exception as exc:
+            return {"ok": False, "error": f"检查更新失败：{exc}"}
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+        # 全局错误（401/403）：立即返回
+        if global_error_holder:
+            exc = global_error_holder[0]
+            return {"ok": False, "error": f"API 凭证或额度异常（HTTP {exc.status_code}）：{exc}"}
+
+        # 按产品名补漏：未进入 api_latest_dates 也未进入 failed_products 的归入失败
+        for product in catalog:
+            if product not in api_latest_dates and product not in failed_products:
+                failed_products.append(product)
+
+        # 用 API 日期生成实时 overview
+        try:
+            raw_products = get_products_overview(
+                data_root, catalog, today=_date.today(), api_latest_dates=api_latest_dates,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": f"状态计算失败：{exc}"}
+
+        # 转换为前端字段名，附加 source 标记
+        products = []
+        for p in raw_products:
+            source = "api" if p["name"] in api_latest_dates else "cached"
+            products.append({
+                "name": p["name"],
+                "color": p["status_color"],
+                "local_date": p["local_date"],
+                "behind_days": p["days_behind"],
+                "last_result": p["last_status"],
+                "last_error": p["last_error"],
+                "source": source,
+            })
+
+        # 统计卡片
+        summary = {"green": 0, "yellow": 0, "red": 0, "gray": 0}
+        for p in products:
+            color = p.get("color", "gray")
+            if color in summary:
+                summary[color] += 1
+
+        return {
+            "ok": True,
+            "products": products,
+            "summary": summary,
+            "checked": len(api_latest_dates),
+            "failed": len(failed_products),
+            "failed_products": sorted(failed_products),
+        }
 
     # ------------------------------------------------------------------
     # 同步线程内部逻辑（不对外暴露）

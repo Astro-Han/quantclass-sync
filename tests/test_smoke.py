@@ -252,6 +252,7 @@ class TestS2GUISmoke(unittest.TestCase):
             "get_history",
             "get_run_detail",
             "get_health_report",
+            "check_updates",
         }
 
         # 反射获取实际公开方法

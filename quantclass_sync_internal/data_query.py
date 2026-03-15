@@ -66,6 +66,7 @@ def get_products_overview(
     data_root: Path,
     catalog_products: Sequence[str],
     today: Optional[date] = None,
+    api_latest_dates: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """返回所有产品的状态总览列表。
 
@@ -76,6 +77,8 @@ def get_products_overview(
     - last_status: 上次同步状态 ("ok" / "error" / "skipped" / "")
     - last_error: 上次错误信息 (str)
     - status_color: 状态颜色 ("green" / "yellow" / "red" / "gray")
+
+    api_latest_dates: 传入时用 API 实时日期作为参考，跳过缓存和宽限期逻辑。
     """
     log_dir = report_dir_path(data_root)
     last_results = read_or_backfill_product_last_status(log_dir)
@@ -85,16 +88,24 @@ def get_products_overview(
         local_date = read_local_timestamp_date(data_root, product)
         last = last_results.get(product, {})
         last_status = last.get("status", "")
-        # 用缓存的 API 日期作为参考，避免周末/假日误报落后；
-        # 缓存超过宽限期或无缓存时降级回 today，提示可能有新数据
-        cached_api_date = _parse_date(last.get("date_time", ""))
-        cache_fresh = (
-            cached_api_date is not None
-            and today is not None
-            and (today - cached_api_date).days <= _STALE_GRACE_DAYS
-        )
-        ref_date = cached_api_date if cache_fresh else today
+
+        # 优先用传入的 API 实时日期（检查更新按钮场景）
+        api_date = _parse_date((api_latest_dates or {}).get(product, ""))
+        if api_date is not None:
+            ref_date = api_date
+        else:
+            # 用缓存的 API 日期作为参考，避免周末/假日误报落后；
+            # 缓存超过宽限期或无缓存时降级回 today，提示可能有新数据
+            cached_api_date = _parse_date(last.get("date_time", ""))
+            cache_fresh = (
+                cached_api_date is not None
+                and today is not None
+                and (today - cached_api_date).days <= _STALE_GRACE_DAYS
+            )
+            ref_date = cached_api_date if cache_fresh else today
+
         behind = _days_behind(local_date, ref_date)
+        # last_status=error 时 _status_color 强制返回 red，不被 api_latest_dates 覆盖（符合预期）
         color = _status_color(behind, last_status)
         overview.append({
             "name": product,

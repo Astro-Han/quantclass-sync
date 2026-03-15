@@ -135,7 +135,7 @@
               </div>
             </div>
 
-            <!-- 搜索框 -->
+            <!-- 搜索框 + 检查更新 -->
             <div class="filter-bar">
               <input
                 type="text"
@@ -143,6 +143,14 @@
                 placeholder="搜索产品..."
                 x-model="searchText"
               />
+              <button
+                class="btn btn-health"
+                @click="checkUpdateConfirmVisible = true"
+                :disabled="checkUpdateLoading || syncStatus === 'syncing'"
+              >
+                <span x-show="!checkUpdateLoading">检查更新</span>
+                <span x-show="checkUpdateLoading">检查中...</span>
+              </button>
             </div>
 
             <!-- 产品状态表格 -->
@@ -170,6 +178,12 @@
             </table>
             <div class="empty-state" x-show="filteredProducts().length === 0 && products.length > 0">
               无匹配产品
+            </div>
+
+            <!-- 检查更新结果提示 -->
+            <div x-show="checkUpdateResult" class="health-result" x-cloak style="margin-bottom: 12px;">
+              <p :class="checkUpdateResult?.isError ? 'text-error' : 'text-success'"
+                 x-text="checkUpdateResult?.message"></p>
             </div>
 
             <!-- 数据健康检查 -->
@@ -389,6 +403,17 @@
       </div>
 
     </main>
+
+    <!-- 检查更新确认弹窗（须在 x-data 作用域内） -->
+    <div class="modal-overlay" x-show="checkUpdateConfirmVisible" x-cloak>
+      <div class="modal-box">
+        <p>此操作会消耗 API 访问次数，是否继续？</p>
+        <div class="modal-actions">
+          <button class="btn btn-health" @click="doCheckUpdates()">确认</button>
+          <button class="btn" @click="checkUpdateConfirmVisible = false">取消</button>
+        </div>
+      </div>
+    </div>
   </div>
 </body>
 </html>
