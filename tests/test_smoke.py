@@ -210,7 +210,7 @@ class TestS1CLISmoke(unittest.TestCase):
         """
         mock_webview = MagicMock()
         with patch.dict("sys.modules", {"webview": mock_webview}), \
-             patch("os._exit"):  # launch_gui 结束时调用 os._exit(0)
+             patch("os._exit") as mock_exit:  # launch_gui 结束时调用 os._exit(0)
             # 在 mock 生效后再调用，确保函数内 import webview 拿到 mock
             from quantclass_sync_internal.gui import launch_gui
             launch_gui()
@@ -218,6 +218,8 @@ class TestS1CLISmoke(unittest.TestCase):
         # 验证窗口创建和启动均被调用
         mock_webview.create_window.assert_called_once()
         mock_webview.start.assert_called_once()
+        # 验证窗口关闭后触发进程退出
+        mock_exit.assert_called_once_with(0)
 
 
 class TestS2GUISmoke(unittest.TestCase):

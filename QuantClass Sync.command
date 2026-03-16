@@ -117,11 +117,13 @@ echo "启动 QuantClass Sync GUI..."
 echo ""
 
 python quantclass_sync.py gui
-if [ $? -ne 0 ]; then
+EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ]; then
     echo ""
     echo "程序异常退出，按任意键关闭..."
     read -n 1
+    exit $EXIT_CODE
 fi
 
-# GUI 正常退出后，自动关闭本终端窗口（按名称匹配，不误关其他窗口）
+# 仅正常退出时自动关闭本终端窗口（按名称匹配，不误关其他窗口）
 osascript -e 'tell application "Terminal" to close (every window whose name contains "QuantClass Sync")' &>/dev/null &
