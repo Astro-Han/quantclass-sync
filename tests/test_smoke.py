@@ -209,7 +209,8 @@ class TestS1CLISmoke(unittest.TestCase):
         patch sys.modules 即可在不安装 pywebview 的环境下测试。
         """
         mock_webview = MagicMock()
-        with patch.dict("sys.modules", {"webview": mock_webview}):
+        with patch.dict("sys.modules", {"webview": mock_webview}), \
+             patch("os._exit"):  # launch_gui 结束时调用 os._exit(0)
             # 在 mock 生效后再调用，确保函数内 import webview 拿到 mock
             from quantclass_sync_internal.gui import launch_gui
             launch_gui()

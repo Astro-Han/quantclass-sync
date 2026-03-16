@@ -35,3 +35,7 @@ def launch_gui() -> None:
     )
     # 启动 pywebview 主循环（阻塞直到窗口关闭）
     webview.start(debug=False)
+
+    # 窗口已关闭，强制退出以防 pywebview 后台线程残留导致进程不退出
+    import os as _os
+    _os._exit(0)

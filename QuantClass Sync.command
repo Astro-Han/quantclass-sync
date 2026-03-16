@@ -122,3 +122,6 @@ if [ $? -ne 0 ]; then
     echo "程序异常退出，按任意键关闭..."
     read -n 1
 fi
+
+# GUI 正常退出后，自动关闭本终端窗口（按名称匹配，不误关其他窗口）
+osascript -e 'tell application "Terminal" to close (every window whose name contains "QuantClass Sync")' &>/dev/null &
