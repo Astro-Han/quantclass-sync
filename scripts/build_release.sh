@@ -19,7 +19,6 @@ FILES=(
     "README.md"
     "catalog.txt"
     "requirements.txt"
-    "requirements-archive.txt"
     "quantclass_sync.py"
     "coin_preprocess_builtin.py"
     "QuantClass Sync.command"
