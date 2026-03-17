@@ -453,18 +453,30 @@ def _append_csv_rows(
     encoding: str,
 ) -> None:
     """
-    以 append 模式追加 CSV 数据行（不写表头/note）。
+    追加行到 CSV，使用 copy+append+replace 保证原子性。
+    调用方必须持有 _locked_target 文件锁。
 
     前置条件（由调用方保证）：
     - 文件末尾以 \\n 结尾
-    - 调用方持有文件锁
+    - 调用方持有文件锁（.lock 文件锁，非 inode 锁，os.replace 改 inode 安全）
 
     注意（跨层依赖）：中断恢复依赖 orchestrator 层在 sync
     完整成功后才更新 timestamp。
     """
-    with target.open("a", encoding=encoding, newline="") as f:
-        writer = csv.writer(f, delimiter=delimiter, lineterminator="\n")
-        writer.writerows(rows)
+    # 先 copy 到临时文件，追加后 replace，崩溃时临时文件留在磁盘但原文件不损坏
+    tmp_path = target.parent / f".tmp-append-{target.name}"
+    import shutil
+    try:
+        shutil.copy2(target, tmp_path)
+        with tmp_path.open("a", encoding=encoding, newline="") as f:
+            writer = csv.writer(f, delimiter=delimiter, lineterminator="\n")
+            writer.writerows(rows)
+        os.replace(tmp_path, target)
+    except BaseException:
+        # 写入失败时清理临时文件，保留原文件不动
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
 
 
 def merge_payload(existing: Optional[CsvPayload], incoming: CsvPayload, rule: DatasetRule) -> Tuple[CsvPayload, int]:
@@ -661,6 +673,7 @@ def sync_payload_to_target(incoming: CsvPayload, target: Path, rule: DatasetRule
                                             existing_delimiter, rule.encoding,
                                         )
                                         audit.checked_files = 1
+                                        audit.append_fast = 1
                                         return "updated", len(incoming.rows), audit
 
         # --- 原有完整合并路径（不变）---

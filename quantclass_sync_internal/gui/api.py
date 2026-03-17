@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import requests
 import threading
 import time
@@ -35,6 +38,7 @@ from ..data_query import (
     get_products_overview,
     get_run_detail,
     get_run_history,
+    repair_data_issues,
 )
 from ..http_client import get_latest_time
 from ..models import CommandContext, FatalRequestError, UserConfig, log_error, log_info, new_run_id
@@ -43,16 +47,22 @@ from ..status_store import report_dir_path, update_api_latest_dates
 
 
 def _format_run_summary(raw_run: Dict[str, Any]) -> Dict[str, Any]:
-    """把 run_report 原始 dict 转换为前端友好格式。"""
+    """把 run_report 原始 dict 转换为前端友好格式。
+
+    failed_products 直接透传原始对象列表 [{product, error, reason_code}]，
+    供前端展示详情和 retry_failed 功能读取产品名。
+    """
     return {
         "ok": raw_run.get("success_total", 0),
         "error": raw_run.get("failed_total", 0),
         "skipped": raw_run.get("skipped_total", 0),
         "duration_seconds": raw_run.get("duration_seconds", 0),
         "started_at": raw_run.get("started_at", ""),
-        "failed_products": [
-            fp.get("product", "") for fp in raw_run.get("failed_products", [])
-        ],
+        # 直接透传对象列表，不剥离为纯字符串
+        "failed_products": list(raw_run.get("failed_products", [])),
+        # 阶段耗时（前端用于展示"探测 Xs + 同步 Xs"）
+        "phase_plan_seconds": raw_run.get("phase_plan_seconds"),
+        "phase_sync_seconds": raw_run.get("phase_sync_seconds"),
     }
 
 
@@ -65,6 +75,8 @@ _PROGRESS_INIT: Dict[str, Any] = {
     "elapsed_seconds": 0,      # 已用时（秒）
     "error_message": "",       # 出错时的错误信息
     "run_summary": None,       # 同步完成后填充 run_summary dict
+    "products": [],            # 已完成产品列表 [{name, status, elapsed_seconds, files_count}]
+    "all_products": [],        # 全部产品名列表（由 progress_callback 初始化调用时传入）
 }
 
 
@@ -78,6 +90,9 @@ class SyncApi:
         self._lock = threading.Lock()
         # 深拷贝初始值，避免多次运行时共享同一个 dict 引用
         self._progress: Dict[str, Any] = dict(_PROGRESS_INIT)
+        self._health_progress: Dict[str, Any] = {
+            "checking": False, "current": 0, "total": 0, "product": "", "result": None,
+        }
 
     # ------------------------------------------------------------------
     # 内部辅助方法
@@ -266,6 +281,8 @@ class SyncApi:
             "config_exists": True,
             "data_root": resolved_root,
             "product_count": product_count,
+            # 仅 macOS 支持在 Finder 中打开目录
+            "can_open_dir": sys.platform == "darwin",
         }
 
     def run_setup(self, data_root: str, api_key: str, hid: str,
@@ -362,9 +379,10 @@ class SyncApi:
                 "warning": "配置已保存，但连接验证未通过，请检查网络连接",
             }
 
-    def start_sync(self) -> Dict[str, Any]:
+    def start_sync(self, retry_failed: bool = False) -> Dict[str, Any]:
         """启动同步线程。
 
+        retry_failed=True 时只重跑上次失败的产品。
         如果已在同步中，返回 {"started": False, "message": "..."}。
         否则启动后台线程，返回 {"started": True, "message": "..."}。
         """
@@ -373,17 +391,36 @@ class SyncApi:
         if err:
             return {"started": False, "message": f"配置读取失败，无法启动同步：{err}"}
 
+        retry_products = None
         # 读-判断-写合并在同一个锁块，防止双击连续启动
         with self._lock:
             if self._progress.get("status") == "syncing":
                 return {"started": False, "message": "同步正在进行中，请等待完成后再试。"}
+
+            # retry_failed 分支：从上次 run_summary 读取失败产品名
+            if retry_failed:
+                run_summary = self._progress.get("run_summary")
+                if not run_summary:
+                    return {"started": False, "message": "没有上次同步记录"}
+                failed = run_summary.get("failed_products", [])
+                if not failed:
+                    return {"started": False, "message": "没有失败产品"}
+                # failed_products 是对象列表 [{product, error, reason_code}]，做防御性过滤
+                retry_products = [
+                    item.get("product", "") for item in failed
+                    if isinstance(item, dict) and item.get("product")
+                ]
+
             self._progress = dict(_PROGRESS_INIT)
             self._progress["status"] = "syncing"
+            # 显式赋新空列表，防止意外共享引用
+            self._progress["products"] = []
+            self._progress["all_products"] = []
 
-        # 启动后台同步线程
+        # 启动后台同步线程（锁外启动，避免持锁创建线程）
         thread = threading.Thread(
             target=self._run_sync,
-            args=(user_config, data_root),
+            args=(user_config, data_root, retry_products),
             daemon=True,  # 主进程退出时自动结束
             name="gui-sync-worker",
         )
@@ -407,7 +444,11 @@ class SyncApi:
         }
         """
         with self._lock:
-            return dict(self._progress)
+            p = dict(self._progress)
+            # 对列表字段做浅拷贝，防止调用方持有引用后被后台线程修改
+            p["products"] = list(self._progress["products"])
+            p["all_products"] = list(self._progress["all_products"])
+            return p
 
     def get_history(self) -> Dict[str, Any]:
         """返回最近 20 次运行历史摘要。
@@ -448,22 +489,97 @@ class SyncApi:
         log_dir = report_dir_path(data_root)
         return get_run_detail(log_dir, report_file)
 
-    def get_health_report(self) -> Dict[str, Any]:
-        """返回数据健康报告。
+    def open_data_dir(self) -> Dict[str, Any]:
+        """在 Finder 中打开数据目录（仅 macOS）。"""
+        if sys.platform != "darwin":
+            return {"ok": False, "error": "仅支持 macOS"}
+        user_config, data_root, _err = self._resolve_data_root()
+        if _err:
+            return {"ok": False, "error": _err}
+        data_root_str = str(data_root)
+        if not os.path.isdir(data_root_str):
+            return {"ok": False, "error": "目录不存在"}
+        try:
+            # 用 -- 分隔选项与路径，防止路径以 - 开头时被误解为参数
+            result = subprocess.run(["open", "--", data_root_str])
+            if result.returncode != 0:
+                return {"ok": False, "error": f"打开失败 (exit {result.returncode})"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True}
 
-        检测三类问题：文件缺失、CSV 不可读、残留临时文件。
-        返回结构：{"ok": bool, "health": {...}} 或 {"ok": False, "error": "..."}
-        """
-        _user_config, data_root, catalog, err = self._resolve_config()
+    def start_health_check(self) -> Dict[str, Any]:
+        """启动后台健康检查线程。同步中拒绝，重复启动拒绝。"""
+        with self._lock:
+            if self._progress.get("status") == "syncing":
+                return {"ok": False, "error": "同步进行中，请稍后再试"}
+            if self._health_progress["checking"]:
+                return {"ok": False, "error": "检查已在进行中"}
+            self._health_progress = {
+                "checking": True, "current": 0, "total": 0, "product": "", "result": None,
+            }
+        thread = threading.Thread(target=self._run_health_check, daemon=True)
+        thread.start()
+        return {"ok": True}
+
+    def _run_health_check(self) -> None:
+        """后台线程执行健康检查。"""
+        try:
+            _user_config, data_root, catalog, err = self._resolve_config()
+            if err:
+                with self._lock:
+                    self._health_progress["checking"] = False
+                    self._health_progress["result"] = {"ok": False, "error": err}
+                return
+            data_root = Path(data_root)
+
+            def progress_cb(current, total, product, phase):
+                with self._lock:
+                    self._health_progress.update({
+                        "current": current, "total": total, "product": product,
+                    })
+
+            result = check_data_health(data_root, catalog, progress_callback=progress_cb)
+            with self._lock:
+                self._health_progress["checking"] = False
+                self._health_progress["result"] = {"ok": True, "health": result}
+        except Exception as e:
+            with self._lock:
+                self._health_progress["checking"] = False
+                self._health_progress["result"] = {"ok": False, "error": str(e)}
+
+    def get_health_progress(self) -> Dict[str, Any]:
+        """轮询健康检查进度。"""
+        with self._lock:
+            return {
+                "checking": self._health_progress["checking"],
+                "current": self._health_progress["current"],
+                "total": self._health_progress["total"],
+                "product": self._health_progress["product"],
+            }
+
+    def get_health_result(self) -> Dict[str, Any]:
+        """获取最近一次检查结果。"""
+        with self._lock:
+            return self._health_progress.get("result")
+
+    def repair_health_issues(self) -> Dict[str, Any]:
+        """修复可修复的数据问题。同步中拒绝。"""
+        with self._lock:
+            if self._progress.get("status") == "syncing":
+                return {"ok": False, "error": "同步进行中，请稍后修复"}
+            result = self._health_progress.get("result")
+        if not result or not result.get("ok"):
+            return {"ok": False, "error": "无可用检查结果"}
+        issues = result["health"]["issues"]
+        repairable = [i for i in issues if i.get("repairable")]
+        if not repairable:
+            return {"ok": False, "error": "无可修复问题"}
+        _user_config, data_root, _catalog, err = self._resolve_config()
         if err:
             return {"ok": False, "error": err}
-
-        try:
-            health = check_data_health(data_root, catalog)
-        except Exception as exc:
-            return {"ok": False, "error": f"健康检查执行失败：{exc}"}
-
-        return {"ok": True, "health": health}
+        repair_result = repair_data_issues(Path(data_root), issues)
+        return {"ok": True, "repair": repair_result}
 
     def check_updates(self) -> Dict[str, Any]:
         """查询 API 获取各产品最新日期，返回实时 overview。
@@ -602,8 +718,12 @@ class SyncApi:
     # 同步线程内部逻辑（不对外暴露）
     # ------------------------------------------------------------------
 
-    def _run_sync(self, user_config: object, data_root: Path) -> None:
-        """在后台线程中执行完整的同步流程。"""
+    def _run_sync(self, user_config: object, data_root: Path,
+                  retry_products: list = None) -> None:
+        """在后台线程中执行完整的同步流程。
+
+        retry_products: 指定只同步的产品列表；None 表示全量同步。
+        """
         t_start = time.time()
 
         try:
@@ -652,22 +772,56 @@ class SyncApi:
                 credential_source=credential_source,
             )
 
-            def progress_callback(product_name: str, completed: int, total: int) -> None:
-                """同步进度回调，在每个产品完成时被 orchestrator 调用。"""
-                elapsed = time.time() - t_start
-                self._update_progress(
-                    current_product=product_name,
-                    completed=completed,
-                    total=total,
-                    elapsed_seconds=round(elapsed, 1),
-                )
+            def progress_callback(product_name: str, completed: int, total: int, *,
+                                   elapsed_seconds: float = 0.0, stats=None,
+                                   status: str = "ok", all_products=None,
+                                   error: str = "", **_kwargs) -> None:
+                """同步进度回调，在每个产品完成时被 orchestrator 调用。
+
+                参数：
+                  product_name    -- 当前产品名
+                  completed       -- 已完成产品数
+                  total           -- 产品总数
+                  elapsed_seconds -- 该产品耗时（秒，由 orchestrator 填充）
+                  stats           -- SyncStats 对象（含 created_files/updated_files）
+                  status          -- "init" | "ok" | "error" | "skip"
+                  all_products    -- 全部产品名列表（仅 init 调用时传入）
+                  error           -- 失败时的错误描述（由 orchestrator 透传）
+                """
+                with self._lock:
+                    # 初始化调用：写入全部产品名并记录总数
+                    if all_products is not None:
+                        self._progress["all_products"] = list(all_products)
+                    if status == "init":
+                        self._progress["total"] = total
+                        return
+                    # 计算本产品同步的文件数（新建 + 更新）
+                    files_count = (stats.created_files + stats.updated_files) if stats else 0
+                    # 追加到已完成产品列表，包含 error 字段供前端展示失败原因
+                    self._progress["products"].append({
+                        "name": product_name,
+                        "status": status,
+                        "elapsed_seconds": round(elapsed_seconds, 2),
+                        "files_count": files_count,
+                        "error": error,
+                    })
+                    # 同时更新原有字段，保持前端兼容
+                    elapsed = time.time() - t_start
+                    self._progress["current_product"] = product_name
+                    self._progress["completed"] = completed
+                    self._progress["total"] = total
+                    self._progress["elapsed_seconds"] = round(elapsed, 1)
 
             # 产品选择逻辑，与 CLI update 对齐：
+            # retry_products 不为空时直接覆盖，只重跑失败产品
             # explicit_list 模式: default_products 作为主列表
             # local_scan 模式: 本地扫描为主，default_products 作为 fallback
             selected_products: list = []
             fallback_products: list = []
-            if getattr(user_config, "product_mode", "") == PRODUCT_MODE_EXPLICIT_LIST:
+            if retry_products is not None:
+                # retry_failed 分支：强制指定产品列表，跳过常规发现逻辑
+                selected_products = retry_products
+            elif getattr(user_config, "product_mode", "") == PRODUCT_MODE_EXPLICIT_LIST:
                 if not user_config.default_products:
                     raise RuntimeError("配置了 explicit_list，但 default_products 为空；请重新执行 setup。")
                 selected_products = user_config.default_products

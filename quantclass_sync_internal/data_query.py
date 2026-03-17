@@ -9,11 +9,17 @@ import json
 import time
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from .constants import ENCODING_CANDIDATES, KNOWN_DATASETS, TIMESTAMP_FILE_NAME
-from .models import log_error
-from .status_store import read_local_timestamp_date, read_or_backfill_product_last_status, report_dir_path
+from .constants import (
+    ENCODING_CANDIDATES, KNOWN_DATASETS, TIMESTAMP_FILE_NAME,
+    BUSINESS_DAY_ONLY_PRODUCTS, FINANCIAL_PRODUCTS, NOTICE_PRODUCTS,
+)
+from .models import log_error, RULES
+from .status_store import (
+    read_local_timestamp_date, read_or_backfill_product_last_status,
+    report_dir_path, status_db_path, PRODUCT_LAST_STATUS_FILE,
+)
 
 # --- 产品状态总览 ---
 
@@ -151,7 +157,7 @@ def get_latest_run_summary(log_dir: Path) -> Optional[Dict[str, Any]]:
             "reason_code": item.get("reason_code", ""),
         }
         for item in data.get("products", [])
-        if item.get("status") == "error"
+        if isinstance(item, dict) and item.get("status") == "error"
     ]
 
     return {
@@ -164,6 +170,9 @@ def get_latest_run_summary(log_dir: Path) -> Optional[Dict[str, Any]]:
         "skipped_total": data.get("skipped_total", 0),
         "failed_products": failed_products,
         "report_file": str(latest),
+        # 阶段耗时：前端用于展示"探测 Xs + 同步 Xs"
+        "phase_plan_seconds": data.get("phase_plan_seconds"),
+        "phase_sync_seconds": data.get("phase_sync_seconds"),
     }
 
 
@@ -186,6 +195,12 @@ def get_run_history(log_dir: Path, n: int = 10) -> List[Dict[str, Any]]:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+        # 从 products 列表中提取失败产品名（status == "error"）
+        products_list = data.get("products", [])
+        failed_products = [
+            p.get("product", "") for p in products_list
+            if isinstance(p, dict) and p.get("status") == "error"
+        ]
         history.append({
             "run_id": data.get("run_id", ""),
             "started_at": data.get("started_at", ""),
@@ -193,6 +208,7 @@ def get_run_history(log_dir: Path, n: int = 10) -> List[Dict[str, Any]]:
             "success_total": data.get("success_total", 0),
             "failed_total": data.get("failed_total", 0),
             "skipped_total": data.get("skipped_total", 0),
+            "failed_products": failed_products,
             "report_file": str(path),
         })
     return history
@@ -229,11 +245,20 @@ def get_run_detail(log_dir: Path, report_file: str) -> Dict[str, Any]:
     # 提取产品列表，失败排前面
     products = []
     for item in data.get("products", []):
+        if not isinstance(item, dict):
+            continue
+        # files_count = 新建文件数 + 更新文件数（从 stats 子对象读取，缺省为 0）
+        # 防御性处理：stats 可能为 None 或非 dict
+        stats = item.get("stats") or {}
+        if not isinstance(stats, dict):
+            stats = {}
+        files_count = stats.get("created_files", 0) + stats.get("updated_files", 0)
         products.append({
             "product": item.get("product", ""),
             "status": item.get("status", ""),
             "elapsed_seconds": item.get("elapsed_seconds", 0),
             "error": item.get("error", ""),
+            "files_count": files_count,
         })
     status_order = {"error": 0, "skipped": 1, "ok": 2}
     products.sort(key=lambda p: status_order.get(p["status"], 3))
@@ -251,185 +276,718 @@ def get_run_detail(log_dir: Path, report_file: str) -> Dict[str, Any]:
 
 # --- 数据健康检查 ---
 
-# 每产品最多检查前 N 个 CSV 文件（按 iterdir 顺序），避免大产品卡 UI
-_CSV_CHECK_LIMIT = 100
 
-# 状态目录名（工具自身写入的元数据，不参与健康检查）
-_META_DIR_NAME = ".quantclass_sync"
+def _issue(type_, severity, category, product, detail, file, repairable, repair_action):
+    """构造标准 issue 字典。"""
+    return {
+        "type": type_, "severity": severity, "category": category,
+        "product": product, "detail": detail, "file": file,
+        "repairable": repairable, "repair_action": repair_action,
+    }
 
-# 健康检查支持的问题类型集合
-_KNOWN_TYPES = {"missing_data", "csv_unreadable", "orphan_temp"}
+
+def _build_summary(issues, scanned_products, scanned_files, elapsed):
+    """构建检查结果摘要。"""
+    by_severity = {"error": 0, "warning": 0}
+    by_repair = {"auto_repairable": 0, "needs_resync": 0, "needs_investigation": 0}
+    for i in issues:
+        by_severity[i["severity"]] = by_severity.get(i["severity"], 0) + 1
+        if i["repairable"]:
+            by_repair["auto_repairable"] += 1
+        elif i["repair_action"] == "needs_resync":
+            by_repair["needs_resync"] += 1
+        else:
+            by_repair["needs_investigation"] += 1
+    return {
+        "total": len(issues), "by_severity": by_severity, "by_repair": by_repair,
+        "scanned_products": scanned_products, "scanned_files": scanned_files,
+        "elapsed_seconds": round(elapsed, 1),
+    }
 
 
-def _check_missing_data(
-    data_root: Path, catalog_products: Sequence[str],
-) -> List[Dict[str, Any]]:
-    """检查有 timestamp.txt 但目录下无数据文件的产品。"""
-    issues: List[Dict[str, Any]] = []
-    for product in catalog_products:
-        product_dir = data_root / product
-        ts_file = product_dir / TIMESTAMP_FILE_NAME
-        if not ts_file.is_file():
-            continue
-        # 有 timestamp.txt，检查目录下是否有数据（文件或子目录）
-        # 排除隐藏条目和 timestamp.txt 本身，剩余任意条目即视为有数据
+def _list_data_files(product_dir):
+    """递归列出数据文件，排除 timestamp.txt/.tmp-/隐藏文件。"""
+    result = []
+    if not product_dir.exists():
+        return result
+    for f in product_dir.rglob("*"):
+        if f.is_file() and not f.name.startswith(".") and f.name != TIMESTAMP_FILE_NAME:
+            result.append(f)
+    return result
+
+
+def _list_csv_files(product_dir):
+    """递归列出 .csv 文件。"""
+    if not product_dir.exists():
+        return []
+    return [f for f in product_dir.rglob("*.csv") if not f.name.startswith(".")]
+
+
+def _list_temp_files(product_dir):
+    """递归列出 .tmp- 前缀文件/目录（用 rglob 覆盖子目录中的残留临时文件）。"""
+    if not product_dir.exists():
+        return []
+    return [f for f in product_dir.rglob("*") if f.name.startswith(".tmp-")]
+
+
+def _looks_like_note(line):
+    """判断首行是否是备注行（非数据行）。"""
+    note_keywords = ["温馨提示", "数据", "微信", "仅供", "请勿"]
+    return any(kw in line for kw in note_keywords)
+
+
+def _read_csv_head_tail(csv_path):
+    """读取 CSV 首行（表头）和最后一个非空行。返回 (header_fields, last_fields) 或 (None, None)。
+
+    使用 csv.reader 解析，正确处理含逗号的带引号字段。
+    """
+    import csv
+    import io
+    from .csv_engine import decode_text
+    text, _ = decode_text(csv_path, preferred_encoding=None)
+    if not text or not text.strip():
+        return None, None
+    lines = text.strip().split("\n")
+    # 跳过备注行（如果有）
+    start = 0
+    if len(lines) > 1 and _looks_like_note(lines[0]):
+        start = 1
+    if start >= len(lines):
+        return None, None
+    # 用 csv.reader 解析表头行，正确处理带引号字段
+    header = next(csv.reader(io.StringIO(lines[start])))
+    if len(lines) <= start + 1:
+        return header, None  # 只有表头，无数据行
+    # 用 csv.reader 解析末行，正确处理带引号字段
+    last = next(csv.reader(io.StringIO(lines[-1])))
+    return header, last
+
+
+def _read_csv_full(csv_path, rule):
+    """读取完整 CSV，返回 (header_list, rows_list_of_lists) 或 (None, None)。
+
+    使用 csv.reader 解析，正确处理含逗号的带引号字段。
+    """
+    import csv
+    import io
+    from .csv_engine import decode_text
+    text, _ = decode_text(csv_path, preferred_encoding=rule.encoding if rule else None)
+    if not text or not text.strip():
+        return None, None
+    lines = text.strip().split("\n")
+    # 跳过备注行（有备注且行数大于 1）
+    start = 1 if rule and rule.has_note and len(lines) > 1 else 0
+    if start >= len(lines):
+        return None, None
+    # 用 csv.reader 解析表头行，正确处理带引号字段
+    header = next(csv.reader(io.StringIO(lines[start])))
+    rows = []
+    for line in lines[start + 1:]:
+        if line.strip():
+            rows.append(next(csv.reader(io.StringIO(line))))
+    return header, rows
+
+
+def _check_content_integrity(product, product_dir, rule):
+    """检查 #5 重复行, #6 关键字段空值。仅 KNOWN_DATASETS 中有 key_cols 的产品。"""
+    issues = []
+    csv_files = _list_csv_files(product_dir)
+    key_cols = rule.key_cols
+    # 合并 key_cols + sort_cols 去重保序，用于空值检查
+    check_cols = list(dict.fromkeys(list(key_cols) + list(rule.sort_cols)))
+
+    for csv_file in csv_files:
         try:
-            has_data = any(
-                not entry.name.startswith(".")
-                and entry.name != TIMESTAMP_FILE_NAME
-                for entry in product_dir.iterdir()
-            )
-        except OSError:
+            header, rows = _read_csv_full(csv_file, rule)
+            if header is None or not rows:
+                continue
+            rel_path = csv_file.relative_to(product_dir).as_posix()
+
+            # #5 重复行：按 key_cols 构造主键，统计重复数量
+            key_indices = [header.index(c) for c in key_cols if c in header]
+            if key_indices:
+                seen = set()
+                dup_count = 0
+                for row in rows:
+                    key = tuple(row[i] for i in key_indices if i < len(row))
+                    if key in seen:
+                        dup_count += 1
+                    else:
+                        seen.add(key)
+                if dup_count > 0:
+                    issues.append(_issue("duplicate_rows", "warning", "content_integrity",
+                                         product, f"发现 {dup_count} 行主键重复",
+                                         rel_path, True, "dedup_rows"))
+
+            # #6 关键字段空值：检查 key_cols + sort_cols 中的空值
+            check_indices = [header.index(c) for c in check_cols if c in header]
+            null_count = 0
+            null_cols = set()
+            for row in rows:
+                for ci in check_indices:
+                    if ci < len(row) and (not row[ci] or row[ci].strip() == ""):
+                        null_count += 1
+                        null_cols.add(header[ci])
+            if null_count > 0:
+                cols_str = "/".join(sorted(null_cols))
+                issues.append(_issue("null_key_fields", "warning", "content_integrity",
+                                     product, f"{cols_str} 有 {null_count} 个空值",
+                                     rel_path, False, "needs_investigation"))
+        except Exception:
             continue
-        if not has_data:
-            issues.append({
-                "type": "missing_data",
-                "product": product,
-                "detail": "有 timestamp.txt 但目录下无数据文件",
-                "file": "",
-            })
     return issues
 
 
-def _check_csv_unreadable(data_root: Path) -> List[Dict[str, Any]]:
-    """检查 KNOWN_DATASETS 中 CSV 是否可正常读取（解码 + 非空）。
+def _check_file_integrity(data_root, product, product_dir, rule):
+    """检查 #1 缺失数据, #2 残留临时文件, #3 CSV 完整性。返回 (file_count, issues)。"""
+    issues = []
+    file_count = 0
 
-    轻量检查：open + 读前两行，每产品上限 _CSV_CHECK_LIMIT 个文件。
-    仅检查产品目录一级下的 CSV，子目录内文件不检测。
-    """
-    issues: List[Dict[str, Any]] = []
-    for product in KNOWN_DATASETS:
-        product_dir = data_root / product
-        if not product_dir.is_dir():
-            continue
+    if not product_dir.exists():
+        return 0, issues
+
+    # #1 缺失数据：有 timestamp 但无数据文件
+    ts = read_local_timestamp_date(data_root, product)
+    data_files = _list_data_files(product_dir)
+    file_count = len(data_files)
+    if ts and not data_files:
+        issues.append(_issue("missing_data", "error", "file_integrity",
+                             product, "有 timestamp.txt 但无数据文件", "",
+                             False, "needs_resync"))
+
+    # #2 残留临时文件
+    for f in _list_temp_files(product_dir):
+        issues.append(_issue("orphan_temp", "warning", "file_integrity",
+                             product, f"残留临时文件: {f.name}", f.name,
+                             True, "delete_temp"))
+
+    # #3 CSV 完整性（首行可读 + 尾部残行检查）
+    csv_files = _list_csv_files(product_dir)
+    for csv_file in csv_files:
         try:
-            csv_files = [
-                f for f in product_dir.iterdir()
-                if f.is_file() and f.suffix == ".csv" and not f.name.startswith(".")
-            ]
-        except OSError:
-            continue
-        for csv_path in csv_files[:_CSV_CHECK_LIMIT]:
-            rel_path = f"{product}/{csv_path.name}"
-            # 尝试所有候选编码
-            readable = False
-            for enc in ENCODING_CANDIDATES:
-                try:
-                    with open(csv_path, "r", encoding=enc) as fh:
-                        first_line = fh.readline()
-                        if first_line.strip():
-                            readable = True
-                            break
-                except (OSError, UnicodeDecodeError, ValueError):
-                    continue
-            if not readable:
-                issues.append({
-                    "type": "csv_unreadable",
-                    "product": product,
-                    "detail": f"{rel_path}: 无法解码或内容为空",
-                    "file": rel_path,
-                })
+            header, last_line = _read_csv_head_tail(csv_file)
+            if header is None:
+                issues.append(_issue("csv_unreadable", "error", "file_integrity",
+                                     product, "文件无法解码或为空",
+                                     csv_file.relative_to(product_dir).as_posix(),
+                                     False, "needs_resync"))
+            elif last_line is not None and len(last_line) != len(header):
+                issues.append(_issue("tail_corruption", "error", "file_integrity",
+                                     product,
+                                     f"末尾行不完整（期望{len(header)}列，实际{len(last_line)}列）",
+                                     csv_file.relative_to(product_dir).as_posix(),
+                                     True, "truncate_tail"))
+        except Exception:
+            issues.append(_issue("csv_unreadable", "error", "file_integrity",
+                                 product, "文件读取异常",
+                                 csv_file.relative_to(product_dir).as_posix(),
+                                 False, "needs_resync"))
+
+    return file_count, issues
+
+
+def _check_infrastructure(data_root):
+    """检查 #4 FuelBinStat.db 和 product_last_status.json 完整性。"""
+    issues = []
+
+    # 检查 SQLite 状态数据库
+    db_path = status_db_path(data_root)
+    if db_path.exists():
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(db_path))
+            conn.execute("SELECT 1 FROM product_status LIMIT 1")
+            conn.close()
+        except Exception as e:
+            issues.append(_issue("infra_db_corrupt", "error", "file_integrity",
+                                 "(global)", f"状态数据库损坏: {e}", db_path.name,
+                                 True, "rebuild_status_db"))
+
+    # 检查产品状态 JSON 文件
+    rdir = report_dir_path(data_root)
+    json_path = rdir / PRODUCT_LAST_STATUS_FILE
+    if json_path.exists():
+        try:
+            import json
+            json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            issues.append(_issue("infra_json_corrupt", "error", "file_integrity",
+                                 "(global)", f"产品状态 JSON 损坏: {e}", json_path.name,
+                                 False, "needs_investigation"))
     return issues
 
 
-def _check_orphan_temp(data_root: Path) -> List[Dict[str, Any]]:
-    """检查 data_root 下残留的临时文件（含 .tmp- 的文件名）。
-
-    按产品目录逐个扫描一级文件（atomic_temp_path 生成的 tmp 文件与目标同目录）。
-    同时检查 data_root 根级文件。跳过 .quantclass_sync 状态目录。
-    """
-    issues: List[Dict[str, Any]] = []
-
-    # 扫描 data_root 根级文件
+def _load_trading_calendar(data_root):
+    """从 data_root/period_offset.csv 加载 A 股交易日历。返回 set[str] 或 None。"""
+    po_path = data_root / "period_offset.csv"
+    if not po_path.exists():
+        return None
     try:
-        for entry in data_root.iterdir():
-            if entry.is_file() and ".tmp-" in entry.name:
-                issues.append({
-                    "type": "orphan_temp",
-                    "product": "",
-                    "detail": entry.name,
-                    "file": entry.name,
-                })
-    except OSError:
-        pass
+        from .csv_engine import decode_text
+        text, _ = decode_text(po_path, preferred_encoding=None)
+        if not text:
+            return None
+        dates = set()
+        for line in text.strip().split("\n"):
+            if not line.strip():
+                continue
+            first_col = line.split(",")[0].strip()
+            # 跳过备注行和表头：只要 YYYY-MM-DD 格式
+            if len(first_col) == 10 and first_col[4] == "-" and first_col[7] == "-":
+                dates.add(first_col)
+        return dates if dates else None
+    except Exception:
+        return None
 
-    # 逐产品目录扫描一级文件
-    try:
-        subdirs = [
-            d for d in data_root.iterdir()
-            if d.is_dir() and not d.name.startswith(".")
-        ]
-    except OSError:
+
+def _generate_calendar_days(start_date, end_date):
+    """生成 start 到 end 之间的所有自然日（含首尾）。"""
+    from datetime import datetime, timedelta
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    dates = set()
+    current = start
+    while current <= end:
+        dates.add(current.strftime("%Y-%m-%d"))
+        current += timedelta(days=1)
+    return dates
+
+
+def _generate_weekdays(start_date, end_date):
+    """生成 start 到 end 之间的所有工作日（周一到周五，近似，节假日可能误报）。"""
+    from datetime import datetime, timedelta
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    dates = set()
+    current = start
+    while current <= end:
+        if current.weekday() < 5:  # 0=周一, 4=周五
+            dates.add(current.strftime("%Y-%m-%d"))
+        current += timedelta(days=1)
+    return dates
+
+
+def _sample_max_date(csv_files, rule, date_col, sample_size=20):
+    """从抽样文件中提取最大日期值（YYYY-MM-DD 格式）。"""
+    import random
+    samples = random.sample(csv_files, min(sample_size, len(csv_files)))
+    max_date = None
+    for f in samples:
+        try:
+            header, rows = _read_csv_full(f, rule)
+            if not header or not rows or date_col not in header:
+                continue
+            idx = header.index(date_col)
+            for row in rows:
+                if idx < len(row) and row[idx].strip():
+                    d = row[idx].strip()[:10]
+                    if len(d) == 10 and d[4] == "-":
+                        if max_date is None or d > max_date:
+                            max_date = d
+        except Exception:
+            continue
+    return max_date
+
+
+def _sample_min_date(csv_files, rule, date_col, sample_size=20):
+    """从抽样文件中提取最小日期值（YYYY-MM-DD 格式），用于确定连续性检查的起点。"""
+    import random
+    samples = random.sample(csv_files, min(sample_size, len(csv_files)))
+    min_date = None
+    for f in samples:
+        try:
+            header, rows = _read_csv_full(f, rule)
+            if not header or not rows or date_col not in header:
+                continue
+            idx = header.index(date_col)
+            for row in rows:
+                if idx < len(row) and row[idx].strip():
+                    d = row[idx].strip()[:10]
+                    if len(d) == 10 and d[4] == "-":
+                        if min_date is None or d < min_date:
+                            min_date = d
+        except Exception:
+            continue
+    return min_date
+
+
+def _extract_actual_dates(csv_files, rule, date_col):
+    """从 CSV 文件中提取实际存在的日期集合。大产品（>100 文件）抽样以控制性能。"""
+    import random
+    # 超过 100 个文件时抽样，避免对大产品全量读取导致检查超时
+    if len(csv_files) > 100:
+        samples = random.sample(csv_files, 100)
+    else:
+        samples = csv_files
+    dates = set()
+    for f in samples:
+        try:
+            header, rows = _read_csv_full(f, rule)
+            if not header or not rows or date_col not in header:
+                continue
+            idx = header.index(date_col)
+            for row in rows:
+                if idx < len(row) and row[idx].strip():
+                    d = row[idx].strip()[:10]
+                    if len(d) == 10 and d[4] == "-":
+                        dates.add(d)
+        except Exception:
+            continue
+    return dates
+
+
+def _check_temporal_integrity(data_root, product, rule, trading_calendar):
+    """检查 #7 timestamp-数据日期一致性, #8 日期连续性。"""
+    issues = []
+    if not rule:
         return issues
 
-    for product_dir in subdirs:
-        product = product_dir.name
-        try:
-            for entry in product_dir.iterdir():
-                if entry.is_file() and ".tmp-" in entry.name:
-                    rel = f"{product}/{entry.name}"
-                    issues.append({
-                        "type": "orphan_temp",
-                        "product": product,
-                        "detail": rel,
-                        "file": rel,
-                    })
-        except OSError:
-            continue
+    # 跳过财务/公告类产品（不适用日期连续性检查）
+    if product in FINANCIAL_PRODUCTS or product in NOTICE_PRODUCTS:
+        return issues
+
+    ts_date = read_local_timestamp_date(data_root, product)
+    if not ts_date:
+        return issues
+
+    # 确定日期列：优先 date_filter_col，其次 sort_cols 第一列
+    date_col = rule.date_filter_col or (rule.sort_cols[0] if rule.sort_cols else None)
+    if not date_col:
+        return issues
+
+    product_dir = data_root / product
+    csv_files = _list_csv_files(product_dir)
+    if not csv_files:
+        return issues
+
+    # #7 timestamp-数据日期一致性：CSV 最大日期不应超过 timestamp，也不应远落后
+    max_date = _sample_max_date(csv_files, rule, date_col, sample_size=20)
+    if max_date:
+        if max_date > ts_date:
+            issues.append(_issue("date_exceeds_timestamp", "error", "temporal_integrity",
+                                 product, f"CSV 最大日期 {max_date} > timestamp {ts_date}",
+                                 "", False, "needs_investigation"))
+        else:
+            ts_dt = datetime.strptime(ts_date, "%Y-%m-%d")
+            max_dt = datetime.strptime(max_date, "%Y-%m-%d")
+            gap_days = (ts_dt - max_dt).days
+            if gap_days > 5:
+                issues.append(_issue("timestamp_data_gap", "warning", "temporal_integrity",
+                                     product,
+                                     f"timestamp {ts_date} 远超数据最大日期 {max_date}（差 {gap_days} 天）",
+                                     "", False, "needs_resync"))
+
+    # #8 日期连续性：用 min_date 作为起点，ts_date 作为终点，检查期间是否有缺失日期
+    if not max_date:
+        return issues
+
+    # 抽样最小日期，作为连续性检查的起始点
+    min_date = _sample_min_date(csv_files, rule, date_col, sample_size=20)
+    if not min_date:
+        return issues
+
+    is_crypto = product.startswith("coin-")
+    expected = None
+    if is_crypto:
+        # 加密货币全天候交易，期望每日都有数据
+        expected = _generate_calendar_days(min_date, ts_date)
+    elif product in BUSINESS_DAY_ONLY_PRODUCTS and trading_calendar:
+        # A 股交易日产品，用精确交易日历
+        expected = {d for d in trading_calendar if min_date <= d <= ts_date}
+    elif product in BUSINESS_DAY_ONLY_PRODUCTS:
+        # 无交易日历时降级为工作日近似（节假日可能误报）
+        expected = _generate_weekdays(min_date, ts_date)
+
+    if expected is None:
+        return issues
+
+    # 从 CSV 文件内容提取实际日期集合，对比期望集合找出缺失
+    actual_dates = _extract_actual_dates(csv_files, rule, date_col)
+    missing = sorted(expected - actual_dates)
+    # 缺失超过 30 天时不报告（可能是数据本身不连续，如分钟线等，避免大量误报）
+    if missing and len(missing) <= 30:
+        dates_str = ", ".join(missing[:5])
+        if len(missing) > 5:
+            dates_str += f" 等共 {len(missing)} 天"
+        detail = f"缺失日期: {dates_str}"
+        if len(csv_files) > 100:
+            detail += "（基于抽样检测，可能有偏差）"
+        if product in BUSINESS_DAY_ONLY_PRODUCTS and not trading_calendar:
+            detail += "（近似检测，节假日可能误报）"
+        issues.append(_issue("missing_trading_days", "warning", "temporal_integrity",
+                             product, detail, "", False, "needs_resync"))
 
     return issues
+
+
+def _load_health_baseline(data_root):
+    """从 health_baseline.json 加载上次文件数基线。返回 dict 或 None。"""
+    rdir = report_dir_path(data_root)
+    baseline_path = rdir / "health_baseline.json"
+    if not baseline_path.exists():
+        return None
+    try:
+        return json.loads(baseline_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _save_health_baseline(data_root, product_file_counts, issues):
+    """保存新基线到 health_baseline.json。有覆盖完整性告警时不更新基线。"""
+    # 有 coverage_integrity 告警说明本次数据可能异常，不应覆盖基线
+    has_coverage_warning = any(i.get("category") == "coverage_integrity" for i in issues)
+    if has_coverage_warning:
+        return
+    rdir = report_dir_path(data_root)
+    baseline_path = rdir / "health_baseline.json"
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(json.dumps(product_file_counts, ensure_ascii=False), encoding="utf-8")
+
+
+def _check_coverage_integrity(product, product_dir, file_count, baseline):
+    """检查 #9 标的数量稳定性：文件数相比基线下降超过 20% 时告警。"""
+    issues = []
+    if not baseline or product not in baseline:
+        return issues
+    prev_count = baseline.get(product, 0)
+    if prev_count > 0 and file_count < prev_count * 0.8:
+        drop_pct = round((1 - file_count / prev_count) * 100)
+        issues.append(_issue("file_count_drop", "warning", "coverage_integrity",
+                             product,
+                             f"文件数从 {prev_count} 降至 {file_count}（-{drop_pct}%）",
+                             "", False, "needs_investigation"))
+    return issues
+
+
+def _check_format_integrity(product, product_dir):
+    """检查 #10 列名一致性：同产品内抽样比对，发现不同列名组合时告警。"""
+    issues = []
+    csv_files = _list_csv_files(product_dir)
+    if len(csv_files) < 2:
+        return issues
+    import random
+    samples = random.sample(csv_files, min(20, len(csv_files)))
+    column_sets = []
+    for f in samples:
+        try:
+            header, _ = _read_csv_head_tail(f)
+            if header:
+                column_sets.append(frozenset(header))
+        except Exception:
+            continue
+    if len(set(column_sets)) > 1:
+        unique_count = len(set(column_sets))
+        issues.append(_issue("column_inconsistency", "warning", "format_integrity",
+                             product,
+                             f"抽样 {len(samples)} 个文件发现 {unique_count} 种不同列名组合",
+                             "", False, "needs_investigation"))
+    return issues
+
+
+def repair_data_issues(
+    data_root: Path,
+    issues: List[Dict],
+    progress_callback: Optional[Callable] = None,
+) -> Dict[str, Any]:
+    """修复可自动修复的 issues。返回 {repaired: [...], failed: [...]}"""
+    # 只处理标记为可修复的 issue
+    repairable = [i for i in issues if i.get("repairable")]
+    repaired = []
+    failed = []
+
+    for idx, issue in enumerate(repairable):
+        if progress_callback:
+            progress_callback(idx, len(repairable), issue["product"], "repairing")
+        try:
+            action = issue["repair_action"]
+            if action == "truncate_tail":
+                _repair_truncate_tail(data_root, issue)
+            elif action == "delete_temp":
+                _repair_delete_temp(data_root, issue)
+            elif action == "dedup_rows":
+                _repair_dedup_rows(data_root, issue)
+            elif action == "rebuild_status_db":
+                _repair_rebuild_status_db(data_root)
+            else:
+                failed.append({**issue, "error": f"未知修复动作: {action}"})
+                continue
+            repaired.append(issue)
+        except Exception as e:
+            failed.append({**issue, "error": str(e)})
+
+    return {"repaired": repaired, "failed": failed}
+
+
+def _repair_truncate_tail(data_root: Path, issue: Dict) -> None:
+    """截断 CSV 最后一个不完整行（末尾行列数与表头不符时执行）。
+
+    用 csv.reader 统计字段数，正确处理含逗号的带引号字段。
+    """
+    import csv
+    import io
+    from .csv_engine import decode_text
+    product = issue["product"]
+    csv_path = data_root / product / issue["file"]
+    rule = RULES.get(product)
+    encoding = rule.encoding if rule else None
+    text, detected_enc = decode_text(csv_path, preferred_encoding=encoding)
+    if not text:
+        return
+    lines = text.split("\n")
+    # 移除尾部空行
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines:
+        return
+    # 用 csv.reader 统计末行字段数，确认是不完整行后才截断
+    last_fields = next(csv.reader(io.StringIO(lines[-1])))
+    # 找到表头以比较列数（跳过可能的备注行）
+    header_idx = 0
+    if len(lines) > 1 and _looks_like_note(lines[0]):
+        header_idx = 1
+    if header_idx < len(lines):
+        header_fields = next(csv.reader(io.StringIO(lines[header_idx])))
+        if len(last_fields) != len(header_fields):
+            lines.pop()  # 末行列数不符，移除残行
+    csv_path.write_text("\n".join(lines) + "\n", encoding=detected_enc or "utf-8")
+
+
+def _repair_delete_temp(data_root: Path, issue: Dict) -> None:
+    """删除残留临时文件或目录。"""
+    import shutil
+    product = issue["product"]
+    # (root) 表示 data_root 根级临时文件
+    if product == "(root)":
+        target = data_root / issue["file"]
+    else:
+        target = data_root / product / issue["file"]
+    if target.is_dir():
+        shutil.rmtree(target)
+    elif target.exists():
+        target.unlink()
+
+
+def _repair_dedup_rows(data_root: Path, issue: Dict) -> None:
+    """按 key_cols 去重，保留最后出现的行，重写文件。"""
+    product = issue["product"]
+    csv_path = data_root / product / issue["file"]
+    rule = RULES.get(product)
+    if not rule:
+        raise ValueError(f"产品 {product} 无 RULES 定义，无法去重")
+    header, rows = _read_csv_full(csv_path, rule)
+    if not header or not rows:
+        return
+    # 构造 key_cols 在 header 中的索引
+    key_indices = [header.index(c) for c in rule.key_cols if c in header]
+    if not key_indices:
+        return
+    # 后出现的行覆盖先出现的（保留最后一条）
+    seen: Dict[tuple, int] = {}
+    for i, row in enumerate(rows):
+        key = tuple(row[j] for j in key_indices if j < len(row))
+        seen[key] = i
+    unique_rows = [rows[i] for i in sorted(seen.values())]
+    # 重写文件：有备注行时保留首行备注，用 csv.writer 正确处理含逗号字段
+    import io as _io
+    import csv as _csv
+    output_parts = []
+    if rule.has_note:
+        from .csv_engine import decode_text
+        text, _ = decode_text(csv_path, preferred_encoding=rule.encoding)
+        first_line = text.split("\n")[0] if text else ""
+        output_parts.append(first_line + "\n")
+    # 写表头和数据行
+    buf = _io.StringIO()
+    writer = _csv.writer(buf, lineterminator="\n")
+    writer.writerow(header)
+    writer.writerows(unique_rows)
+    output_parts.append(buf.getvalue())
+    csv_path.write_text("".join(output_parts), encoding=rule.encoding)
+
+
+def _repair_rebuild_status_db(data_root: Path) -> None:
+    """从各产品 timestamp.txt 重建 FuelBinStat.db 基础记录。
+
+    先删除损坏的数据库文件，再重新创建，避免在损坏文件上重连失败。
+    """
+    from .status_store import connect_status_db, upsert_product_status
+    from .models import ProductStatus
+    db_path = status_db_path(data_root)
+    if db_path.exists():
+        db_path.unlink()  # 删除损坏的数据库文件
+    conn = connect_status_db(data_root)
+    try:
+        for product in KNOWN_DATASETS:
+            ts = read_local_timestamp_date(data_root, product)
+            if ts:
+                # 用 timestamp 日期作为 data_time 填充最小信息，其余字段保持默认
+                status = ProductStatus(name=product, data_time=ts)
+                upsert_product_status(conn, status)
+    finally:
+        conn.close()
 
 
 def check_data_health(
-    data_root: Path, catalog_products: Sequence[str],
+    data_root: Path,
+    catalog_products: Sequence[str],
+    progress_callback: Optional[Callable] = None,
 ) -> Dict[str, Any]:
-    """扫描 data_root，返回数据健康报告。
-
-    检测三类问题：文件缺失(missing_data)、CSV 不可读(csv_unreadable)、
-    残留临时文件(orphan_temp)。
-
-    data_root 不存在时返回空报告，单个子检查异常不中断其他检查。
-    """
-    t0 = time.monotonic()
-
-    # data_root 不存在，返回空报告
-    if not data_root.is_dir():
-        return {
-            "issues": [],
-            "summary": {
-                "missing_data": 0,
-                "csv_unreadable": 0,
-                "orphan_temp": 0,
-                "total": 0,
-            },
-            "scanned_products": 0,
-            "elapsed_seconds": 0.0,
-        }
-
-    # 三个子检查各自隔离，一个失败不影响其他
+    """数据质量全面检查。progress_callback(current, total, product, phase) 每产品调用。"""
+    start = time.time()
     issues: List[Dict[str, Any]] = []
-    for check_fn, args in [
-        (_check_missing_data, (data_root, catalog_products)),
-        (_check_csv_unreadable, (data_root,)),
-        (_check_orphan_temp, (data_root,)),
-    ]:
-        try:
-            issues.extend(check_fn(*args))
-        except Exception as exc:
-            log_error(f"健康检查子任务 {check_fn.__name__} 异常：{exc}", event="HEALTH_CHECK")
+    scanned_files = 0
+    total_products = len(catalog_products)
+    # 记录每产品文件数，用于覆盖完整性基线保存
+    product_file_counts: Dict[str, int] = {}
 
-    # 统计各类型计数（只统计已知类型，确保 total = 三类之和）
-    summary: Dict[str, int] = {"missing_data": 0, "csv_unreadable": 0, "orphan_temp": 0}
-    for issue in issues:
-        issue_type = issue["type"]
-        if issue_type in _KNOWN_TYPES:
-            summary[issue_type] += 1
-    summary["total"] = len(issues)
+    # 加载 A 股交易日历（仅一次，供所有产品的时间完整性检查使用）
+    trading_calendar = _load_trading_calendar(data_root)
+    # 加载覆盖完整性基线（仅一次）
+    baseline = _load_health_baseline(data_root)
 
-    elapsed = round(time.monotonic() - t0, 2)
-    return {
-        "issues": issues,
-        "summary": summary,
-        "scanned_products": len(catalog_products),
-        "elapsed_seconds": elapsed,
-    }
+    for idx, product in enumerate(catalog_products):
+        if progress_callback:
+            progress_callback(idx, total_products, product, "checking")
+        product_dir = data_root / product
+        rule = RULES.get(product)
+
+        # 文件完整性检查 (#1-3)
+        file_count, fi_issues = _check_file_integrity(data_root, product, product_dir, rule)
+        issues.extend(fi_issues)
+        scanned_files += file_count
+        product_file_counts[product] = file_count
+
+        # 内容完整性（仅 KNOWN_DATASETS 中有 key_cols 的产品）
+        if rule and rule.key_cols:
+            ci_issues = _check_content_integrity(product, product_dir, rule)
+            issues.extend(ci_issues)
+
+        # 时间完整性 (#7-8)
+        ti_issues = _check_temporal_integrity(data_root, product, rule, trading_calendar)
+        issues.extend(ti_issues)
+
+        # 覆盖完整性 (#9)
+        cov_issues = _check_coverage_integrity(product, product_dir, file_count, baseline)
+        issues.extend(cov_issues)
+
+        # 格式完整性 (#10)
+        fmt_issues = _check_format_integrity(product, product_dir)
+        issues.extend(fmt_issues)
+
+    # 基础设施检查 (#4, 全局一次性)
+    infra_issues = _check_infrastructure(data_root)
+    issues.extend(infra_issues)
+
+    # 残留临时文件（data_root 根级）
+    if data_root.exists():
+        for f in data_root.iterdir():
+            if f.name.startswith(".tmp-"):
+                issues.append(_issue("orphan_temp", "warning", "file_integrity",
+                                     "(root)", f"残留临时文件: {f.name}", f.name,
+                                     True, "delete_temp"))
+
+    # 保存覆盖完整性基线（有 coverage_integrity 告警时不更新）
+    _save_health_baseline(data_root, product_file_counts, issues)
+
+    summary = _build_summary(issues, total_products, scanned_files, time.time() - start)
+    return {"issues": issues, "summary": summary}

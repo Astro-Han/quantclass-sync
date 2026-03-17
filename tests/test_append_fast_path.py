@@ -356,6 +356,8 @@ class TestSyncPayloadFastPath(unittest.TestCase):
             self.assertEqual(len(payload.rows), 2)
 
 
+import stat
+
 from quantclass_sync_internal.csv_engine import merge_payload, write_csv_payload
 
 
@@ -426,6 +428,49 @@ class TestAppendEquivalence(unittest.TestCase):
             fast_payload = read_csv_payload(fast)
             full_payload = read_csv_payload(full)
             self.assertEqual(fast_payload.rows, full_payload.rows)
+
+
+class TestAppendCsvRowsAtomic(unittest.TestCase):
+    """验证 _append_csv_rows 的原子写入行为。"""
+
+    def test_append_creates_no_tmp_on_success(self):
+        """成功追加后不留临时文件，内容包含旧行和新行。"""
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "data.csv"
+            p.write_text("col_a,col_b\n1,2\n", encoding="utf-8")
+            _append_csv_rows(p, [["3", "4"], ["5", "6"]], ",", "utf-8")
+            # 不应留下 .tmp-append-* 临时文件
+            tmp_files = list(Path(d).glob(".tmp-append-*"))
+            self.assertEqual(tmp_files, [], f"残留临时文件: {tmp_files}")
+            # 原文件内容正确
+            lines = p.read_text(encoding="utf-8").strip().split("\n")
+            self.assertEqual(lines, ["col_a,col_b", "1,2", "3,4", "5,6"])
+
+    def test_append_preserves_original_on_write_error(self):
+        """写入失败时原文件保持不变。"""
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "data.csv"
+            original_content = "col_a,col_b\n1,2\n"
+            p.write_text(original_content, encoding="utf-8")
+            # 将目录设为只读，使 shutil.copy2 创建临时文件后无法写入
+            # 改用 patch open 模拟写入中途崩溃
+            from unittest.mock import patch, mock_open
+            real_open = Path.open
+
+            def fail_on_append(self_path, mode="r", **kwargs):
+                if mode == "a":
+                    raise OSError("模拟写入崩溃")
+                return real_open(self_path, mode, **kwargs)
+
+            with patch.object(Path, "open", fail_on_append):
+                with self.assertRaises(OSError):
+                    _append_csv_rows(p, [["3", "4"]], ",", "utf-8")
+
+            # 原文件内容不变
+            self.assertEqual(p.read_text(encoding="utf-8"), original_content)
+            # 临时文件已被清理
+            tmp_files = list(Path(d).glob(".tmp-append-*"))
+            self.assertEqual(tmp_files, [], f"残留临时文件: {tmp_files}")
 
 
 if __name__ == "__main__":

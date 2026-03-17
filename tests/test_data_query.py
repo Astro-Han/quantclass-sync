@@ -1190,5 +1190,125 @@ class TestEmptyProductsSentinelWrite(unittest.TestCase):
             self.assertEqual(data, {})
 
 
+class TestGetRunHistoryFailedProducts(unittest.TestCase):
+    """get_run_history 的 failed_products 字段测试。"""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.log_dir = Path(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _write_report(self, filename, products):
+        """写入含指定产品列表的 report JSON 文件。"""
+        report = {
+            "run_id": filename,
+            "started_at": "2026-03-13T00:00:00Z",
+            "duration_seconds": 10,
+            "success_total": 0,
+            "failed_total": 0,
+            "skipped_total": 0,
+            "products": products,
+        }
+        (self.log_dir / filename).write_text(json.dumps(report), encoding="utf-8")
+
+    def test_failed_products_returned(self):
+        """含失败产品时，failed_products 返回正确名称列表。"""
+        self._write_report("run_report_20260313_update.json", [
+            {"product": "prod-a", "status": "ok"},
+            {"product": "prod-b", "status": "error"},
+            {"product": "prod-c", "status": "error"},
+        ])
+        history = get_run_history(self.log_dir, n=1)
+        self.assertEqual(len(history), 1)
+        self.assertCountEqual(history[0]["failed_products"], ["prod-b", "prod-c"])
+
+    def test_all_success_failed_products_empty(self):
+        """全部成功时，failed_products 返回空列表。"""
+        self._write_report("run_report_20260313_update.json", [
+            {"product": "prod-a", "status": "ok"},
+            {"product": "prod-b", "status": "skipped"},
+        ])
+        history = get_run_history(self.log_dir, n=1)
+        self.assertEqual(history[0]["failed_products"], [])
+
+    def test_products_field_missing_returns_empty(self):
+        """report JSON 中 products 字段缺失时，failed_products 返回空列表。"""
+        # 写入不含 products 字段的报告
+        report = {
+            "run_id": "run-no-products",
+            "started_at": "2026-03-13T00:00:00Z",
+            "duration_seconds": 5,
+            "success_total": 0,
+            "failed_total": 0,
+            "skipped_total": 0,
+        }
+        (self.log_dir / "run_report_20260313_update.json").write_text(
+            json.dumps(report), encoding="utf-8"
+        )
+        history = get_run_history(self.log_dir, n=1)
+        self.assertEqual(history[0]["failed_products"], [])
+
+
+class TestGetRunDetailFilesCount(unittest.TestCase):
+    """get_run_detail 的 files_count 字段测试。"""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.log_dir = Path(self.tmpdir.name)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _write_report(self, products):
+        """写入含指定产品列表的 report JSON，返回文件路径字符串。"""
+        report = {
+            "run_id": "run-test",
+            "started_at": "2026-03-13T00:00:00Z",
+            "duration_seconds": 10,
+            "success_total": 0,
+            "failed_total": 0,
+            "skipped_total": 0,
+            "products": products,
+        }
+        path = self.log_dir / "run_report_20260313_update.json"
+        path.write_text(json.dumps(report), encoding="utf-8")
+        return str(path)
+
+    def test_files_count_equals_created_plus_updated(self):
+        """files_count = created_files + updated_files。"""
+        report_file = self._write_report([
+            {
+                "product": "prod-a", "status": "ok", "elapsed_seconds": 5, "error": "",
+                "stats": {"created_files": 3, "updated_files": 2},
+            },
+        ])
+        result = get_run_detail(self.log_dir, report_file)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["products"][0]["files_count"], 5)
+
+    def test_files_count_zero_when_no_stats(self):
+        """stats 字段缺失时，files_count 为 0。"""
+        report_file = self._write_report([
+            {"product": "prod-b", "status": "ok", "elapsed_seconds": 3, "error": ""},
+        ])
+        result = get_run_detail(self.log_dir, report_file)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["products"][0]["files_count"], 0)
+
+    def test_files_count_partial_stats(self):
+        """stats 只有部分字段时，缺失的键默认 0。"""
+        report_file = self._write_report([
+            {
+                "product": "prod-c", "status": "ok", "elapsed_seconds": 2, "error": "",
+                "stats": {"created_files": 4},  # 没有 updated_files
+            },
+        ])
+        result = get_run_detail(self.log_dir, report_file)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["products"][0]["files_count"], 4)
+
+
 if __name__ == "__main__":
     unittest.main()

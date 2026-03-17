@@ -4,13 +4,14 @@ document.addEventListener('alpine:init', () => {
     Alpine.data('app', () => ({
         // ===== 全局状态 =====
         currentView: 'main',  // 视图切换: 'setup' | 'main'
-        tab: 'overview',   // 当前 Tab: 'overview' | 'sync' | 'history'
-        loading: true,     // 总览是否正在加载
-        products: [],      // 产品列表，每项包含 name/color/local_date/behind_days/last_result
+        tab: 'overview',      // 当前 Tab: 'overview' | 'sync' | 'history'
+        loading: true,        // 总览是否正在加载
+        products: [],         // 产品列表，每项包含 name/color/local_date/behind_days/last_result/last_error
         summary: { green: 0, yellow: 0, red: 0, gray: 0 }, // 四色计数
-        dataRoot: '',      // 数据目录路径
-        lastRun: null,     // 上次同步时间字符串
-        overviewError: '',  // 总览加载错误信息
+        dataRoot: '',         // 数据目录路径
+        lastRun: null,        // 上次同步信息对象
+        overviewError: '',    // 总览加载错误信息
+        canOpenDir: false,    // 数据目录是否可以点击打开（后端支持时为 true）
 
         // ===== Setup 向导状态 =====
         setupDataRoot: '',     // 向导表单：数据目录
@@ -23,7 +24,7 @@ document.addEventListener('alpine:init', () => {
 
         // ===== 筛选状态 =====
         searchText: '',        // 搜索文本（按产品名模糊匹配）
-        filterColor: 'all',   // 筛选颜色: 'all' | 'green' | 'yellow' | 'red' | 'gray'
+        filterColor: 'all',    // 筛选颜色: 'all' | 'green' | 'yellow' | 'red' | 'gray'
 
         // ===== 历史状态 =====
         historyList: [],       // 历史运行列表
@@ -35,22 +36,27 @@ document.addEventListener('alpine:init', () => {
         // ===== 检查更新状态 =====
         checkUpdateLoading: false,
         checkUpdateConfirmVisible: false,
-        checkUpdateResult: null,         // {message, isError} 或 null
+        checkUpdateResult: null,  // {message, isError} 或 null
 
         // ===== 健康检查状态 =====
-        healthReport: null,        // 健康报告结果对象（null 表示未检查过）
-        healthLoading: false,      // 是否正在检查中
-        healthError: '',           // 检查失败时的错误信息
+        healthState: 'idle',     // idle | confirming | checking | done | error
+        healthProgress: null,    // {current, total, product}
+        healthResult: null,      // check_data_health 完整结果
+        healthError: '',
+        healthPollTimer: null,
+        repairMessage: '',
 
         // ===== 同步状态 =====
-        syncStatus: 'idle',    // 'idle' | 'syncing' | 'done' | 'error'
-        currentProduct: '',    // 最近完成的产品名
-        completed: 0,          // 已完成产品数
-        total: 0,              // 总产品数
-        elapsedSeconds: 0,     // 已用秒数
-        errorMessage: '',      // 错误信息（error 状态时）
-        runSummary: null,      // 完成后的摘要对象
-        pollTimer: null,       // setTimeout 句柄
+        syncStatus: 'idle',   // 'idle' | 'syncing' | 'done' | 'error'
+        currentProduct: '',   // 最近完成/正在处理的产品名
+        completed: 0,         // 已完成产品数
+        total: 0,             // 总产品数
+        elapsedSeconds: 0,    // 已用秒数
+        errorMessage: '',     // 错误信息（error 状态时）
+        runSummary: null,     // 完成后的摘要对象
+        pollTimer: null,      // setTimeout 句柄
+        syncProducts: [],     // 同步过程中已处理产品列表（每项含 name/status/elapsed/files_count/error）
+        allProducts: [],      // 全部待同步产品名（用于计算等待中列表）
 
         // ===== 初始化 =====
         // 先调 get_config() 判断视图：config_exists → main，否则 → setup
@@ -76,11 +82,19 @@ document.addEventListener('alpine:init', () => {
 
         // ===== 总览数据加载 =====
         // 调用 Python 端 get_overview()，返回产品列表和统计摘要
+        // 同时读取 get_config() 获取 can_open_dir
         async loadOverview() {
             this.loading = true;
             this.overviewError = '';
             try {
-                const data = await window.pywebview.api.get_overview();
+                // 并行拉取 overview 和 config，减少等待时间
+                const [data, cfg] = await Promise.all([
+                    window.pywebview.api.get_overview(),
+                    window.pywebview.api.get_config().catch(() => ({}))
+                ]);
+                // 读取 can_open_dir 标志（后端可能不返回，默认 false）
+                this.canOpenDir = !!(cfg && cfg.can_open_dir);
+
                 if (data.ok === false) {
                     // Python 端返回错误（配置缺失等），清空所有派生状态避免残留旧值
                     this.overviewError = data.error || '数据加载失败';
@@ -105,10 +119,20 @@ document.addEventListener('alpine:init', () => {
             this.loading = false;
         },
 
+        // ===== 打开数据目录 =====
+        // 调用后端打开系统文件管理器，需 can_open_dir = true 时才展示入口
+        async openDataDir() {
+            if (!this.canOpenDir || !this.dataRoot) return;
+            try {
+                await window.pywebview.api.open_data_dir();
+            } catch (e) {
+                console.error('openDataDir failed:', e);
+            }
+        },
+
         // ===== 筛选方法 =====
 
         // 按 searchText 和 filterColor 过滤并排序产品列表
-        // 注：table x-for 和 empty-state x-show 各调一次，共两次，产品数 <100 无性能问题
         filteredProducts() {
             const order = { red: 0, yellow: 1, green: 2, gray: 3 };
             return this.products
@@ -126,7 +150,6 @@ document.addEventListener('alpine:init', () => {
         },
 
         // ===== Tab 切换 =====
-        // 切换到总览时自动刷新数据（同步进行中不刷新，避免干扰）
         switchTab(name) {
             this.tab = name;
             if (name === 'overview' && this.syncStatus !== 'syncing'
@@ -150,6 +173,8 @@ document.addEventListener('alpine:init', () => {
             this.elapsedSeconds = 0;
             this.errorMessage = '';
             this.runSummary = null;
+            this.syncProducts = [];
+            this.allProducts = [];
             try {
                 const result = await window.pywebview.api.start_sync();
                 if (result.started) {
@@ -166,9 +191,44 @@ document.addEventListener('alpine:init', () => {
             }
         },
 
+        // ===== 重试失败产品 =====
+        // 调用 start_sync(true) 只重跑上次失败的产品
+        async retryFailed() {
+            if (this.syncStatus === 'syncing') return;
+            this.syncStatus = 'syncing';
+            this.completed = 0;
+            this.total = 0;
+            this.currentProduct = '';
+            this.elapsedSeconds = 0;
+            this.errorMessage = '';
+            this.runSummary = null;
+            this.syncProducts = [];
+            this.allProducts = [];
+            try {
+                // true 表示仅重试失败产品
+                const result = await window.pywebview.api.start_sync(true);
+                if (result.started) {
+                    this.startPolling();
+                } else {
+                    this.errorMessage = result.message || '无法启动同步';
+                    this.syncStatus = 'error';
+                }
+            } catch (e) {
+                console.error('retryFailed failed:', e);
+                this.errorMessage = String(e);
+                this.syncStatus = 'error';
+            }
+        },
+
+        // ===== 等待中产品列表（计算属性） =====
+        // allProducts 中去掉已在 syncProducts 里出现的，剩余即"等待中"
+        waitingProducts() {
+            const doneNames = new Set(this.syncProducts.map(p => p.name));
+            return this.allProducts.filter(name => !doneNames.has(name));
+        },
+
         // ===== 进度轮询 =====
         // 用 setTimeout 递归代替 setInterval，避免 async 回调堆积
-        // （如果一次轮询耗时超过 1 秒，setInterval 会堆积回调）
         startPolling() {
             this.stopPolling();
             const poll = async () => {
@@ -178,6 +238,14 @@ document.addEventListener('alpine:init', () => {
                     this.completed = p.completed || 0;
                     this.total = p.total || 0;
                     this.elapsedSeconds = p.elapsed_seconds || 0;
+
+                    // 更新产品列表和全部产品名
+                    if (p.products && Array.isArray(p.products)) {
+                        this.syncProducts = p.products;
+                    }
+                    if (p.all_products && Array.isArray(p.all_products)) {
+                        this.allProducts = p.all_products;
+                    }
 
                     if (p.status === 'done') {
                         this.syncStatus = 'done';
@@ -190,8 +258,8 @@ document.addEventListener('alpine:init', () => {
                         this.syncStatus = 'error';
                         this.errorMessage = p.error_message || '同步失败';
                         this.runSummary = p.run_summary;  // 部分失败时也携带摘要
-                        this.historyLoaded = false; // 有新运行，下次切历史页时刷新
-                        this.checkUpdateResult = null; // 同步后清除检查更新结果
+                        this.historyLoaded = false;
+                        this.checkUpdateResult = null;
                         this.pollTimer = null;
                         return; // 终态，不再调度下次轮询
                     }
@@ -223,6 +291,8 @@ document.addEventListener('alpine:init', () => {
             this.elapsedSeconds = 0;
             this.errorMessage = '';
             this.runSummary = null;
+            this.syncProducts = [];
+            this.allProducts = [];
         },
 
         // ===== 格式化工具函数 =====
@@ -257,12 +327,33 @@ document.addEventListener('alpine:init', () => {
             return h + ' 小时 ' + m + ' 分';
         },
 
+        // 格式化文件数和耗时（同步产品列表 meta 行）
+        // 返回如 "1.2s · 826 文件" 或 "0.5s"
+        formatProductMeta(elapsed, filesCount) {
+            let parts = [];
+            if (elapsed != null) parts.push(Math.round(elapsed * 10) / 10 + 's');
+            if (filesCount != null && filesCount > 0) parts.push(filesCount + ' 文件');
+            return parts.join(' · ');
+        },
+
+        // 将 ISO 时间字符串转换为本地时区的 YYYY-MM-DD HH:mm 格式
+        // 后端返回的时间为 UTC，new Date() 会自动转为本地时区
+        formatLocalTime(isoStr) {
+            if (!isoStr) return '';
+            try {
+                const d = new Date(isoStr);
+                const pad = n => String(n).padStart(2, '0');
+                return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+                    + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+            } catch (e) {
+                return isoStr;
+            }
+        },
+
         // ===== 历史页方法 =====
 
-        // 加载历史运行列表
         async loadHistory() {
             this.historyLoading = true;
-            // 刷新列表时关闭详情视图，确保用户看到最新列表
             this.historyDetail = null;
             this.historyError = '';
             try {
@@ -270,7 +361,7 @@ document.addEventListener('alpine:init', () => {
                 if (data.ok === false) {
                     this.historyError = data.error || '历史记录加载失败';
                     this.historyList = [];
-                    this.historyLoaded = false; // 失败后允许重试
+                    this.historyLoaded = false;
                 } else {
                     this.historyList = data.runs || [];
                     this.historyLoaded = true;
@@ -279,12 +370,12 @@ document.addEventListener('alpine:init', () => {
                 console.error('loadHistory failed:', e);
                 this.historyError = String(e);
                 this.historyList = [];
-                this.historyLoaded = false; // 异常后允许重试
+                this.historyLoaded = false;
             }
             this.historyLoading = false;
         },
 
-        // 查看指定运行的产品明细（防重入：避免连续快速点击产生并发请求）
+        // 查看指定运行的产品明细（防重入）
         async viewDetail(reportFile) {
             if (this.historyLoading) return;
             this.historyLoading = true;
@@ -292,7 +383,6 @@ document.addEventListener('alpine:init', () => {
             try {
                 const data = await window.pywebview.api.get_run_detail(reportFile);
                 if (data.ok === false) {
-                    // 加载失败，留在列表视图并展示错误
                     this.historyError = data.error || '报告详情加载失败';
                     this.historyDetail = null;
                 } else {
@@ -306,9 +396,17 @@ document.addEventListener('alpine:init', () => {
             this.historyLoading = false;
         },
 
+        // 历史详情按失败→跳过→成功排序
+        sortedDetailProducts() {
+            if (!this.historyDetail || !this.historyDetail.products) return [];
+            const order = { error: 0, skipped: 1, ok: 2 };
+            return [...this.historyDetail.products].sort(
+                (a, b) => (order[a.status] ?? 3) - (order[b.status] ?? 3)
+            );
+        },
+
         // ===== 检查更新 =====
 
-        // 确认后执行检查更新：查询 API 获取各产品最新日期，就地刷新表格
         async doCheckUpdates() {
             this.checkUpdateConfirmVisible = false;
             if (this.checkUpdateLoading) return;
@@ -319,7 +417,6 @@ document.addEventListener('alpine:init', () => {
                 if (res.ok === false) {
                     this.checkUpdateResult = { message: res.error, isError: true };
                 } else {
-                    // 就地刷新表格和统计卡片
                     this.products = res.products;
                     this.summary = res.summary;
                     const msg = '成功查询 ' + res.checked + ' 个产品' +
@@ -333,25 +430,74 @@ document.addEventListener('alpine:init', () => {
             this.checkUpdateLoading = false;
         },
 
-        // ===== 健康检查 =====
+        // ===== 健康检查（异步：确认→进度→结果） =====
 
-        // 调用 Python 端 get_health_report()，扫描数据目录检测三类问题
-        async checkHealth() {
-            if (this.healthLoading) return;
-            this.healthLoading = true;
-            this.healthError = '';
-            try {
-                const data = await window.pywebview.api.get_health_report();
-                if (data.ok === false) {
-                    this.healthError = data.error || '健康检查失败';
+        showHealthConfirm() { this.healthState = 'confirming'; },
+        cancelHealthCheck() { this.healthState = 'idle'; },
+        async startHealthCheck() {
+            this.repairMessage = '';
+            const res = await window.pywebview.api.start_health_check();
+            if (!res.ok) { this.healthError = res.error; this.healthState = 'error'; return; }
+            this.healthState = 'checking';
+            this.healthProgress = {current: 0, total: 0, product: ''};
+            this.pollHealthProgress();
+        },
+        pollHealthProgress() {
+            this.healthPollTimer = setTimeout(async () => {
+                const prog = await window.pywebview.api.get_health_progress();
+                this.healthProgress = prog;
+                if (prog.checking) { this.pollHealthProgress(); return; }
+                const result = await window.pywebview.api.get_health_result();
+                if (result && result.ok) {
+                    this.healthResult = result.health;
+                    this.healthState = 'done';
                 } else {
-                    this.healthReport = data.health;
+                    this.healthError = result ? result.error : '检查失败';
+                    this.healthState = 'error';
                 }
-            } catch (e) {
-                console.error('checkHealth failed:', e);
-                this.healthError = String(e);
+            }, 1000);
+        },
+        async repairIssues() {
+            const res = await window.pywebview.api.repair_health_issues();
+            if (res.ok) {
+                const r = res.repair;
+                this.repairMessage = '已修复 ' + r.repaired.length + ' 个问题' +
+                    (r.failed.length ? '，' + r.failed.length + ' 个失败' : '') +
+                    '。可重新检查验证结果。';
+            } else {
+                this.repairMessage = '修复失败: ' + (res.error || '未知错误');
             }
-            this.healthLoading = false;
+        },
+        closeHealthResult() { this.healthState = 'idle'; this.healthResult = null; this.repairMessage = ''; },
+        healthIssuesByCategory() {
+            if (!this.healthResult) return {};
+            const groups = {};
+            for (const i of this.healthResult.issues) {
+                (groups[i.category] = groups[i.category] || []).push(i);
+            }
+            return groups;
+        },
+        repairableCount() {
+            if (!this.healthResult) return 0;
+            return this.healthResult.issues.filter(i => i.repairable).length;
+        },
+        categoryLabel(cat) {
+            return {file_integrity:'文件完整性',content_integrity:'内容完整性',temporal_integrity:'时间完整性',coverage_integrity:'覆盖完整性',format_integrity:'格式完整性'}[cat] || cat;
+        },
+        repairLabel(issue) {
+            if (issue.repairable) return '可修复';
+            if (issue.repair_action === 'needs_resync') return '需重新同步';
+            return '需调查';
+        },
+        issueTypeLabel(type) {
+            return {
+                missing_data: '数据缺失', orphan_temp: '临时文件', csv_unreadable: '不可读',
+                tail_corruption: '尾部残行', infra_db_corrupt: '数据库损坏', infra_json_corrupt: 'JSON损坏',
+                duplicate_rows: '重复行', null_key_fields: '字段空值',
+                date_exceeds_timestamp: '日期超前', timestamp_data_gap: '日期落后',
+                missing_trading_days: '缺失交易日', file_count_drop: '文件数下降',
+                column_inconsistency: '列名不一致',
+            }[type] || type;
         },
 
         // 返回历史列表（如有新同步记录待刷新，自动重新加载）
@@ -366,12 +512,10 @@ document.addEventListener('alpine:init', () => {
 
         // ===== Setup 向导方法 =====
 
-        // 表单验证：三个字段均非空
         setupValid() {
             return this.setupDataRoot.trim() && this.setupApiKey.trim() && this.setupHid.trim();
         },
 
-        // 提交 setup 表单
         async submitSetup() {
             if (!this.setupValid() || this.setupLoading) return;
             this.setupLoading = true;
@@ -386,7 +530,6 @@ document.addEventListener('alpine:init', () => {
                     false
                 );
                 if (!result.ok && result.error_code === 'dir_not_found') {
-                    // 目录不存在，展示页内确认 UI（不用 window.confirm，pywebview 下不可靠）
                     this.setupConfirmDir = result.resolved_path;
                 } else {
                     this._handleSetupResult(result);
@@ -398,7 +541,6 @@ document.addEventListener('alpine:init', () => {
             this.setupLoading = false;
         },
 
-        // 用户确认创建目录
         async confirmCreateDir() {
             if (!this.setupValid()) return;
             this.setupLoading = true;
@@ -418,41 +560,34 @@ document.addEventListener('alpine:init', () => {
             this.setupLoading = false;
         },
 
-        // 用户取消创建目录，留在向导页修改路径
         cancelCreateDir() {
             this.setupConfirmDir = '';
         },
 
-        // 处理 run_setup 返回结果
         _handleSetupResult(result) {
             if (!result.ok) {
                 this.setupError = result.error || '配置保存失败';
                 return;
             }
             if (result.warning) {
-                // 保存成功但验证失败，展示警告让用户选择
                 this.setupWarning = result.warning;
                 return;
             }
-            // 保存+验证均成功，跳转主界面
             this.currentView = 'main';
             this.loadOverview();
         },
 
-        // 验证警告后选择"仍然继续"
         continueAnyway() {
             this.currentView = 'main';
             this.loadOverview();
         },
 
-        // 验证警告后选择"重新填写"（保留 data_root，清空凭证）
         retrySetup() {
             this.setupWarning = '';
             this.setupApiKey = '';
             this.setupHid = '';
         },
 
-        // 从主界面进入"重新配置"（预填 data_root）
         async goToSetup() {
             try {
                 const cfg = await window.pywebview.api.get_config();

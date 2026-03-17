@@ -280,6 +280,7 @@ def sync_daily_aggregate_file(src: Path, product: str, data_root: Path, dry_run:
         split_raw = row[split_idx] if split_idx < len(row) else ""
         split_value = normalize_split_value(split_raw)
         if not split_value:
+            stats.skipped_empty_split += 1
             continue
         grouped_rows.setdefault(split_value, []).append(list(row))
 
@@ -357,6 +358,7 @@ def apply_file_result(stats: SyncStats, result: str, added_rows: int = 0, sort_a
         stats.sorted_checked_files += sort_audit.checked_files
         stats.sorted_violation_files += sort_audit.violation_files
         stats.sorted_auto_repaired_files += sort_audit.auto_repaired_files
+        stats.append_fast_files += sort_audit.append_fast
 
     if result == "created":
         stats.created_files += 1

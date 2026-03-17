@@ -179,6 +179,7 @@ def process_product(
         unchanged=stats.unchanged_files,
         skipped=stats.skipped_files,
         rows_added=stats.rows_added,
+        append_fast=stats.append_fast_files,
     )
 
     return product, actual_time, stats, str(extract_path), reason_code
@@ -831,7 +832,7 @@ def _execute_plans(
     force_update: bool = False,
     catch_up_to_latest: bool = False,
     max_workers: int = 1,
-    progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    progress_callback: Optional[Callable[..., None]] = None,
 ) -> Tuple[SyncStats, bool, float]:
     """
     执行产品计划并返回汇总统计。
@@ -843,8 +844,10 @@ def _execute_plans(
 
     max_workers: 并发下载线程数。1 = 串行（默认），>1 = 并行处理产品。
                  stop_on_error=True 时强制串行。
-    progress_callback: 每个产品完成后回调 (product_name, completed_count, total_count)。
-                       供 GUI 轮询进度使用，CLI 不传。
+    progress_callback: 产品完成后回调，签名：
+        (product_name, completed, total, *, elapsed_seconds, stats, status, **kwargs)
+        status="init" 时为初始化调用，kwargs 含 all_products 列表。
+        供 GUI 进度展示使用，CLI 不传。
     """
 
     _reset_http_metrics()
@@ -858,10 +861,12 @@ def _execute_plans(
     # 保护共享状态的互斥锁（串行时无竞争，开销可忽略）
     _lock = threading.Lock()
 
-    def _run_one_plan(plan: ProductPlan) -> bool:
-        """处理单个产品计划。返回 True 表示发生了错误。"""
+    def _run_one_plan(plan: ProductPlan) -> Tuple[bool, float, SyncStats, str, str]:
+        """处理单个产品计划。返回 (has_error, elapsed_seconds, stats, status, error_msg)。"""
 
         plan_has_error = False
+        message = ""  # 失败时的错误信息，供 progress_callback 透传给前端
+        product_stats = SyncStats()  # 逐产品累积 stats，最终随返回值传出
         t_product_start = time.time()
         # A. 判断这个产品本次应不应该跑（门控命中会直接 return）。
         # _resolve_requested_dates_for_plan 内部的 _append_result 也通过 lock 参数保护。
@@ -881,7 +886,7 @@ def _execute_plans(
         with _lock:
             report.phase_plan_seconds += max(0.0, time.time() - t_plan_phase)
         if skipped_by_gate:
-            return False
+            return (False, 0.0, SyncStats(), "skipped", "")
 
         if not requested_dates_for_plan:
             if catch_up_to_latest:
@@ -903,7 +908,7 @@ def _execute_plans(
                     event="SYNC_SKIP",
                     reason_code=REASON_NO_DATA_FOR_DATE,
                 )
-                return False
+                return (False, 0.0, SyncStats(), "skipped", "")
             requested_dates_for_plan = [""]
 
         # B. 按日期队列执行单产品同步（网络 + 解压 + 文件同步）。
@@ -930,6 +935,7 @@ def _execute_plans(
                     # 并发路径：total.merge + _append_result 在同一锁作用域，保证原子可见性
                     with _lock:
                         total.merge(stats)
+                        product_stats.merge(stats)  # 累积本产品 stats 用于进度回调
                         _append_result(
                             report,
                             product=product,
@@ -954,6 +960,7 @@ def _execute_plans(
                 status_persist_warning = ""
                 with _lock:
                     total.merge(stats)
+                    product_stats.merge(stats)  # 累积本产品 stats 用于进度回调
                     try:
                         _upsert_product_status_after_success(
                             conn=conn,
@@ -1037,29 +1044,50 @@ def _execute_plans(
             # 仅终止当前产品后续日期，继续下一个产品。
             break
 
-        return plan_has_error
+        elapsed = time.time() - t_product_start
+        status = "error" if plan_has_error else "ok"
+        # 失败时透传 message（在异常捕获路径赋值），供 progress_callback 显示失败原因
+        error_msg = message if plan_has_error else ""
+        return (plan_has_error, elapsed, product_stats, status, error_msg)
 
     # 进度计数器，用于 progress_callback 上报（串行路径直接递增，并行路径需加锁）
     _completed = 0
 
-    def _notify_progress(product_name: str) -> None:
+    def _notify_progress(product_name: str, elapsed_seconds: float = 0.0,
+                         stats: Optional[SyncStats] = None, status: str = "ok",
+                         error: str = "", **kwargs) -> None:
         """安全调用进度回调（异常不影响主流程）。
 
-        串行路径直接调用（无竞争），并行路径由调用方在 _lock 内调用。
+        串行路径直接调用（无竞争，因为 for 循环是串行的）。
+        并行路径由调用方在 _lock 内调用。
+        error 在失败路径传递，供前端展示具体失败原因。
+        kwargs 用于传递 all_products 等额外参数。
         """
         nonlocal _completed
         _completed += 1
         if progress_callback is not None:
             try:
-                progress_callback(product_name, _completed, len(plans))
+                progress_callback(product_name, _completed, len(plans),
+                                  elapsed_seconds=elapsed_seconds, stats=stats,
+                                  status=status, error=error, **kwargs)
             except Exception:
                 pass
+
+    # 初始化调用：传出全部产品名，供 GUI 在进度条出现前渲染列表
+    if progress_callback is not None:
+        try:
+            progress_callback("", 0, len(plans),
+                              elapsed_seconds=0.0, stats=None, status="init",
+                              all_products=[plan.name for plan in plans])
+        except Exception:
+            pass
 
     if effective_workers <= 1:
         # === 串行路径 ===
         for plan in plans:
-            plan_error = _run_one_plan(plan)
-            _notify_progress(plan.name)
+            (plan_error, elapsed, p_stats, p_status, p_error) = _run_one_plan(plan)
+            _notify_progress(plan.name, elapsed_seconds=elapsed, stats=p_stats,
+                             status=p_status, error=p_error)
             if plan_error:
                 has_error = True
                 if command_ctx.stop_on_error:
@@ -1079,16 +1107,19 @@ def _execute_plans(
             for future in as_completed(futures):
                 plan = futures[future]
                 try:
-                    plan_error = future.result()
+                    (plan_error, elapsed, p_stats, p_status, p_error) = future.result()
                     with _lock:
-                        _notify_progress(plan.name)
+                        _notify_progress(plan.name, elapsed_seconds=elapsed,
+                                         stats=p_stats, status=p_status, error=p_error)
                     if plan_error:
                         has_error = True
                 except Exception as exc:
                     # _run_one_plan 内部未捕获的异常（理论上不应发生，但做防御性兜底）
                     has_error = True
                     with _lock:
-                        _notify_progress(plan.name)
+                        _notify_progress(plan.name, elapsed_seconds=0.0,
+                                         stats=SyncStats(), status="error",
+                                         error=f"并发执行异常（未预期）: {exc}")
                     log_error(
                         f"[{plan.name}] 并发执行异常: {exc}",
                         event="SYNC_FAIL",
@@ -1117,13 +1148,13 @@ def run_update_with_settings(
     command_name: str = "all_data",
     fallback_products: Optional[Sequence[str]] = None,
     max_workers: int = 1,
-    progress_callback: Optional[Callable[[str, int, int], None]] = None,
+    progress_callback: Optional[Callable[..., None]] = None,
 ) -> int:
     """
     通用批量更新执行器（update/all_data 共用）。
 
     fallback_products 用于"本地扫描为空"时的回退清单。
-    progress_callback: 每个产品完成后回调 (product_name, completed_count, total_count).
+    progress_callback: 产品完成后回调，签名同 _execute_plans。
     """
 
     ensure_data_root_ready(command_ctx.data_root, create_if_missing=False)

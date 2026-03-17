@@ -153,6 +153,8 @@ class SyncStats:
     sorted_checked_files: int = 0
     sorted_violation_files: int = 0
     sorted_auto_repaired_files: int = 0
+    append_fast_files: int = 0  # 追加快捷路径命中的文件数
+    skipped_empty_split: int = 0  # 空 split_value 跳过的行数
 
     # 需要累加的字段白名单（类变量，不参与序列化）：新增字段时只需在此处追加，merge 自动处理
     _MERGE_FIELDS: ClassVar[Tuple[str, ...]] = (
@@ -164,6 +166,8 @@ class SyncStats:
         "sorted_checked_files",
         "sorted_violation_files",
         "sorted_auto_repaired_files",
+        "append_fast_files",
+        "skipped_empty_split",
     )
 
     def merge(self, other: "SyncStats") -> None:
@@ -178,6 +182,7 @@ class SortAudit:
     checked_files: int = 0
     violation_files: int = 0
     auto_repaired_files: int = 0
+    append_fast: int = 0  # 追加快捷路径命中时置 1
 
 @dataclass
 class DiscoveredProduct:

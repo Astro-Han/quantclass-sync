@@ -61,7 +61,7 @@ from .models import (
     split_products,
     utc_now_iso,
 )
-from .data_query import get_latest_run_summary, get_products_overview
+from .data_query import check_data_health, get_latest_run_summary, get_products_overview, repair_data_issues
 from .orchestrator import _build_headers, _execute_plans, load_catalog_or_raise, run_update_with_settings
 from .reporting import _append_result, _finalize_and_write_report, _new_report, resolve_report_path
 from .status_store import (
@@ -836,3 +836,66 @@ def cmd_gui(ctx: typer.Context) -> None:
     """
     from .gui import launch_gui
     launch_gui()
+
+@app.command("audit")
+@command_guard("audit")
+def cmd_audit(
+    ctx: typer.Context,
+    fix: bool = typer.Option(False, "--fix", help="自动修复可修复问题"),
+) -> None:
+    """数据质量全面检查"""
+    command_ctx = _init_command(ctx, "audit")
+    catalog = load_catalog_or_raise(command_ctx.catalog_file)
+    data_root = command_ctx.data_root
+
+    # CLI 进度回调：在同一行滚动显示当前扫描产品
+    def cli_progress(current, total, product, phase):
+        RICH_CONSOLE.print(f"  [{current + 1}/{total}] {product}", end="\r")
+
+    RICH_CONSOLE.print("[bold]数据质量检查[/bold]\n")
+    result = check_data_health(data_root, catalog, progress_callback=cli_progress)
+    RICH_CONSOLE.print()
+
+    issues = result["issues"]
+    summary = result["summary"]
+
+    if not issues:
+        RICH_CONSOLE.print("[green]✓ 数据健康，未发现问题[/green]")
+    else:
+        from collections import defaultdict
+        # 按问题类别分组显示
+        by_category = defaultdict(list)
+        for i in issues:
+            by_category[i["category"]].append(i)
+        category_names = {
+            "file_integrity": "文件完整性",
+            "content_integrity": "内容完整性",
+            "temporal_integrity": "时间完整性",
+            "coverage_integrity": "覆盖完整性",
+            "format_integrity": "格式完整性",
+        }
+        for cat, cat_issues in by_category.items():
+            RICH_CONSOLE.print(f"\n[bold]{category_names.get(cat, cat)}[/bold]")
+            for i in cat_issues:
+                sev_icon = "[red]●[/red]" if i["severity"] == "error" else "[yellow]○[/yellow]"
+                repair_tag = "[green]可修复[/green]" if i["repairable"] else "[dim]需处理[/dim]"
+                file_info = f" {i['file']}" if i["file"] else ""
+                RICH_CONSOLE.print(
+                    f"  {sev_icon} {i['product']}{file_info} - {i['detail']} {repair_tag}"
+                )
+
+    # 底部汇总行
+    RICH_CONSOLE.print(
+        f"\n{summary['scanned_products']} 产品 · {summary['scanned_files']} 文件"
+        f" · {summary['elapsed_seconds']}s"
+        f" · [red]{summary['by_severity'].get('error', 0)} 错误[/red]"
+        f" / [yellow]{summary['by_severity'].get('warning', 0)} 警告[/yellow]"
+    )
+
+    if fix and any(i["repairable"] for i in issues):
+        RICH_CONSOLE.print("\n[bold]修复可修复问题...[/bold]")
+        repair_result = repair_data_issues(data_root, issues)
+        RICH_CONSOLE.print(
+            f"  已修复 {len(repair_result['repaired'])} 个"
+            f"，失败 {len(repair_result['failed'])} 个"
+        )

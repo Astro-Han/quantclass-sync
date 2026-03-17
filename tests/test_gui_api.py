@@ -709,15 +709,20 @@ class TestOverviewFieldNames(unittest.TestCase):
         self.assertIsNotNone(result["last_run"])
         last_run = result["last_run"]
 
-        # 验证所有预期字段存在
+        # 验证所有预期字段存在（含阶段耗时字段）
         expected_last_run_fields = {
-            "ok", "error", "skipped", "duration_seconds", "started_at", "failed_products"
+            "ok", "error", "skipped", "duration_seconds", "started_at", "failed_products",
+            "phase_plan_seconds", "phase_sync_seconds",
         }
         self.assertEqual(set(last_run.keys()), expected_last_run_fields)
 
-        # 验证 failed_products 是字符串列表
+        # 验证 failed_products 是对象列表（直接透传，不剥离为纯字符串）
         self.assertIsInstance(last_run["failed_products"], list)
-        self.assertEqual(last_run["failed_products"], ["product-b"])
+        self.assertEqual(len(last_run["failed_products"]), 1)
+        fp = last_run["failed_products"][0]
+        self.assertEqual(fp["product"], "product-b")
+        self.assertEqual(fp["error"], "HTTP 403")
+        self.assertEqual(fp["reason_code"], "auth_error")
 
 
 class TestSyncNonZeroExitCode(unittest.TestCase):
@@ -874,72 +879,361 @@ class TestGetRunDetail(unittest.TestCase):
         self.assertFalse(result["ok"])
 
 
-class TestGetHealthReport(unittest.TestCase):
-    """get_health_report API 测试。"""
+class TestStartHealthCheck(unittest.TestCase):
+    """start_health_check 异步启动测试。"""
 
-    def test_normal_path(self):
-        """正常路径：返回 ok=True 和 health 字段。"""
+    def test_normal_start_returns_ok(self):
+        """正常启动返回 ok=True，后台线程完成后 result 可读。"""
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_file = Path(tmp_dir) / "user_config.json"
-            config_file.write_text("{}")
+            config_file.write_text("{}", encoding="utf-8")
             mock_config = _make_mock_config(tmp_dir)
 
             mock_health = {
                 "issues": [],
                 "summary": {"missing_data": 0, "csv_unreadable": 0, "orphan_temp": 0, "total": 0},
-                "scanned_products": 5,
-                "elapsed_seconds": 0.1,
+                "scanned_products": 2,
+                "elapsed_seconds": 0.01,
             }
 
-            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
-                 patch(f"{_API_MOD}.load_user_config_or_raise", return_value=mock_config), \
-                 patch(f"{_API_MOD}.load_catalog_or_raise", return_value=["p1", "p2"]), \
-                 patch(f"{_API_MOD}.check_data_health", return_value=mock_health) as mock_fn:
+            patches = [
+                patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file),
+                patch(f"{_API_MOD}.load_user_config_or_raise", return_value=mock_config),
+                patch(f"{_API_MOD}.load_catalog_or_raise", return_value=["p1", "p2"]),
+                patch(f"{_API_MOD}.check_data_health", return_value=mock_health),
+            ]
+            for p in patches:
+                p.start()
+                self.addCleanup(p.stop)
 
-                from quantclass_sync_internal.gui.api import SyncApi
-                api = SyncApi()
-                result = api.get_health_report()
+            from quantclass_sync_internal.gui.api import SyncApi
+            api = SyncApi()
+            result = api.start_health_check()
+            self.assertTrue(result["ok"])
 
-                # 验证 catalog 正确透传（data_root 经 resolve 展开，只验证 catalog）
-                mock_fn.assert_called_once()
-                call_args = mock_fn.call_args
-                self.assertEqual(call_args[0][1], ["p1", "p2"])
+            # 等待后台线程完成（最多 3 秒）
+            import time
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                progress = api.get_health_progress()
+                if not progress["checking"]:
+                    break
+                time.sleep(0.05)
+
+            final = api.get_health_result()
+            self.assertIsNotNone(final)
+            self.assertTrue(final["ok"])
+            self.assertIn("health", final)
+
+    def test_during_sync_returns_error(self):
+        """同步进行中时拒绝启动健康检查。"""
+        from quantclass_sync_internal.gui.api import SyncApi
+        api = SyncApi()
+        # 手动将 _progress 置为 syncing 状态
+        api._progress["status"] = "syncing"
+        result = api.start_health_check()
+        self.assertFalse(result["ok"])
+        self.assertIn("同步进行中", result["error"])
+
+    def test_duplicate_start_returns_error(self):
+        """重复启动时返回错误。"""
+        from quantclass_sync_internal.gui.api import SyncApi
+        api = SyncApi()
+        # 手动将 _health_progress["checking"] 置为 True，模拟已在检查中
+        api._health_progress["checking"] = True
+        result = api.start_health_check()
+        self.assertFalse(result["ok"])
+        self.assertIn("进行中", result["error"])
+
+
+class TestGetHealthProgress(unittest.TestCase):
+    """get_health_progress 轮询测试。"""
+
+    def test_returns_correct_fields(self):
+        """返回字段集合和类型正确。"""
+        from quantclass_sync_internal.gui.api import SyncApi
+        api = SyncApi()
+        progress = api.get_health_progress()
+        self.assertIn("checking", progress)
+        self.assertIn("current", progress)
+        self.assertIn("total", progress)
+        self.assertIn("product", progress)
+        # 初始值验证
+        self.assertFalse(progress["checking"])
+        self.assertEqual(progress["current"], 0)
+        self.assertEqual(progress["total"], 0)
+        self.assertEqual(progress["product"], "")
+
+    def test_initial_result_is_none(self):
+        """初始状态下 get_health_result 返回 None。"""
+        from quantclass_sync_internal.gui.api import SyncApi
+        api = SyncApi()
+        self.assertIsNone(api.get_health_result())
+
+
+class TestRepairHealthIssues(unittest.TestCase):
+    """repair_health_issues 修复测试。"""
+
+    def test_no_result_returns_error(self):
+        """无可用检查结果时返回 ok=False。"""
+        from quantclass_sync_internal.gui.api import SyncApi
+        api = SyncApi()
+        result = api.repair_health_issues()
+        self.assertFalse(result["ok"])
+        self.assertIn("无可用检查结果", result["error"])
+
+    def test_failed_result_returns_error(self):
+        """检查结果为 ok=False 时返回 ok=False。"""
+        from quantclass_sync_internal.gui.api import SyncApi
+        api = SyncApi()
+        api._health_progress["result"] = {"ok": False, "error": "配置缺失"}
+        result = api.repair_health_issues()
+        self.assertFalse(result["ok"])
+
+    def test_no_repairable_issues_returns_error(self):
+        """无可修复问题时返回 ok=False。"""
+        from quantclass_sync_internal.gui.api import SyncApi
+        api = SyncApi()
+        # 结果中全为不可修复问题
+        api._health_progress["result"] = {
+            "ok": True,
+            "health": {
+                "issues": [{"type": "csv_unreadable", "repairable": False}],
+            },
+        }
+        result = api.repair_health_issues()
+        self.assertFalse(result["ok"])
+        self.assertIn("无可修复问题", result["error"])
+
+    def test_repairable_issues_calls_repair(self):
+        """有可修复问题时调用 repair_data_issues 并返回结果。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "user_config.json"
+            config_file.write_text("{}", encoding="utf-8")
+            mock_config = _make_mock_config(tmp_dir)
+
+            mock_repair = {"repaired": 1, "failed": 0}
+
+            # 用 patch.start() 逐个激活，repair_patcher 单独保存以拿到 mock 对象
+            p1 = patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file)
+            p2 = patch(f"{_API_MOD}.load_user_config_or_raise", return_value=mock_config)
+            p3 = patch(f"{_API_MOD}.load_catalog_or_raise", return_value=["p1"])
+            p4 = patch(f"{_API_MOD}.repair_data_issues", return_value=mock_repair)
+            for p in (p1, p2, p3, p4):
+                p.start()
+                self.addCleanup(p.stop)
+
+            from quantclass_sync_internal.gui.api import SyncApi
+            api = SyncApi()
+            api._health_progress["result"] = {
+                "ok": True,
+                "health": {
+                    "issues": [{"type": "orphan_temp", "path": "/tmp/x.tmp", "repairable": True}],
+                },
+            }
+            result = api.repair_health_issues()
 
         self.assertTrue(result["ok"])
-        self.assertIn("health", result)
-        self.assertEqual(result["health"]["summary"]["total"], 0)
+        self.assertEqual(result["repair"], mock_repair)
 
-    def test_config_missing(self):
-        """配置文件缺失时返回 ok=False。"""
+
+class TestStartSyncRetryFailed(unittest.TestCase):
+    """start_sync(retry_failed=True) 从上次 run_summary 提取失败产品并启动同步。"""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        tmp_dir = self.tmpdir.name
+        self.config_file = Path(tmp_dir) / "user_config.json"
+        self.config_file.write_text("{}", encoding="utf-8")
+        self.mock_config = _make_mock_config(tmp_dir)
+        self.tmp_dir = tmp_dir
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def test_retry_failed_extracts_products(self):
+        """run_update_with_settings 应收到失败产品名列表。"""
+        received_products = {}
+
+        def fake_run_update(products=None, **kwargs):
+            # 记录传入的 products 参数，供断言使用
+            received_products["value"] = products
+            return 0  # EXIT_CODE_SUCCESS
+
+        patches = [
+            patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", self.config_file),
+            patch(f"{_API_MOD}.load_user_config_or_raise", return_value=self.mock_config),
+            patch(f"{_API_MOD}.load_catalog_or_raise", return_value=["product-a", "product-b"]),
+            patch(f"{_API_MOD}.run_update_with_settings", side_effect=fake_run_update),
+            patch(f"{_API_MOD}.resolve_credentials_for_update", return_value=("key", "hid", "env")),
+            patch(f"{_API_MOD}.report_dir_path", return_value=Path(self.tmp_dir) / "log"),
+            patch(f"{_API_MOD}.get_latest_run_summary", return_value=None),
+            patch(f"{_API_MOD}.DEFAULT_USER_SECRETS_FILE", Path(self.tmp_dir) / "secrets.env"),
+            patch(f"{_API_MOD}.DEFAULT_CATALOG_FILE", Path(self.tmp_dir) / "catalog.json"),
+            patch(f"{_API_MOD}.DEFAULT_WORK_DIR", Path(self.tmp_dir) / "work"),
+            patch(f"{_API_MOD}.DEFAULT_API_BASE", "https://fake.api"),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+        from quantclass_sync_internal.gui.api import SyncApi
+        api = SyncApi()
+
+        # 预置 run_summary，包含一个失败产品
+        with api._lock:
+            api._progress["run_summary"] = {
+                "failed_products": [
+                    {"product": "product-b", "error": "HTTP 403", "reason_code": "auth_error"}
+                ]
+            }
+
+        result = api.start_sync(retry_failed=True)
+        self.assertTrue(result["started"])
+
+        # 等待后台线程完成
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            progress = api.get_sync_progress()
+            if progress["status"] in ("done", "error"):
+                break
+            time.sleep(0.1)
+
+        # 验证 run_update_with_settings 收到了正确的产品列表
+        self.assertEqual(received_products.get("value"), ["product-b"])
+
+
+class TestStartSyncRetryFailedNoFailed(unittest.TestCase):
+    """start_sync(retry_failed=True) 但 run_summary 中无失败产品时返回错误。"""
+
+    def test_no_failed_products(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_file = Path(tmp_dir) / "user_config.json"
-
-            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file):
-                from quantclass_sync_internal.gui.api import SyncApi
-                api = SyncApi()
-                result = api.get_health_report()
-
-        self.assertFalse(result["ok"])
-        self.assertIn("error", result)
-
-    def test_check_raises_exception(self):
-        """check_data_health 抛异常时返回 ok=False。"""
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            config_file = Path(tmp_dir) / "user_config.json"
-            config_file.write_text("{}")
+            config_file.write_text("{}", encoding="utf-8")
             mock_config = _make_mock_config(tmp_dir)
 
             with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
                  patch(f"{_API_MOD}.load_user_config_or_raise", return_value=mock_config), \
-                 patch(f"{_API_MOD}.load_catalog_or_raise", return_value=["p1"]), \
-                 patch(f"{_API_MOD}.check_data_health", side_effect=RuntimeError("boom")):
+                 patch(f"{_API_MOD}.load_catalog_or_raise", return_value=["product-a"]):
 
                 from quantclass_sync_internal.gui.api import SyncApi
                 api = SyncApi()
-                result = api.get_health_report()
+
+                # run_summary 存在但 failed_products 为空
+                with api._lock:
+                    api._progress["run_summary"] = {"failed_products": []}
+
+                result = api.start_sync(retry_failed=True)
+
+        self.assertFalse(result["started"])
+        self.assertEqual(result["message"], "没有失败产品")
+
+
+class TestStartSyncRetryFailedNoSummary(unittest.TestCase):
+    """start_sync(retry_failed=True) 但无 run_summary 时返回错误。"""
+
+    def test_no_run_summary(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "user_config.json"
+            config_file.write_text("{}", encoding="utf-8")
+            mock_config = _make_mock_config(tmp_dir)
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.load_user_config_or_raise", return_value=mock_config), \
+                 patch(f"{_API_MOD}.load_catalog_or_raise", return_value=["product-a"]):
+
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                # _progress["run_summary"] 默认为 None，不做额外设置
+
+                result = api.start_sync(retry_failed=True)
+
+        self.assertFalse(result["started"])
+        self.assertEqual(result["message"], "没有上次同步记录")
+
+
+class TestOpenDataDir(unittest.TestCase):
+    """open_data_dir 测试。"""
+
+    @patch("subprocess.run", return_value=MagicMock(returncode=0))
+    def test_open_data_dir_macos(self, mock_run):
+        """macOS 下正常打开已存在目录，返回 ok=True。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "user_config.json"
+            config_file.write_text("{}", encoding="utf-8")
+            mock_config = _make_mock_config(tmp_dir)
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.load_user_config_or_raise", return_value=mock_config), \
+                 patch(f"{_API_MOD}.resolve_path_from_config", return_value=Path(tmp_dir)), \
+                 patch(f"{_API_MOD}.sys.platform", "darwin"):
+
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.open_data_dir()
+
+        self.assertTrue(result["ok"])
+        # subprocess.run 应以 ["open", "--", path] 被调用
+        mock_run.assert_called_once()
+        args = mock_run.call_args[0][0]
+        self.assertEqual(args[0], "open")
+        self.assertEqual(args[1], "--")
+
+    def test_open_data_dir_not_macos(self):
+        """非 macOS 平台返回 ok=False。"""
+        with patch(f"{_API_MOD}.sys.platform", "linux"):
+            from quantclass_sync_internal.gui.api import SyncApi
+            api = SyncApi()
+            result = api.open_data_dir()
 
         self.assertFalse(result["ok"])
-        self.assertIn("boom", result["error"])
+        self.assertIn("error", result)
+
+    def test_open_data_dir_not_exist(self):
+        """data_root 目录不存在时返回 ok=False。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "user_config.json"
+            config_file.write_text("{}", encoding="utf-8")
+            mock_config = _make_mock_config(tmp_dir)
+            # 指向一个不存在的子目录
+            nonexistent = Path(tmp_dir) / "no_such_dir"
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.load_user_config_or_raise", return_value=mock_config), \
+                 patch(f"{_API_MOD}.resolve_path_from_config", return_value=nonexistent), \
+                 patch(f"{_API_MOD}.sys.platform", "darwin"):
+
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.open_data_dir()
+
+        self.assertFalse(result["ok"])
+        self.assertIn("error", result)
+
+    def test_get_config_includes_can_open_dir(self):
+        """get_config 返回值包含 can_open_dir 字段。"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "user_config.json"
+            config_file.write_text(
+                '{"data_root": "' + tmp_dir + '"}', encoding="utf-8"
+            )
+            secrets_file = Path(tmp_dir) / "secrets.env"
+            secrets_file.write_text("", encoding="utf-8")
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.DEFAULT_USER_SECRETS_FILE", secrets_file), \
+                 patch(f"{_API_MOD}.load_secrets_from_file", return_value=("key", "hid")), \
+                 patch(f"{_API_MOD}.resolve_path_from_config", return_value=Path(tmp_dir)), \
+                 patch(f"{_API_MOD}.load_catalog_or_raise", return_value=["product-a"]):
+
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                result = api.get_config()
+
+        self.assertTrue(result["ok"])
+        self.assertIn("can_open_dir", result)
+        # can_open_dir 必须为 bool 类型
+        self.assertIsInstance(result["can_open_dir"], bool)
 
 
 if __name__ == "__main__":

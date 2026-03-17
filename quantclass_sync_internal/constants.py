@@ -200,6 +200,13 @@ REQUEST_POLICIES: Dict[str, Dict[str, int]] = {
     "default": {"max_attempts": 5, "timeout_seconds": 60, "backoff_cap_seconds": 8},
 }
 
+META_HEALTH_BASELINE_REL = Path(SYNC_META_DIRNAME) / "log" / "health_baseline.json"
+
+# 财务/公告类产品，日期连续性检查不适用
+FINANCIAL_PRODUCTS = {"stock-fin-data-xbx", "stock-fin-pre-fore-data-xbx"}
+NOTICE_PRODUCTS = {"stock-notices-title"}
+
+
 def normalize_product_name(product: str) -> str:
     """
     统一产品名写法。

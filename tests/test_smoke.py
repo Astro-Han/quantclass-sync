@@ -47,7 +47,7 @@ class TestS1CLISmoke(unittest.TestCase):
         """S1.1: --help 退出码 0，stdout 包含核心子命令名。"""
         result = self._run(["--help"])
         self.assertEqual(result.returncode, 0, f"stderr: {result.stderr[:300]}")
-        for cmd in ("setup", "update", "status", "gui"):
+        for cmd in ("setup", "update", "status", "gui", "audit"):
             self.assertIn(cmd, result.stdout, f"--help 缺少子命令: {cmd}")
 
     # ------------------------------------------------------------------
@@ -254,8 +254,12 @@ class TestS2GUISmoke(unittest.TestCase):
             "get_sync_progress",
             "get_history",
             "get_run_detail",
-            "get_health_report",
+            "start_health_check",
+            "get_health_progress",
+            "get_health_result",
+            "repair_health_issues",
             "check_updates",
+            "open_data_dir",
         }
 
         # 反射获取实际公开方法
