@@ -276,8 +276,10 @@
                         <span x-text="p.last_result || ''"></span>
                       </template>
                     </td>
-                    <!-- 错误信息：截断+title 看全文 -->
-                    <td class="err-cell" :title="p.last_error || ''" x-text="p.last_error || ''"></td>
+                    <!-- 错误信息：仅失败时显示，跳过/成功不显示 -->
+                    <td class="err-cell"
+                        :title="p.last_result === 'error' ? (p.last_error || '') : ''"
+                        x-text="p.last_result === 'error' ? (p.last_error || '') : ''"></td>
                   </tr>
                 </template>
               </tbody>
