@@ -55,6 +55,7 @@ from .http_client import (
     HTTP_ATTEMPTS_BY_PRODUCT,
     HTTP_FAILURES_BY_PRODUCT,
 )
+from .data_query import infer_local_date_from_csv
 from .file_sync import sync_from_extract
 from .models import (
     CommandContext,
@@ -64,6 +65,7 @@ from .models import (
     ProductRunResult,
     ProductStatus,
     ProductSyncError,
+    RULES,
     RunReport,
     SyncStats,
     log_debug,
@@ -557,11 +559,49 @@ def _resolve_requested_dates_for_plan(
                 return [api_latest_date], False
             return [""], False
 
-        # 回补模式：无本地基线时只能跑 latest 一次。
+        # 回补模式：无 timestamp 时尝试从 CSV 数据推断基线
         if not local_date:
-            if api_latest_date:
-                return [api_latest_date], False
-            return [""], False
+            # mirror_unknown 产品无 rule，infer 内部返回 None 后走 latest-only 路径
+            rule = RULES.get(product_name)
+            inferred = infer_local_date_from_csv(
+                command_ctx.data_root, product_name, rule
+            )
+            if not inferred:
+                # 真正的首次同步或无 rule 产品，只下载 latest
+                if api_latest_date:
+                    return [api_latest_date], False
+                return [""], False
+            # 推断后复查门控：已是最新则跳过
+            if should_skip_by_timestamp(inferred, api_latest_date):
+                elapsed = time.time() - t_product_start
+                with lock if lock is not None else contextlib.nullcontext():
+                    _append_result(
+                        report,
+                        product=product_name,
+                        status="skipped",
+                        strategy=plan.strategy,
+                        reason_code=REASON_UP_TO_DATE,
+                        date_time=api_latest_date or "",
+                        mode="gate",
+                        elapsed=elapsed,
+                        error=f"CSV 推断日期已是最新（inferred={inferred}, api={api_latest_date}）。",
+                    )
+                log_info(
+                    f"[{product_name}] CSV 推断门控命中，跳过更新。",
+                    event="SYNC_SKIP",
+                    inferred_date=inferred,
+                    api_latest_date=api_latest_date,
+                    decision="skip",
+                )
+                return [], True
+            # 有 CSV 数据但无 timestamp，用推断日期走正常回补
+            local_date = inferred
+            log_info(
+                f"[{product_name}] 无 timestamp，从 CSV 推断基线日期。",
+                event="PRODUCT_PLAN",
+                inferred_date=inferred,
+                decision="infer_baseline",
+            )
 
         catchup_dates = _normalize_date_queue(api_latest_candidates, product=product_name, local_date=local_date)
         if _should_probe_fallback(

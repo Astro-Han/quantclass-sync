@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from ..config import (
+    ensure_data_root_ready,
     load_secrets_from_file,
     load_user_config_or_raise,
     resolve_credentials_for_update,
@@ -169,6 +170,12 @@ class SyncApi:
         user_config, data_root, catalog, err = self._resolve_config()
         if err:
             return {"ok": False, "error": err}
+
+        # 校验 data_root 是否合法（拦截误指向产品子目录）
+        try:
+            ensure_data_root_ready(data_root, create_if_missing=False)
+        except RuntimeError as exc:
+            return {"ok": False, "error": str(exc)}
 
         # 获取产品状态列表
         try:
@@ -539,6 +546,7 @@ class SyncApi:
                         "current": current, "total": total, "product": product,
                     })
 
+            ensure_data_root_ready(data_root, create_if_missing=False)
             result = check_data_health(data_root, catalog, progress_callback=progress_cb)
             with self._lock:
                 self._health_progress["checking"] = False
@@ -593,6 +601,12 @@ class SyncApi:
         user_config, data_root, catalog, err = self._resolve_config()
         if err:
             return {"ok": False, "error": err}
+
+        # 校验 data_root 是否合法
+        try:
+            ensure_data_root_ready(data_root, create_if_missing=False)
+        except RuntimeError as exc:
+            return {"ok": False, "error": str(exc)}
 
         if not catalog:
             return {

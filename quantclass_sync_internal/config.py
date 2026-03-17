@@ -37,6 +37,47 @@ def resolve_path_from_config(raw_path: Path, *, config_file: Path) -> Path:
     return (config_file.parent / expanded).resolve()
 
 
+# 日期格式目录检测：用于判断 data_root 是否误指向产品子目录
+_DATE_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def validate_data_root_not_product_dir(data_root: Path) -> None:
+    """校验 data_root 是否误指向某个产品子目录（而非数据根目录）。
+
+    检测信号（OR 关系，仅查根层不递归）：
+    1. data_root/timestamp.txt 存在 — 我们写的文件，正确 data_root 根层不可能有
+    2. >= 2 个 YYYY-MM-DD 直接子目录 — 产品目录特征
+    """
+
+    # 信号 1：根目录下有 timestamp.txt
+    if (data_root / "timestamp.txt").exists():
+        parent = data_root.parent
+        raise RuntimeError(
+            f"data_root 可能指向了某个产品子目录而非数据根目录。\n"
+            f"  命中信号：data_root 下存在 timestamp.txt\n"
+            f"  当前配置：{data_root}\n"
+            f"  可能正确的上级目录：{parent}\n"
+            f"  修复方式：重新执行 setup，或编辑 user_config.json 修改 data_root\n"
+            f"  如果上述路径不正确，请手动指定正确的数据根目录。"
+        )
+
+    # 信号 2：>= 2 个 YYYY-MM-DD 格式的直接子目录
+    date_dir_count = 0
+    for item in data_root.iterdir():
+        if item.is_dir() and _DATE_DIR_RE.match(item.name):
+            date_dir_count += 1
+            if date_dir_count >= 2:
+                parent = data_root.parent
+                raise RuntimeError(
+                    f"data_root 可能指向了某个产品子目录而非数据根目录。\n"
+                    f"  命中信号：data_root 下有 {date_dir_count}+ 个日期子目录\n"
+                    f"  当前配置：{data_root}\n"
+                    f"  可能正确的上级目录：{parent}\n"
+                    f"  修复方式：重新执行 setup，或编辑 user_config.json 修改 data_root\n"
+                    f"  如果上述路径不正确，请手动指定正确的数据根目录。"
+                )
+
+
 def ensure_data_root_ready(data_root: Path, create_if_missing: bool = False) -> Path:
     """校验 data_root；需要时可自动创建目录。"""
 
@@ -44,6 +85,8 @@ def ensure_data_root_ready(data_root: Path, create_if_missing: bool = False) -> 
     if data_root.exists():
         if not data_root.is_dir():
             raise RuntimeError(f"data_root 不是目录：{data_root}")
+        # 校验是否误指向产品子目录
+        validate_data_root_not_product_dir(data_root)
         return data_root
     if create_if_missing:
         data_root.mkdir(parents=True, exist_ok=True)
@@ -287,7 +330,11 @@ def discover_local_products(data_root: Path, catalog_products: Sequence[str]) ->
     for item in sorted(data_root.iterdir(), key=lambda x: x.name):
         if not item.is_dir():
             continue
+        # 通用排除：点目录（.cache、.quantclass_sync 等）
+        if item.name.startswith("."):
+            continue
         product_name = normalize_product_name(item.name)
+        # 精确排除：按产品名过滤（如 log、work 等非数据目录）
         if product_name in DISCOVERY_IGNORED_PRODUCTS:
             continue
         if not _dir_has_data_files(item):

@@ -686,6 +686,7 @@ def cmd_status(ctx: typer.Context) -> None:
     输出所有产品的本地数据日期、落后天数和上次同步结果。
     """
     command_ctx = _init_command(ctx, "status")
+    ensure_data_root_ready(command_ctx.data_root, create_if_missing=False)
     catalog = load_catalog_or_raise(command_ctx.catalog_file)
 
     overview = get_products_overview(command_ctx.data_root, catalog)
@@ -845,6 +846,7 @@ def cmd_audit(
 ) -> None:
     """数据质量全面检查"""
     command_ctx = _init_command(ctx, "audit")
+    ensure_data_root_ready(command_ctx.data_root, create_if_missing=False)
     catalog = load_catalog_or_raise(command_ctx.catalog_file)
     data_root = command_ctx.data_root
 

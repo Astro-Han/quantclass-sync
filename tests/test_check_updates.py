@@ -20,9 +20,10 @@ class TestCheckUpdates(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("配置", result["error"])
 
+    @patch('quantclass_sync_internal.gui.api.ensure_data_root_ready')
     @patch('quantclass_sync_internal.gui.api.resolve_credentials_for_update')
     @patch.object(SyncApi, '_resolve_config')
-    def test_missing_credentials_returns_not_ok(self, mock_config, mock_creds):
+    def test_missing_credentials_returns_not_ok(self, mock_config, mock_creds, _mock_ready):
         """凭证缺失时返回 ok=False，不发起 API 请求。"""
         mock_config.return_value = (MagicMock(), MagicMock(), ["product-a"], None)
         mock_creds.return_value = ("", "", "none")
@@ -30,12 +31,13 @@ class TestCheckUpdates(unittest.TestCase):
         self.assertFalse(result["ok"])
 
 
+    @patch('quantclass_sync_internal.gui.api.ensure_data_root_ready')
     @patch('quantclass_sync_internal.gui.api.get_latest_time')
     @patch('quantclass_sync_internal.gui.api.resolve_credentials_for_update')
     @patch('quantclass_sync_internal.gui.api.get_products_overview')
     @patch.object(SyncApi, '_resolve_config')
     def test_partial_failure_returns_ok_with_failed_count(
-        self, mock_config, mock_overview, mock_creds, mock_latest,
+        self, mock_config, mock_overview, mock_creds, mock_latest, _mock_ready,
     ):
         """部分产品 API 失败时，成功的正常返回，failed 计数正确。"""
         mock_config.return_value = (
@@ -67,10 +69,11 @@ class TestCheckUpdates(unittest.TestCase):
         self.assertEqual(by_name["product-a"]["source"], "api")
         self.assertEqual(by_name["product-b"]["source"], "cached")
 
+    @patch('quantclass_sync_internal.gui.api.ensure_data_root_ready')
     @patch('quantclass_sync_internal.gui.api.get_latest_time')
     @patch('quantclass_sync_internal.gui.api.resolve_credentials_for_update')
     @patch.object(SyncApi, '_resolve_config')
-    def test_401_returns_not_ok(self, mock_config, mock_creds, mock_latest):
+    def test_401_returns_not_ok(self, mock_config, mock_creds, mock_latest, _mock_ready):
         """401 全局错误时立即返回 ok=False。"""
         from quantclass_sync_internal.models import FatalRequestError
 

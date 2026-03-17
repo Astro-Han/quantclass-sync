@@ -17,9 +17,55 @@ from .constants import (
 )
 from .models import log_error, RULES
 from .status_store import (
-    read_local_timestamp_date, read_or_backfill_product_last_status,
+    normalize_data_date, read_local_timestamp_date,
+    read_or_backfill_product_last_status,
     report_dir_path, status_db_path, PRODUCT_LAST_STATUS_FILE,
 )
+
+# --- CSV 日期推断 ---
+
+
+def infer_local_date_from_csv(data_root: Path, product: str, rule) -> Optional[str]:
+    """从 CSV 数据内容推断本地最新日期（当 timestamp.txt 缺失时使用）。
+
+    策略：按文件名倒序取最后 20 个文件，提取日期列最大值。
+    尽力推断而非精确，推断偏低时只会多回补几天，无数据损坏风险。
+    无 CSV 文件或无 rule 时返回 None（真正的首次同步）。
+    """
+    if not rule:
+        return None
+
+    # 确定日期列：优先 date_filter_col，其次 sort_cols 第一列
+    date_col = rule.date_filter_col or (rule.sort_cols[0] if rule.sort_cols else None)
+    if not date_col:
+        return None
+
+    product_dir = data_root / product
+    csv_files = _list_csv_files(product_dir)
+    if not csv_files:
+        return None
+
+    # 按文件名倒序排，取最后 20 个（比纯随机更可靠地覆盖最新日期）
+    csv_files_sorted = sorted(csv_files, key=lambda f: f.name, reverse=True)
+    samples = csv_files_sorted[:20]
+
+    max_date = None
+    for f in samples:
+        try:
+            header, rows = _read_csv_full(f, rule)
+            if not header or not rows or date_col not in header:
+                continue
+            idx = header.index(date_col)
+            for row in rows:
+                if idx < len(row) and row[idx].strip():
+                    # normalize_data_date 校验格式合法性，过滤伪日期
+                    d = normalize_data_date(row[idx].strip()[:10])
+                    if d and (max_date is None or d > max_date):
+                        max_date = d
+        except Exception:
+            continue
+    return max_date
+
 
 # --- 产品状态总览 ---
 
@@ -647,8 +693,14 @@ def _check_temporal_integrity(data_root, product, rule, trading_calendar):
         return issues
 
     ts_date = read_local_timestamp_date(data_root, product)
+    inferred_mode = False
     if not ts_date:
-        return issues
+        # 无 timestamp 时从 CSV 推断，启用推断模式
+        inferred = infer_local_date_from_csv(data_root, product, rule)
+        if not inferred:
+            return issues  # 真正无数据，跳过
+        ts_date = inferred
+        inferred_mode = True
 
     # 确定日期列：优先 date_filter_col，其次 sort_cols 第一列
     date_col = rule.date_filter_col or (rule.sort_cols[0] if rule.sort_cols else None)
@@ -660,9 +712,9 @@ def _check_temporal_integrity(data_root, product, rule, trading_calendar):
     if not csv_files:
         return issues
 
-    # #7 timestamp-数据日期一致性：CSV 最大日期不应超过 timestamp，也不应远落后
+    # #7 timestamp-数据日期一致性：推断模式跳过（endpoint 和 max_date 来自同一数据源，比较无意义）
     max_date = _sample_max_date(csv_files, rule, date_col, sample_size=20)
-    if max_date:
+    if max_date and not inferred_mode:
         if max_date > ts_date:
             issues.append(_issue("date_exceeds_timestamp", "error", "temporal_integrity",
                                  product, f"CSV 最大日期 {max_date} > timestamp {ts_date}",
@@ -677,9 +729,12 @@ def _check_temporal_integrity(data_root, product, rule, trading_calendar):
                                      f"timestamp {ts_date} 远超数据最大日期 {max_date}（差 {gap_days} 天）",
                                      "", False, "needs_resync"))
 
-    # #8 日期连续性：用 min_date 作为起点，ts_date 作为终点，检查期间是否有缺失日期
+    # #8 日期连续性：用 min_date 作为起点检查期间是否有缺失日期
+    # 推断模式下用 max_date（_sample_max_date 随机抽样）作为终点，
+    # 避免用 inferred（文件名倒序抽样）当终点时 end > max_date 产生虚假缺口
     if not max_date:
         return issues
+    end_date = max_date if inferred_mode else ts_date
 
     # 抽样最小日期，作为连续性检查的起始点
     min_date = _sample_min_date(csv_files, rule, date_col, sample_size=20)
@@ -690,13 +745,13 @@ def _check_temporal_integrity(data_root, product, rule, trading_calendar):
     expected = None
     if is_crypto:
         # 加密货币全天候交易，期望每日都有数据
-        expected = _generate_calendar_days(min_date, ts_date)
+        expected = _generate_calendar_days(min_date, end_date)
     elif product in BUSINESS_DAY_ONLY_PRODUCTS and trading_calendar:
         # A 股交易日产品，用精确交易日历
-        expected = {d for d in trading_calendar if min_date <= d <= ts_date}
+        expected = {d for d in trading_calendar if min_date <= d <= end_date}
     elif product in BUSINESS_DAY_ONLY_PRODUCTS:
         # 无交易日历时降级为工作日近似（节假日可能误报）
-        expected = _generate_weekdays(min_date, ts_date)
+        expected = _generate_weekdays(min_date, end_date)
 
     if expected is None:
         return issues
