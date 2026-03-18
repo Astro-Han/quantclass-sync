@@ -338,6 +338,11 @@
             </div>
             <span class="qs-progress-text" x-text="total > 0 ? completed + ' / ' + total : '准备中...'"></span>
           </div>
+          <!-- 进度指示行（仅在有产品时显示详情，准备中状态由进度条文字承担） -->
+          <div x-show="total > 0" style="font-size:0.92em; color:#6b7280; margin:6px 0 2px;">
+            <span x-text="'已完成 ' + completed + '/' + total"></span>
+            <span x-show="currentProduct"> · 最新: <span style="font-weight:600" x-text="currentProduct"></span></span>
+          </div>
           <!-- 耗时/预估 -->
           <div class="qs-meta-row">
             <span x-text="'已用时: ' + formatDuration(elapsedSeconds)"></span>
@@ -346,8 +351,8 @@
           <!-- 产品列表 -->
           <div class="qs-card" style="padding:10px 14px;">
             <ul class="qs-product-list">
-              <!-- 已完成产品 -->
-              <template x-for="sp in syncProducts" :key="sp.name">
+              <!-- 已完成产品（倒序：最新完成的显示在最前面） -->
+              <template x-for="sp in syncProducts.slice().reverse()" :key="sp.name">
                 <li class="qs-product-item">
                   <!-- 状态图标：✓绿/✗红/–灰 -->
                   <div class="qs-product-icon"
@@ -366,9 +371,18 @@
                   </template>
                 </li>
               </template>
-              <!-- 等待中产品（灰色弱化） -->
+              <!-- 等待中产品折叠头 -->
+              <template x-if="waitingProducts().length > 0">
+                <li class="qs-product-item" style="cursor:pointer; user-select:none;"
+                    @click="showWaiting = !showWaiting">
+                  <div class="qs-product-icon icon-wait" x-text="showWaiting ? '▾' : '▸'" style="color:#c4c8ce;"></div>
+                  <span class="qs-product-name muted"
+                    x-text="'还有 ' + waitingProducts().length + ' 个产品等待中'"></span>
+                </li>
+              </template>
+              <!-- 等待中产品展开列表 -->
               <template x-for="name in waitingProducts()" :key="'wait-' + name">
-                <li class="qs-product-item">
+                <li class="qs-product-item" x-show="showWaiting">
                   <div class="qs-product-icon icon-wait">&middot;</div>
                   <span class="qs-product-name muted" x-text="name"></span>
                   <span class="qs-product-meta" style="color:#d0d4da;">等待中</span>

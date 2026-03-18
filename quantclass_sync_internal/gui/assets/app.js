@@ -57,6 +57,7 @@ document.addEventListener('alpine:init', () => {
         pollTimer: null,      // setTimeout 句柄
         syncProducts: [],     // 同步过程中已处理产品列表（每项含 name/status/elapsed/files_count/error）
         allProducts: [],      // 全部待同步产品名（用于计算等待中列表）
+        showWaiting: false,   // 等待中产品列表是否展开
 
         // ===== 初始化 =====
         // 先调 get_config() 判断视图：config_exists → main，否则 → setup
@@ -175,6 +176,7 @@ document.addEventListener('alpine:init', () => {
             this.runSummary = null;
             this.syncProducts = [];
             this.allProducts = [];
+            this.showWaiting = false;
             try {
                 const result = await window.pywebview.api.start_sync();
                 if (result.started) {
@@ -204,6 +206,7 @@ document.addEventListener('alpine:init', () => {
             this.runSummary = null;
             this.syncProducts = [];
             this.allProducts = [];
+            this.showWaiting = false;
             try {
                 // true 表示仅重试失败产品
                 const result = await window.pywebview.api.start_sync(true);
