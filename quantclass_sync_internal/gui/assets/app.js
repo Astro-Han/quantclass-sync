@@ -59,6 +59,7 @@ document.addEventListener('alpine:init', () => {
         syncProducts: [],     // 同步过程中已处理产品列表（每项含 name/status/elapsed/files_count/error）
         allProducts: [],      // 全部待同步产品名（用于计算等待中列表）
         showWaiting: false,   // 等待中产品列表是否展开
+        postprocessing: false, // 后处理阶段标志
         estimateData: null,   // API 调用量预估数据（confirm_needed 时填充，用于展示确认卡片）
 
         // ===== 初始化 =====
@@ -179,6 +180,7 @@ document.addEventListener('alpine:init', () => {
             this.syncProducts = [];
             this.allProducts = [];
             this.showWaiting = false;
+            this.postprocessing = false;
             this.estimateData = null;
             try {
                 const result = await window.pywebview.api.start_sync();
@@ -210,6 +212,7 @@ document.addEventListener('alpine:init', () => {
             this.syncProducts = [];
             this.allProducts = [];
             this.showWaiting = false;
+            this.postprocessing = false;
             this.estimateData = null;
             try {
                 // true 表示仅重试失败产品
@@ -257,7 +260,10 @@ document.addEventListener('alpine:init', () => {
                     // confirm_needed：后台线程等待用户确认，展示确认卡片
                     if (p.status === 'confirm_needed' && p.estimate) {
                         this.estimateData = p.estimate;
+                        this.postprocessing = false;
                         // 不切换 syncStatus，继续轮询等待用户点击确认/取消
+                    } else if (p.status === 'postprocessing') {
+                        this.postprocessing = true;
                     } else if (p.status === 'done') {
                         this.syncStatus = 'done';
                         this.estimateData = null;

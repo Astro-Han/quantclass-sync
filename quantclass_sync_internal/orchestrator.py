@@ -1160,6 +1160,10 @@ def _execute_plans(
         if not requested_dates_for_plan:
             if catch_up_to_latest:
                 elapsed = time.time() - t_product_start
+                # 读取本地 timestamp，用于填充 date_time，避免 GUI 用 today 计算落后天数
+                local_date_for_report = read_local_timestamp_date(
+                    command_ctx.data_root, normalize_product_name(plan.name)
+                )
                 # 并发路径：写 report 需加锁，防止 list.append 与其他线程竞争
                 with _lock:
                     _append_result(
@@ -1168,6 +1172,7 @@ def _execute_plans(
                         status="skipped",
                         strategy=plan.strategy,
                         reason_code=REASON_NO_DATA_FOR_DATE,
+                        date_time=local_date_for_report or "",
                         elapsed=elapsed,
                         mode="gate",
                         error="catch-up 日期队列为空，已跳过本产品。",
@@ -1560,6 +1565,12 @@ def run_update_with_settings(
             max_workers=max_workers,
             progress_callback=progress_callback,
         )
+        # 后处理前通知前端，postprocessing 状态用于 GUI 显示"正在后处理数据..."
+        if progress_callback is not None:
+            try:
+                progress_callback("", len(plans), len(plans), status="postprocessing")
+            except Exception:
+                pass
         preprocess_has_error = _maybe_run_coin_preprocess(
             command_ctx=command_ctx,
             report=report,
@@ -1580,6 +1591,12 @@ def run_update_with_settings(
                     max_workers=max_workers,
                     progress_callback=progress_callback,
                 )
+                # 后处理前通知前端，postprocessing 状态用于 GUI 显示"正在后处理数据..."
+                if progress_callback is not None:
+                    try:
+                        progress_callback("", len(plans), len(plans), status="postprocessing")
+                    except Exception:
+                        pass
                 preprocess_has_error = _maybe_run_coin_preprocess(
                     command_ctx=command_ctx,
                     report=report,

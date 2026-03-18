@@ -78,11 +78,12 @@ _STALE_GRACE_DAYS = 3
 
 
 def _parse_date(date_str: Optional[str]) -> Optional[date]:
-    """解析 YYYY-MM-DD 日期字符串。"""
+    """解析日期字符串，支持 YYYY-MM-DD 和 YYYY-MM-DDTHH:MM:SS 两种格式。"""
     if not date_str:
         return None
     try:
-        return datetime.strptime(date_str, "%Y-%m-%d").date()
+        # 优先尝试 ISO datetime（checked_at 字段），截取日期部分
+        return datetime.strptime(date_str[:10], "%Y-%m-%d").date()
     except ValueError:
         return None
 
