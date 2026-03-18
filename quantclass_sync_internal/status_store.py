@@ -10,7 +10,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, IO, Iterator, List, Optional
+from typing import Dict, IO, Iterator, List, Optional, Tuple
 
 try:
     import fcntl
@@ -31,6 +31,10 @@ from .constants import (
 from .models import ProductStatus, RunReport, RuntimePaths, log_info, utc_now_iso
 
 _RUN_SCOPE_PATTERN = re.compile(r"^\d{8}-\d{6}(?:[-_].+)?$")
+
+# 产品最后状态写入来源标识常量
+_SOURCE_API_CHECK = "api_check"
+_SOURCE_SYNC = "sync"
 
 
 def _status_db_has_rows(path: Path) -> bool:
@@ -471,7 +475,8 @@ def _update_product_last_status(log_dir: Path, report: RunReport) -> None:
                 "reason_code": item.reason_code,
                 "error": item.error,
                 "date_time": item.date_time,
-                "checked_at": datetime.now().strftime("%Y-%m-%d"),
+                "checked_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                "source": _SOURCE_SYNC,
             }
         # 原子写入
         with atomic_temp_path(status_path, tag="last_status") as tmp:
@@ -499,12 +504,46 @@ def update_api_latest_dates(log_dir: Path, api_latest_dates: Dict[str, str]) -> 
                 existing = _scan_reports_for_backfill(log_dir)
         else:
             existing = _scan_reports_for_backfill(log_dir)
-        checked_at = datetime.now().strftime("%Y-%m-%d")
+        checked_at = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         for product, date_str in api_latest_dates.items():
             if product in existing:
                 existing[product]["date_time"] = date_str
                 existing[product]["checked_at"] = checked_at
+                existing[product]["source"] = _SOURCE_API_CHECK
             else:
-                existing[product] = {"status": "", "reason_code": "", "error": "", "date_time": date_str, "checked_at": checked_at}
+                existing[product] = {
+                    "status": "", "reason_code": "", "error": "",
+                    "date_time": date_str, "checked_at": checked_at,
+                    "source": _SOURCE_API_CHECK,
+                }
         with atomic_temp_path(status_path, tag="last_status") as tmp:
             tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_api_latest_dates(log_dir: Path) -> Dict[str, Tuple[str, str]]:
+    """读取 product_last_status.json 中由 check_updates 写入的 API 最新日期缓存。
+
+    只返回 source=="api_check" 的记录（排除同步结果写入的记录）。
+    返回 {product: (date_time, checked_at)}。
+    文件不存在或解析失败时返回空字典（静默降级）。
+    """
+    status_path = log_dir / PRODUCT_LAST_STATUS_FILE
+    if not status_path.exists():
+        return {}
+    try:
+        data = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    result: Dict[str, Tuple[str, str]] = {}
+    for product, info in data.items():
+        if not isinstance(info, dict):
+            continue
+        # 只读取 check_updates 写入的记录，排除同步结果
+        if info.get("source") != _SOURCE_API_CHECK:
+            continue
+        dt, ca = info.get("date_time"), info.get("checked_at")
+        if isinstance(dt, str) and isinstance(ca, str):
+            result[product] = (dt, ca)
+    return result

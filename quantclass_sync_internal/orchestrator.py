@@ -8,7 +8,7 @@ import sqlite3
 import threading
 import traceback
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -25,6 +25,7 @@ from .config import (
     validate_run_mode,
 )
 from .constants import (
+    API_DATE_CACHE_TTL_SECONDS,
     BUSINESS_DAY_ONLY_PRODUCTS,
     PREPROCESS_PRODUCT,
     PREPROCESS_TRIGGER_PRODUCTS,
@@ -85,6 +86,7 @@ from .reporting import (
 )
 from .status_store import (
     export_status_json,
+    load_api_latest_dates,
     load_product_status,
     normalize_data_date,
     open_status_db,
@@ -92,9 +94,22 @@ from .status_store import (
     report_dir_path,
     should_skip_by_timestamp,
     status_json_path,
+    update_api_latest_dates,
     upsert_product_status,
     write_local_timestamp,
 )
+
+
+def _is_cache_fresh(checked_at_str: str) -> bool:
+    """检查缓存时间戳是否在 TTL 内。旧格式（无 T）视为过期。"""
+    if "T" not in checked_at_str:
+        return False
+    try:
+        checked_at = datetime.strptime(checked_at_str, "%Y-%m-%dT%H:%M:%S")
+        return (datetime.now() - checked_at).total_seconds() < API_DATE_CACHE_TTL_SECONDS
+    except ValueError:
+        return False
+
 
 def process_product(
     plan: ProductPlan,
@@ -483,6 +498,7 @@ def _resolve_requested_dates_for_plan(
     t_product_start: float,
     catch_up_to_latest: bool = False,
     lock: Optional[threading.Lock] = None,
+    api_date_cache: Optional[Dict[str, Tuple[str, str]]] = None,
 ) -> Tuple[List[str], bool]:
     """
     解析单产品执行日期列表，并处理 timestamp 门控。
@@ -498,23 +514,46 @@ def _resolve_requested_dates_for_plan(
         return [requested_date_for_plan], False
 
     product_name = normalize_product_name(plan.name)
-    try:
-        # 1) 读取 API 可用日期列表（latest）
-        api_latest_candidates = get_latest_times(
-            api_base=command_ctx.api_base.rstrip("/"),
-            product=product_name,
-            hid=hid,
-            headers=headers,
-        )
-    except Exception as exc:
-        # latest 获取失败时保持 fail-open，继续执行旧兜底路径。
-        log_info(
-            f"[{plan.name}] timestamp 门控异常，回退执行更新。",
-            event="PRODUCT_PLAN",
-            decision="fallback_run",
-            error=str(exc),
-        )
-        return [requested_date_for_plan], False
+
+    # 缓存检查：check_updates 已查过且未过期时跳过 HTTP
+    cache_hit = False
+    api_latest_candidates: List[str] = []
+    if api_date_cache:
+        cached = api_date_cache.get(product_name) or api_date_cache.get(plan.name)
+        if cached:
+            cached_date, checked_at_str = cached
+            if _is_cache_fresh(checked_at_str):
+                # 计算缓存年龄用于日志
+                try:
+                    checked_at = datetime.strptime(checked_at_str, "%Y-%m-%dT%H:%M:%S")
+                    age_seconds = (datetime.now() - checked_at).total_seconds()
+                except ValueError:
+                    age_seconds = 0.0
+                log_info(
+                    f"[{plan.name}] 使用缓存 API 日期 {cached_date}（{int(age_seconds)}s 前查询）",
+                    event="PRODUCT_PLAN", decision="cache_hit",
+                )
+                api_latest_candidates = [cached_date]
+                cache_hit = True
+
+    if not cache_hit:
+        try:
+            # 1) 读取 API 可用日期列表（latest）
+            api_latest_candidates = get_latest_times(
+                api_base=command_ctx.api_base.rstrip("/"),
+                product=product_name,
+                hid=hid,
+                headers=headers,
+            )
+        except Exception as exc:
+            # latest 获取失败时保持 fail-open，继续执行旧兜底路径。
+            log_info(
+                f"[{plan.name}] timestamp 门控异常，回退执行更新。",
+                event="PRODUCT_PLAN",
+                decision="fallback_run",
+                error=str(exc),
+            )
+            return [requested_date_for_plan], False
 
     # latest 语义保持原样：这里不做业务日裁剪，只做规范化和去重排序。
     api_latest_candidates = _normalize_date_queue(
@@ -863,6 +902,101 @@ def _maybe_run_coin_preprocess(
         # 无论哪个分支退出，统一在此累加后处理阶段耗时
         report.phase_postprocess_seconds += max(0.0, time.time() - phase_start)
 
+def _prefetch_api_dates(
+    products: List[str],
+    command_ctx: "CommandContext",
+    hid: str,
+    headers: Dict[str, str],
+    max_workers: int = 8,
+) -> Dict[str, Tuple[str, str]]:
+    """并发预取产品的 API 最新日期，写入缓存并返回。
+
+    已在缓存中且未过期的产品跳过。失败的产品静默跳过，
+    Plan 阶段会回退到逐产品 HTTP 查询。
+    """
+    api_base = command_ctx.api_base.rstrip("/")
+    log_dir = report_dir_path(command_ctx.data_root)
+    # 1. 读现有缓存，筛出需要查询的产品
+    existing_cache = load_api_latest_dates(log_dir)
+    uncached = []
+    for product in products:
+        cached = existing_cache.get(product)
+        if cached:
+            _, checked_at_str = cached
+            if _is_cache_fresh(checked_at_str):
+                continue  # 缓存新鲜，跳过
+        uncached.append(product)
+
+    if not uncached:
+        log_info(
+            f"[预取] 全部 {len(products)} 个产品缓存命中，跳过 HTTP",
+            event="PREFETCH", decision="all_cached",
+        )
+        return existing_cache
+
+    # 2. 并发预取未命中的产品
+    log_info(
+        f"[预取] 并发查询 {len(uncached)}/{len(products)} 个产品",
+        event="PREFETCH", decision="fetching",
+    )
+    fetched: Dict[str, str] = {}  # 写入仅在主线程的 as_completed 循环内，无并发写入
+    # abort_event 只能拦截尚未开始的 worker，已在执行的请求会自然完成或超时
+    abort_event = threading.Event()
+    t_start = time.time()
+
+    def _fetch_one(product: str) -> Tuple[str, Optional[str]]:
+        """单产品 HTTP 查询，401/403 触发全局中止。"""
+        if abort_event.is_set():
+            return product, None
+        try:
+            date_str = get_latest_time(api_base, product, hid, headers)
+            return product, date_str
+        except FatalRequestError as exc:
+            # 认证失败时中止整个预取
+            if exc.status_code in (401, 403):
+                abort_event.set()
+            return product, None
+        except Exception:
+            return product, None
+
+    effective_workers = min(max_workers, len(uncached))
+    executor = ThreadPoolExecutor(max_workers=effective_workers)
+    try:
+        futures = {executor.submit(_fetch_one, p): p for p in uncached}
+        for future in as_completed(futures, timeout=30):
+            try:
+                product, date_str = future.result()
+                if date_str:
+                    fetched[product] = date_str
+            except Exception:
+                pass
+            if abort_event.is_set():
+                break
+    except (TimeoutError, FuturesTimeoutError):
+        log_info("[预取] 超时，放弃剩余查询", event="PREFETCH", decision="timeout")
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    elapsed = time.time() - t_start
+    log_info(
+        f"[预取] 完成，成功 {len(fetched)}/{len(uncached)}，耗时 {elapsed:.1f}s",
+        event="PREFETCH", decision="done",
+    )
+
+    # 3. 持久化并返回内存合并的缓存（不重读文件，避免竞争和过期条目泄漏）
+    if fetched:
+        try:
+            update_api_latest_dates(log_dir, fetched)
+        except Exception:
+            pass
+    # 合并：保留新鲜的已有缓存 + 刚预取的结果
+    checked_at_now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    merged: Dict[str, Tuple[str, str]] = dict(existing_cache)
+    for product, date_str in fetched.items():
+        merged[product] = (date_str, checked_at_now)
+    return merged
+
+
 def _execute_plans(
     plans: Sequence[ProductPlan],
     command_ctx: CommandContext,
@@ -896,6 +1030,15 @@ def _execute_plans(
     has_error = False
     t_run_start = time.time()
 
+    # 并发预取所有产品的 API 最新日期，写入缓存供 Plan 阶段命中（替代单次 load_api_latest_dates）
+    product_names = [normalize_product_name(p.name) for p in plans]
+    _api_date_cache = _prefetch_api_dates(
+        products=product_names,
+        command_ctx=command_ctx,
+        hid=hid,
+        headers=headers,
+    )
+
     # stop-on-error 要求严格顺序控制，强制串行
     effective_workers = max(1, max_workers) if not command_ctx.stop_on_error else 1
     # 保护共享状态的互斥锁（串行时无竞争，开销可忽略）
@@ -922,6 +1065,7 @@ def _execute_plans(
             t_product_start=t_product_start,
             catch_up_to_latest=catch_up_to_latest,
             lock=_lock,
+            api_date_cache=_api_date_cache,
         )
         with _lock:
             report.phase_plan_seconds += max(0.0, time.time() - t_plan_phase)

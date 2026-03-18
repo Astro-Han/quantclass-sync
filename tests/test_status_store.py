@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -6,12 +7,18 @@ from unittest.mock import patch
 
 from quantclass_sync_internal.constants import LEGACY_STATUS_DB_REL, META_STATUS_DB_REL, TIMESTAMP_FILE_NAME
 from quantclass_sync_internal.models import ProductStatus
+from quantclass_sync_internal.reporting import _append_result, _new_report
 from quantclass_sync_internal.status_store import (
+    _SOURCE_API_CHECK,
+    _SOURCE_SYNC,
+    _update_product_last_status,
     ensure_status_table,
     export_status_json,
+    load_api_latest_dates,
     open_status_db,
     read_local_timestamp_date,
     resolve_runtime_paths,
+    update_api_latest_dates,
     upsert_product_status,
     write_local_timestamp,
 )
@@ -149,6 +156,99 @@ class StatusStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             write_local_timestamp(self.root, "demo", "invalid-date")
         self.assertFalse((self.root / "demo" / TIMESTAMP_FILE_NAME).exists())
+
+
+class TestCheckedAtPrecision(unittest.TestCase):
+    """checked_at 应写入 ISO datetime（精确到秒）而非纯日期。"""
+
+    def test_update_api_latest_dates_writes_iso_datetime_and_source(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            update_api_latest_dates(log_dir, {"product-a": "2026-03-18"})
+            status = json.loads((log_dir / "product_last_status.json").read_text())
+            entry = status["product-a"]
+            self.assertIn("T", entry["checked_at"])
+            self.assertRegex(entry["checked_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+            self.assertEqual(entry["source"], _SOURCE_API_CHECK)
+
+    def test_product_last_status_writes_iso_datetime_and_sync_source(self):
+        """_update_product_last_status 应写入 ISO datetime 和 source="sync"。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            report = _new_report("test", mode="network")
+            _append_result(report, product="p1", status="ok", date_time="2026-03-18")
+            _update_product_last_status(log_dir, report)
+            status = json.loads((log_dir / "product_last_status.json").read_text())
+            entry = status["p1"]
+            self.assertIn("T", entry["checked_at"])
+            self.assertEqual(entry["source"], _SOURCE_SYNC)
+
+
+class TestLoadApiLatestDates(unittest.TestCase):
+    """load_api_latest_dates 读取缓存日期。"""
+
+    def test_normal_read(self):
+        """正常读取，返回 {product: (date_time, checked_at)}。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            update_api_latest_dates(log_dir, {"prod-a": "2026-03-18", "prod-b": "2026-03-17"})
+            cache = load_api_latest_dates(log_dir)
+            self.assertIn("prod-a", cache)
+            self.assertIn("prod-b", cache)
+            date_time, checked_at = cache["prod-a"]
+            self.assertEqual(date_time, "2026-03-18")
+            self.assertIn("T", checked_at)
+
+    def test_missing_file_returns_empty(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = load_api_latest_dates(Path(tmpdir))
+            self.assertEqual(cache, {})
+
+    def test_corrupt_file_returns_empty(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            (log_dir / "product_last_status.json").write_text("not json")
+            cache = load_api_latest_dates(log_dir)
+            self.assertEqual(cache, {})
+
+    def test_old_format_without_source_excluded(self):
+        """无 source 字段的旧记录被排除。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            status_path = log_dir / "product_last_status.json"
+            status_path.write_text(json.dumps({
+                "prod-x": {"date_time": "2026-03-15", "checked_at": "2026-03-15"}
+            }))
+            cache = load_api_latest_dates(log_dir)
+            self.assertEqual(cache, {})
+
+    def test_sync_result_excluded(self):
+        """source="sync" 的记录不进入缓存。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            status_path = log_dir / "product_last_status.json"
+            status_path.write_text(json.dumps({
+                "prod-a": {"date_time": "2026-03-18", "checked_at": "2026-03-18T10:00:00",
+                           "source": _SOURCE_API_CHECK, "status": ""},
+                "prod-b": {"date_time": "2026-03-17", "checked_at": "2026-03-18T10:00:00",
+                           "source": _SOURCE_SYNC, "status": "ok"},
+            }))
+            cache = load_api_latest_dates(log_dir)
+            self.assertIn("prod-a", cache)
+            self.assertNotIn("prod-b", cache)
+
+    def test_source_residual_after_sync_overwrite(self):
+        """先 api_check 写入再同步覆盖，旧 source 不残留。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            update_api_latest_dates(log_dir, {"prod-a": "2026-03-18"})
+            cache_before = load_api_latest_dates(log_dir)
+            self.assertIn("prod-a", cache_before)
+            report = _new_report("test", mode="network")
+            _append_result(report, product="prod-a", status="ok", date_time="2026-03-17")
+            _update_product_last_status(log_dir, report)
+            cache_after = load_api_latest_dates(log_dir)
+            self.assertNotIn("prod-a", cache_after)
 
 
 if __name__ == "__main__":

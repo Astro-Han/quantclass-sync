@@ -206,6 +206,9 @@ META_HEALTH_BASELINE_REL = Path(SYNC_META_DIRNAME) / "log" / "health_baseline.js
 FINANCIAL_PRODUCTS = {"stock-fin-data-xbx", "stock-fin-pre-fore-data-xbx"}
 NOTICE_PRODUCTS = {"stock-notices-title"}
 
+# API 日期缓存 TTL（秒），5 分钟内的缓存直接使用，过期则回退 HTTP 查询
+API_DATE_CACHE_TTL_SECONDS = 300
+
 
 def normalize_product_name(product: str) -> str:
     """

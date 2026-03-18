@@ -10,7 +10,7 @@ from quantclass_sync_internal.http_client import parse_latest_time_candidates
 from quantclass_sync_internal.models import CommandContext, EmptyDownloadLinkError, FatalRequestError, ProductPlan, ProductSyncError, RunReport, SyncStats
 from quantclass_sync_internal.orchestrator import _execute_plans, _resolve_requested_dates_for_plan
 from quantclass_sync_internal.reporting import _new_report
-from quantclass_sync_internal.status_store import connect_status_db
+from quantclass_sync_internal.status_store import _SOURCE_API_CHECK, connect_status_db
 
 
 class UpdateCatchUpTests(unittest.TestCase):
@@ -530,6 +530,7 @@ class UpdateCatchUpTests(unittest.TestCase):
             t_product_start: float,
             catch_up_to_latest: bool = False,
             lock=None,
+            **kwargs,
         ) -> tuple[list[str], bool]:
             if plan.name == "stock-trading-data":
                 return ([], False)
@@ -589,6 +590,7 @@ class UpdateCatchUpTests(unittest.TestCase):
             t_product_start: float,
             catch_up_to_latest: bool = False,
             lock=None,
+            **kwargs,
         ) -> tuple[list[str], bool]:
             return (["2026-02-09"], False)
 
@@ -625,6 +627,179 @@ class UpdateCatchUpTests(unittest.TestCase):
         self.assertTrue(has_error)
         self.assertEqual(["stock-trading-data"], called_products)
         self.assertEqual(["error"], [item.status for item in report.products])
+
+
+class TestApiDateCache(unittest.TestCase):
+    """_resolve_requested_dates_for_plan 应优先使用缓存。"""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmpdir.name)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _ctx(self):
+        return CommandContext(
+            run_id="test", data_root=self.root,
+            dry_run=False, stop_on_error=False,
+        )
+
+    def _plan(self, name="stock-trading-data"):
+        return build_product_plan([name])[0]
+
+    def _report(self):
+        return _new_report("test", mode="network")
+
+    @patch("quantclass_sync_internal.orchestrator.should_skip_by_timestamp", return_value=True)
+    @patch("quantclass_sync_internal.orchestrator.get_latest_times")
+    def test_cache_hit_skips_http(self, mock_get_latest, mock_skip):
+        """缓存新鲜时不调用 get_latest_times。"""
+        from datetime import datetime
+        fresh_checked_at = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        cache = {"stock-trading-data": ("2026-03-18", fresh_checked_at)}
+        queue, skipped = _resolve_requested_dates_for_plan(
+            plan=self._plan(), command_ctx=self._ctx(),
+            hid="hid", headers={"api-key": "k"},
+            requested_date_time="", force_update=False,
+            report=self._report(), t_product_start=time.time(),
+            api_date_cache=cache,
+        )
+        mock_get_latest.assert_not_called()
+
+    @patch("quantclass_sync_internal.orchestrator.should_skip_by_timestamp", return_value=True)
+    @patch("quantclass_sync_internal.orchestrator.get_latest_times", return_value=["2026-03-18"])
+    def test_cache_expired_falls_through(self, mock_get_latest, mock_skip):
+        """缓存过期时回退 HTTP。"""
+        from datetime import datetime, timedelta
+        from quantclass_sync_internal.constants import API_DATE_CACHE_TTL_SECONDS
+        expired_time = (datetime.now() - timedelta(seconds=API_DATE_CACHE_TTL_SECONDS + 60))
+        old_checked_at = expired_time.strftime("%Y-%m-%dT%H:%M:%S")
+        cache = {"stock-trading-data": ("2026-03-18", old_checked_at)}
+        _resolve_requested_dates_for_plan(
+            plan=self._plan(), command_ctx=self._ctx(),
+            hid="hid", headers={"api-key": "k"},
+            requested_date_time="", force_update=False,
+            report=self._report(), t_product_start=time.time(),
+            api_date_cache=cache,
+        )
+        mock_get_latest.assert_called_once()
+
+    @patch("quantclass_sync_internal.orchestrator.should_skip_by_timestamp", return_value=True)
+    @patch("quantclass_sync_internal.orchestrator.get_latest_times", return_value=["2026-03-18"])
+    def test_cache_miss_falls_through(self, mock_get_latest, mock_skip):
+        """产品不在缓存中时回退 HTTP。"""
+        _resolve_requested_dates_for_plan(
+            plan=self._plan(), command_ctx=self._ctx(),
+            hid="hid", headers={"api-key": "k"},
+            requested_date_time="", force_update=False,
+            report=self._report(), t_product_start=time.time(),
+            api_date_cache={},
+        )
+        mock_get_latest.assert_called_once()
+
+
+class TestPrefetchApiDates(unittest.TestCase):
+    """_prefetch_api_dates 并发预取 API 日期。"""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmpdir.name)
+        # log_dir 路径与 report_dir_path(data_root) 保持一致：data_root/.quantclass_sync/log
+        self.log_dir = self.root / ".quantclass_sync" / "log"
+        self.log_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _ctx(self) -> CommandContext:
+        """构造测试用 CommandContext，api_base 设为 http://fake。"""
+        return CommandContext(
+            run_id="test",
+            data_root=self.root,
+            dry_run=False,
+            stop_on_error=False,
+            api_base="http://fake",
+        )
+
+    @patch("quantclass_sync_internal.orchestrator.get_latest_time")
+    def test_fetches_uncached_products(self, mock_get):
+        """无缓存时并发调用 get_latest_time。"""
+        mock_get.return_value = "2026-03-18"
+        from quantclass_sync_internal.orchestrator import _prefetch_api_dates
+        cache = _prefetch_api_dates(
+            products=["prod-a", "prod-b"],
+            command_ctx=self._ctx(), hid="hid", headers={},
+        )
+        self.assertEqual(mock_get.call_count, 2)
+        self.assertIn("prod-a", cache)
+        self.assertIn("prod-b", cache)
+
+    @patch("quantclass_sync_internal.orchestrator.get_latest_time")
+    def test_skips_fresh_cache(self, mock_get):
+        """缓存新鲜时不调用 HTTP。"""
+        from quantclass_sync_internal.orchestrator import _prefetch_api_dates
+        from quantclass_sync_internal.status_store import update_api_latest_dates
+        # 预先写入新鲜缓存
+        update_api_latest_dates(self.log_dir, {"prod-a": "2026-03-18"})
+        cache = _prefetch_api_dates(
+            products=["prod-a"],
+            command_ctx=self._ctx(), hid="hid", headers={},
+        )
+        mock_get.assert_not_called()
+        self.assertIn("prod-a", cache)
+
+    @patch("quantclass_sync_internal.orchestrator.get_latest_time")
+    def test_partial_cache_only_fetches_missing(self, mock_get):
+        """部分缓存命中时只查询缺失的产品。"""
+        mock_get.return_value = "2026-03-17"
+        from quantclass_sync_internal.orchestrator import _prefetch_api_dates
+        from quantclass_sync_internal.status_store import update_api_latest_dates
+        update_api_latest_dates(self.log_dir, {"prod-a": "2026-03-18"})
+        cache = _prefetch_api_dates(
+            products=["prod-a", "prod-b"],
+            command_ctx=self._ctx(), hid="hid", headers={},
+        )
+        # 只查了 prod-b
+        self.assertEqual(mock_get.call_count, 1)
+        self.assertIn("prod-a", cache)
+        self.assertIn("prod-b", cache)
+
+    @patch("quantclass_sync_internal.orchestrator.get_latest_time", side_effect=Exception("network"))
+    def test_failure_returns_partial_cache(self, mock_get):
+        """预取失败时返回已有缓存，不阻断流程。"""
+        from quantclass_sync_internal.orchestrator import _prefetch_api_dates
+        cache = _prefetch_api_dates(
+            products=["prod-a"],
+            command_ctx=self._ctx(), hid="hid", headers={},
+        )
+        # 失败但不抛异常，返回空缓存
+        self.assertEqual(cache, {})
+
+    @patch("quantclass_sync_internal.orchestrator.get_latest_time")
+    def test_expired_cache_refetches(self, mock_get):
+        """缓存过期时重新查询。"""
+        from datetime import datetime, timedelta
+        from quantclass_sync_internal.orchestrator import _prefetch_api_dates
+        from quantclass_sync_internal.constants import API_DATE_CACHE_TTL_SECONDS
+        # 手动写入过期缓存
+        expired_time = (datetime.now() - timedelta(seconds=API_DATE_CACHE_TTL_SECONDS + 60))
+        status_path = self.log_dir / "product_last_status.json"
+        import json
+        status_path.write_text(json.dumps({
+            "prod-a": {
+                "date_time": "2026-03-17",
+                "checked_at": expired_time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "source": _SOURCE_API_CHECK,
+            }
+        }))
+        mock_get.return_value = "2026-03-18"
+        cache = _prefetch_api_dates(
+            products=["prod-a"],
+            command_ctx=self._ctx(), hid="hid", headers={},
+        )
+        mock_get.assert_called_once()  # 过期缓存触发重查
+        self.assertEqual(cache["prod-a"][0], "2026-03-18")  # 返回新日期
 
 
 if __name__ == "__main__":

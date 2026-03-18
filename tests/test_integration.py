@@ -32,8 +32,10 @@ from quantclass_sync_internal.status_store import (
     open_status_db,
     load_product_status,
     read_local_timestamp_date,
+    report_dir_path,
     resolve_runtime_paths,
     write_local_timestamp,
+    PRODUCT_LAST_STATUS_FILE,
 )
 from quantclass_sync_internal.file_sync import sync_known_product
 from quantclass_sync_internal.constants import TIMESTAMP_FILE_NAME
@@ -171,6 +173,10 @@ class TestSyncMainChain(unittest.TestCase):
                          （用于多产品测试不同产品返回不同 latest）。
         """
         report = _new_report("test-integ-001", mode="network")
+
+        # 清除 API 日期缓存，确保每次调用模拟独立运行（_prefetch_api_dates 不命中旧缓存）
+        cache_file = report_dir_path(ctx.data_root) / PRODUCT_LAST_STATUS_FILE
+        cache_file.unlink(missing_ok=True)
 
         save_file_mock = make_save_file_mock(date_to_content)
 
