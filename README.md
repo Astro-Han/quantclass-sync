@@ -2,7 +2,7 @@
 
 [QuantClass（邢不行量化课）](https://www.quantclass.cn/) 的数据增量同步工具。自动下载股票和币圈数据，保持本地数据最新。好几天没跑也没关系，一条命令把缺的全补上。
 
-当前版本：**v1.3.1** | macOS 工具，Windows 用户推荐使用 QuantClass 官方客户端
+当前版本：**v1.4.0** | macOS 工具，Windows 用户推荐使用 QuantClass 官方客户端
 
 ---
 
