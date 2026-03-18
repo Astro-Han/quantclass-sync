@@ -212,6 +212,14 @@ class ReportSchemaTests(unittest.TestCase):
             "quantclass_sync_internal.orchestrator.build_product_plan",
             return_value=[plan],
         ), patch(
+            # dry_run=False 路径会先调 build_headers_or_raise，需 mock 避免凭证校验
+            "quantclass_sync_internal.orchestrator.build_headers_or_raise",
+            return_value=({}, "hid"),
+        ), patch(
+            # dry_run=False 路径会调 _prefetch_api_dates，需 mock 避免真实 HTTP
+            "quantclass_sync_internal.orchestrator._prefetch_api_dates",
+            return_value={},
+        ), patch(
             "quantclass_sync_internal.orchestrator._execute_plans",
             return_value=(SyncStats(), False, time.time() - 1.0),
         ), patch(

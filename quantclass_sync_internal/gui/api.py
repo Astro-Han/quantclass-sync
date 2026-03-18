@@ -69,7 +69,7 @@ def _format_run_summary(raw_run: Dict[str, Any]) -> Dict[str, Any]:
 
 # _progress 的初始结构，每次 start_sync 前重置为此形态
 _PROGRESS_INIT: Dict[str, Any] = {
-    "status": "idle",          # idle / syncing / done / error
+    "status": "idle",          # idle / syncing / confirm_needed / done / error
     "current_product": "",     # 最近完成的产品名
     "completed": 0,            # 已完成产品数
     "total": 0,                # 本次同步产品总数
@@ -78,6 +78,7 @@ _PROGRESS_INIT: Dict[str, Any] = {
     "run_summary": None,       # 同步完成后填充 run_summary dict
     "products": [],            # 已完成产品列表 [{name, status, elapsed_seconds, files_count}]
     "all_products": [],        # 全部产品名列表（由 progress_callback 初始化调用时传入）
+    "estimate": None,          # EstimateResult 的 dict 表示（confirm_needed 时填充）
 }
 
 
@@ -94,6 +95,11 @@ class SyncApi:
         self._health_progress: Dict[str, Any] = {
             "checking": False, "current": 0, "total": 0, "product": "", "result": None,
         }
+        # 同步确认事件（每次 _run_sync 重置，用于与前端双向通信）
+        self._confirm_event: threading.Event = threading.Event()
+        self._confirm_result: bool = False
+        # 明确标记用户是否主动取消（区别于凭证错误等其他 error 场景）
+        self._was_cancelled: bool = False
 
     # ------------------------------------------------------------------
     # 内部辅助方法
@@ -293,7 +299,7 @@ class SyncApi:
         }
 
     def run_setup(self, data_root: str, api_key: str, hid: str,
-                  create_dir: bool = False) -> dict:
+                  create_dir: bool = False, course_type: str = "basic") -> dict:
         """GUI setup 向导调用。先保存配置，再验证连通性。
 
         流程：
@@ -330,10 +336,15 @@ class SyncApi:
         secrets_file = DEFAULT_USER_SECRETS_FILE.resolve()
 
         try:
+            # basic 固定 10 次/天，premium 固定 100 次/天
+            _limit_map = {"basic": 10, "premium": 100}
+            _api_call_limit = _limit_map.get(course_type, 50)
             config = UserConfig(
                 data_root=str(dr),
                 product_mode="local_scan",
                 default_products=[],
+                course_type=course_type,
+                api_call_limit=_api_call_limit,
             )
             save_setup_artifacts_atomic(
                 config_path=config_file,
@@ -386,6 +397,23 @@ class SyncApi:
                 "warning": "配置已保存，但连接验证未通过，请检查网络连接",
             }
 
+    def confirm_sync(self) -> Dict[str, Any]:
+        """前端点击"继续同步"时调用，唤醒后台线程继续执行。"""
+        self._confirm_result = True
+        self._confirm_event.set()
+        return {"ok": True}
+
+    def cancel_sync(self) -> Dict[str, Any]:
+        """前端点击"取消"时调用，唤醒后台线程并标记取消。
+
+        只设置取消标志和事件，最终状态由 _run_sync 的 exit_code==-1 分支统一写入，
+        避免与 _run_sync 写 status="idle" 产生竞争。
+        """
+        self._was_cancelled = True
+        self._confirm_result = False
+        self._confirm_event.set()
+        return {"ok": True}
+
     def start_sync(self, retry_failed: bool = False) -> Dict[str, Any]:
         """启动同步线程。
 
@@ -401,7 +429,11 @@ class SyncApi:
         retry_products = None
         # 读-判断-写合并在同一个锁块，防止双击连续启动
         with self._lock:
-            if self._progress.get("status") == "syncing":
+            # 检查 worker 线程是否仍在运行（cancel 后 status 变 error，但线程可能未退出）
+            if hasattr(self, "_sync_thread") and self._sync_thread and self._sync_thread.is_alive():
+                return {"started": False, "message": "同步正在进行中，请等待完成后再试。"}
+            # confirm_needed 状态表示同步已在进行中（等待用户确认），也需拦截
+            if self._progress.get("status") in ("syncing", "confirm_needed"):
                 return {"started": False, "message": "同步正在进行中，请等待完成后再试。"}
 
             # retry_failed 分支：从上次 run_summary 读取失败产品名
@@ -431,6 +463,8 @@ class SyncApi:
             daemon=True,  # 主进程退出时自动结束
             name="gui-sync-worker",
         )
+        # 保存线程引用，供下次 start_sync 调用时检查是否仍在运行
+        self._sync_thread = thread
         thread.start()
         log_info("GUI 同步线程已启动。", event="GUI_SYNC")
 
@@ -516,9 +550,9 @@ class SyncApi:
         return {"ok": True}
 
     def start_health_check(self) -> Dict[str, Any]:
-        """启动后台健康检查线程。同步中拒绝，重复启动拒绝。"""
+        """启动后台健康检查线程。同步中（含等待确认）拒绝，重复启动拒绝。"""
         with self._lock:
-            if self._progress.get("status") == "syncing":
+            if self._progress.get("status") in ("syncing", "confirm_needed"):
                 return {"ok": False, "error": "同步进行中，请稍后再试"}
             if self._health_progress["checking"]:
                 return {"ok": False, "error": "检查已在进行中"}
@@ -572,9 +606,9 @@ class SyncApi:
             return self._health_progress.get("result")
 
     def repair_health_issues(self) -> Dict[str, Any]:
-        """修复可修复的数据问题。同步中拒绝。"""
+        """修复可修复的数据问题。同步中（含等待确认）拒绝。"""
         with self._lock:
-            if self._progress.get("status") == "syncing":
+            if self._progress.get("status") in ("syncing", "confirm_needed"):
                 return {"ok": False, "error": "同步进行中，请稍后修复"}
             result = self._health_progress.get("result")
         if not result or not result.get("ok"):
@@ -740,6 +774,29 @@ class SyncApi:
         """
         t_start = time.time()
 
+        # 每次同步重置确认事件和取消标志，防止上次状态残留
+        self._confirm_event = threading.Event()
+        self._confirm_result = False
+        self._was_cancelled = False
+
+        def _gui_confirm(estimate) -> bool:
+            """GUI 确认回调：设状态 -> 等前端点击 -> 返回结果。
+
+            在 gui-sync-worker 线程等待，不持 _lock，不阻塞 pywebview 主线程。
+            等待超时（300s）视为取消。
+            """
+            from dataclasses import asdict
+            with self._lock:
+                self._progress["status"] = "confirm_needed"
+                self._progress["estimate"] = asdict(estimate)
+            # 等待前端调用 confirm_sync() 或 cancel_sync()
+            self._confirm_event.wait(timeout=300)
+            # wait 返回后清除确认状态，防止前端轮询时 confirm_needed 卡片重复弹出
+            with self._lock:
+                self._progress["status"] = "syncing"
+                self._progress["estimate"] = None
+            return self._confirm_result
+
         try:
             config_file = DEFAULT_USER_CONFIG_FILE.resolve()
             secrets_file = DEFAULT_USER_SECRETS_FILE.resolve()
@@ -843,6 +900,7 @@ class SyncApi:
                 fallback_products = user_config.default_products or []
 
             # 执行同步，接收退出码判断业务结果
+            # 传入 api_call_limit/course_type 供预估函数使用，confirm_callback 供 GUI 确认流程
             exit_code = run_update_with_settings(
                 command_ctx=command_ctx,
                 mode="local",  # 产品发现策略（按本地已有目录扫描）
@@ -852,6 +910,9 @@ class SyncApi:
                 fallback_products=fallback_products,
                 max_workers=DEFAULT_GUI_WORKERS,
                 progress_callback=progress_callback,
+                api_call_limit=getattr(user_config, "api_call_limit", 50),
+                course_type=getattr(user_config, "course_type", ""),
+                confirm_callback=_gui_confirm,
             )
 
             # 读取 run_summary 并转换为前端友好格式
@@ -865,27 +926,41 @@ class SyncApi:
             except Exception as summary_exc:
                 log_error(f"同步完成但运行摘要读取失败：{summary_exc}", event="GUI_SYNC")
 
+            # orchestrator 返回 -1 表示用户主动取消，静默回到 idle（不显示成功也不显示错误）
+            if exit_code == -1:
+                self._update_progress(status="idle")
+                log_info("GUI 同步已取消。", event="GUI_SYNC", elapsed=round(elapsed, 1))
+                return
+
             # 退出码非零表示有产品失败或无可执行产品，标记为 error 并附带 run_summary
-            if exit_code != EXIT_CODE_SUCCESS:
-                error_msg = "部分产品同步失败" if run_summary and run_summary.get("error", 0) > 0 else "同步未成功完成"
-                self._update_progress(
-                    status="error",
-                    elapsed_seconds=round(elapsed, 1),
-                    error_message=error_msg,
-                    run_summary=run_summary,
-                )
-                log_info("GUI 同步结束（有失败）。", event="GUI_SYNC", exit_code=exit_code, elapsed=round(elapsed, 1))
-            else:
-                self._update_progress(
-                    status="done",
-                    elapsed_seconds=round(elapsed, 1),
-                    run_summary=run_summary,
-                )
-                log_info("GUI 同步完成。", event="GUI_SYNC", elapsed=round(elapsed, 1))
+            # 注意：cancel_sync() 会直接设 status=error，用 _was_cancelled 精确判断，
+            # 避免凭证错误等场景误判为"已取消"
+            already_cancelled = self._was_cancelled
+            if not already_cancelled:
+                if exit_code != EXIT_CODE_SUCCESS:
+                    error_msg = "部分产品同步失败" if run_summary and run_summary.get("error", 0) > 0 else "同步未成功完成"
+                    self._update_progress(
+                        status="error",
+                        elapsed_seconds=round(elapsed, 1),
+                        error_message=error_msg,
+                        run_summary=run_summary,
+                    )
+                    log_info("GUI 同步结束（有失败）。", event="GUI_SYNC", exit_code=exit_code, elapsed=round(elapsed, 1))
+                else:
+                    self._update_progress(
+                        status="done",
+                        elapsed_seconds=round(elapsed, 1),
+                        run_summary=run_summary,
+                    )
+                    log_info("GUI 同步完成。", event="GUI_SYNC", elapsed=round(elapsed, 1))
 
         except Exception as exc:
             # 预检阶段异常（凭证缺失、配置错误等），尚未进入 run_update_with_settings，
             # 无 run_summary 可填（保持初始值 None），前端据此不展示摘要详情
+            # 若用户已主动取消（_was_cancelled），静默回到 idle，不展示 error
+            if self._was_cancelled:
+                self._update_progress(status="idle")
+                return
             elapsed = time.time() - t_start
             error_msg = str(exc)
             log_error(f"GUI 同步出错：{error_msg}", event="GUI_SYNC")

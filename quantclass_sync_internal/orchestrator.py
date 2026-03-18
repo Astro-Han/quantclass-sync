@@ -61,6 +61,7 @@ from .file_sync import sync_from_extract
 from .models import (
     CommandContext,
     EmptyDownloadLinkError,
+    EstimateResult,
     FatalRequestError,
     ProductPlan,
     ProductRunResult,
@@ -997,6 +998,90 @@ def _prefetch_api_dates(
     return merged
 
 
+def _estimate_sync_workload(
+    plans: Sequence[ProductPlan],
+    api_date_cache: Dict[str, Tuple[str, str]],
+    data_root: Path,
+    api_call_limit: int = 50,
+    course_type: str = "",
+) -> EstimateResult:
+    """预估同步所需的 API 调用量。
+
+    比较每产品的本地 timestamp 和 API 缓存日期，
+    计算缺口天数和预估调用次数。
+    门控命中（gap=0）的产品不计入结果列表。
+    无 API 缓存日期或无本地日期时，计为 1 次（latest only）。
+    """
+    products_list = []
+    total = 0
+    for plan in plans:
+        product_name = normalize_product_name(plan.name)
+        # 读本地日期（timestamp.txt）
+        local_date = read_local_timestamp_date(data_root, product_name)
+        if not local_date:
+            # 尝试 CSV 推断（仅已知产品，需要 RULES 中的规则确定日期列）
+            rule = RULES.get(product_name)
+            if rule:
+                local_date = infer_local_date_from_csv(data_root, product_name, rule)
+        # 读 API 最新日期（来自预取缓存）
+        cached = api_date_cache.get(product_name)
+        api_date = cached[0] if cached else None
+        if not api_date:
+            # 无 API 日期，计为 1 次
+            products_list.append({
+                "name": plan.name, "local_date": local_date or "",
+                "api_date": "", "gap_days": 1, "estimated_calls": 1,
+            })
+            total += 1
+            continue
+        if not local_date:
+            # 无本地数据，计为 1 次
+            products_list.append({
+                "name": plan.name, "local_date": "",
+                "api_date": api_date, "gap_days": 1, "estimated_calls": 1,
+            })
+            total += 1
+            continue
+        # 计算日期缺口
+        try:
+            local_d = date.fromisoformat(local_date)
+            api_d = date.fromisoformat(api_date)
+            gap = max(0, (api_d - local_d).days)
+        except ValueError:
+            gap = 1
+        if gap == 0:
+            continue  # 已是最新，不计入
+        products_list.append({
+            "name": plan.name, "local_date": local_date,
+            "api_date": api_date, "gap_days": gap, "estimated_calls": gap,
+        })
+        total += gap
+    return EstimateResult(
+        products=products_list,
+        total_calls=total,
+        limit=api_call_limit,
+        course_type=course_type,
+        needs_confirm=total > api_call_limit,
+    )
+
+
+def _print_estimate(estimate: EstimateResult) -> None:
+    """打印 CLI 同步预估表，仅在 needs_confirm 时调用。"""
+    print(f"\n警告：本次同步预计需要约 {estimate.total_calls} 次 API 调用\n")
+    header = f"  {'产品':<36}  {'落后天数':>8}  {'预计调用':>8}"
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    for p in estimate.products:
+        print(f"  {p['name']:<36}  {p['gap_days']:>8}  {p['estimated_calls']:>8}")
+    print("  " + "-" * (len(header) - 2))
+    print(f"  {'合计':<36}  {'':>8}  {estimate.total_calls:>8}\n")
+    if estimate.course_type == "basic":
+        print("你的账号每产品每天只能同步 1 次，落后较多时建议先从网页下载全量数据，或联系官方重置配额。")
+    else:
+        print("落后天数较多时建议先从网页下载全量数据。")
+    print()
+
+
 def _execute_plans(
     plans: Sequence[ProductPlan],
     command_ctx: CommandContext,
@@ -1333,12 +1418,20 @@ def run_update_with_settings(
     fallback_products: Optional[Sequence[str]] = None,
     max_workers: int = 1,
     progress_callback: Optional[Callable[..., None]] = None,
+    api_call_limit: int = 50,
+    course_type: str = "",
+    confirm_callback: Optional[Callable] = None,
+    auto_confirm: bool = False,
 ) -> int:
     """
     通用批量更新执行器（update/all_data 共用）。
 
     fallback_products 用于"本地扫描为空"时的回退清单。
     progress_callback: 产品完成后回调，签名同 _execute_plans。
+    api_call_limit: 触发确认的 API 调用次数阈值，默认 50。
+    course_type: 课程类型（"basic"/"premium"），影响确认提示文本。
+    confirm_callback: 调用方提供的确认函数，接收 EstimateResult 返回 True/False。
+    auto_confirm: True 时跳过所有确认提示（CLI --yes）。
     """
 
     ensure_data_root_ready(command_ctx.data_root, create_if_missing=False)
@@ -1422,6 +1515,37 @@ def run_update_with_settings(
             has_error=True,
             no_executable_products=True,
         )
+
+    # 非 dry_run 时：预取 API 日期 → 预估调用量 → 超阈值时请求确认
+    if not command_ctx.dry_run:
+        headers_pre, hid_pre = build_headers_or_raise(command_ctx)
+        api_date_cache = _prefetch_api_dates(
+            products=[normalize_product_name(p.name) for p in plans],
+            command_ctx=command_ctx,
+            hid=hid_pre,
+            headers=headers_pre,
+        )
+        estimate = _estimate_sync_workload(
+            plans, api_date_cache, command_ctx.data_root, api_call_limit, course_type
+        )
+        if estimate.needs_confirm:
+            confirmed = True  # 默认继续
+            if confirm_callback:
+                confirmed = confirm_callback(estimate)
+            elif not auto_confirm:
+                # CLI 交互模式：打印预估表，等用户输入
+                _print_estimate(estimate)
+                confirmed = input("继续同步？(y/n) ").strip().lower() == "y"
+            if not confirmed:
+                _append_result(
+                    report,
+                    product="",
+                    status="cancelled",
+                    reason_code="user_cancelled",
+                    error="用户取消同步",
+                )
+                # 返回 -1 表示用户主动取消，与业务失败（1）和成功（0）区分
+                return -1
 
     # 丢弃 _execute_plans 内部计时（第三返回值），以外层 t_run_start 为准，含前置阶段耗时
     if command_ctx.dry_run:

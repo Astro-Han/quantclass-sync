@@ -260,6 +260,8 @@ class UserConfig(BaseModel):
     secrets_file: Path = DEFAULT_USER_SECRETS_FILE
     created_at: str = Field(default_factory=utc_now_iso)
     updated_at: str = Field(default_factory=utc_now_iso)
+    course_type: str = ""       # "basic" / "premium"，空表示未设置
+    api_call_limit: int = 50    # 默认保守值；basic=10，premium=100
 
     @field_validator("product_mode", mode="before")
     @classmethod
@@ -694,3 +696,14 @@ class TextFileSnapshot:
     exists: bool
     content: str = ""
     mode: Optional[int] = None
+
+
+@dataclass
+class EstimateResult:
+    """同步前 API 调用量预估结果。"""
+
+    products: List[dict]    # [{name, local_date, api_date, gap_days, estimated_calls}]
+    total_calls: int
+    limit: int
+    course_type: str
+    needs_confirm: bool     # total_calls > limit

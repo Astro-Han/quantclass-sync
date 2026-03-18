@@ -260,6 +260,9 @@ class TestS2GUISmoke(unittest.TestCase):
             "repair_health_issues",
             "check_updates",
             "open_data_dir",
+            # Task 3: GUI 同步前确认（API 调用量预估）
+            "confirm_sync",
+            "cancel_sync",
         }
 
         # 反射获取实际公开方法

@@ -481,6 +481,7 @@ def cmd_update(
     products: List[str] = typer.Option([], "--products", help="临时覆盖默认产品清单。"),
     force_update: bool = typer.Option(False, "--force", help="强制更新：跳过 timestamp 门控。"),
     workers: int = typer.Option(1, "--workers", "-w", min=1, max=8, help="并发下载线程数（默认 1，推荐 2-3）。"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="跳过同步前确认提示，直接执行"),
 ) -> None:
     """
     一键更新入口（日常只需这个命令）。
@@ -561,9 +562,15 @@ def cmd_update(
         command_name="update",
         fallback_products=fallback_products,
         max_workers=workers,
+        # 从 user_config 读取 API 调用限额和课程类型（影响确认提示文本）
+        api_call_limit=user_config.api_call_limit,
+        course_type=user_config.course_type,
+        auto_confirm=yes,
     )
     log_info("update 执行完成。", event="CMD_DONE", exit_code=exit_code)
-    if exit_code != 0:
+    if exit_code == -1:
+        pass  # 用户取消，正常退出（exit 0）
+    elif exit_code != 0:
         raise typer.Exit(code=exit_code)
 
 @app.command("repair-sort")
@@ -806,6 +813,7 @@ def cmd_all_data(
     mode: str = typer.Option("local", "--mode", help="local=本地存量更新；catalog=全量轮询。"),
     products: List[str] = typer.Option([], "--products", help="显式产品（可重复传参，也支持逗号分隔）。"),
     force_update: bool = typer.Option(False, "--force", help="强制更新：跳过 timestamp 门控。"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="跳过同步前确认提示，直接执行"),
 ) -> None:
     """
     批量更新产品（兼容命令）。
@@ -814,7 +822,13 @@ def cmd_all_data(
     mode=catalog：按 catalog 清单轮询（补齐或巡检时使用）。
     """
 
-    command_ctx = _init_command(ctx, "all_data")
+    # 一次性解析路径和 user_config，复用结果，避免 _init_command 内部重复调用
+    base_ctx = _ctx(ctx)
+    data_root, secrets_file, user_config_all, data_root_source, secrets_source = _resolve_command_paths(base_ctx)
+    command_ctx = _build_command_ctx_with_overrides(base_ctx, data_root, secrets_file)
+    ctx.obj = command_ctx
+    log_debug("all_data 运行来源已解析.", event="PATHS",
+              data_root_source=data_root_source, secrets_source=secrets_source)
     try:
         normalized_mode = validate_run_mode(mode)
     except ValueError as exc:
@@ -825,9 +839,15 @@ def cmd_all_data(
         products=products,
         force_update=force_update,
         command_name="all_data",
+        auto_confirm=yes,
+        # 从 user_config 读取 API 调用限额和课程类型（影响确认提示文本，无配置时用默认值）
+        api_call_limit=getattr(user_config_all, "api_call_limit", 50),
+        course_type=getattr(user_config_all, "course_type", ""),
     )
     log_info("all_data 执行完成。", event="CMD_DONE", exit_code=exit_code)
-    if exit_code != 0:
+    if exit_code == -1:
+        pass  # 用户取消，正常退出（exit 0）
+    elif exit_code != 0:
         raise typer.Exit(code=exit_code)
 
 @app.command("gui")

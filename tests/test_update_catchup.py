@@ -802,5 +802,80 @@ class TestPrefetchApiDates(unittest.TestCase):
         self.assertEqual(cache["prod-a"][0], "2026-03-18")  # 返回新日期
 
 
+class TestEstimateSyncWorkload(unittest.TestCase):
+    """_estimate_sync_workload 预估 API 调用量。"""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmpdir.name)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _write_timestamp(self, product: str, data_date: str) -> None:
+        """写入产品 timestamp.txt。"""
+        path = self.root / product / TIMESTAMP_FILE_NAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{data_date},2026-02-11 10:00:00\n", encoding="utf-8")
+
+    def _plan(self, product: str) -> "ProductPlan":
+        return build_product_plan([product])[0]
+
+    def test_no_gap_no_confirm(self):
+        """所有产品本地日期等于 API 日期时，gap=0，needs_confirm=False。"""
+        from quantclass_sync_internal.orchestrator import _estimate_sync_workload
+        product = "stock-trading-data"
+        self._write_timestamp(product, "2026-03-18")
+        # API 日期与本地日期相同，gap=0
+        api_date_cache = {"stock-trading-data": ("2026-03-18", "2026-03-18T10:00:00")}
+        plans = [self._plan(product)]
+        result = _estimate_sync_workload(plans, api_date_cache, self.root, api_call_limit=10)
+        self.assertEqual(result.total_calls, 0)
+        self.assertFalse(result.needs_confirm)
+        # gap=0 的产品不计入 products 列表
+        self.assertEqual(len(result.products), 0)
+
+    def test_gap_over_limit_needs_confirm(self):
+        """落后天数超阈值时 needs_confirm=True。"""
+        from quantclass_sync_internal.orchestrator import _estimate_sync_workload
+        product = "stock-trading-data"
+        self._write_timestamp(product, "2026-03-03")  # 落后 15 天
+        api_date_cache = {"stock-trading-data": ("2026-03-18", "2026-03-18T10:00:00")}
+        plans = [self._plan(product)]
+        result = _estimate_sync_workload(plans, api_date_cache, self.root, api_call_limit=10)
+        self.assertEqual(result.total_calls, 15)
+        self.assertTrue(result.needs_confirm)
+        self.assertEqual(len(result.products), 1)
+        self.assertEqual(result.products[0]["gap_days"], 15)
+        self.assertEqual(result.products[0]["estimated_calls"], 15)
+
+    def test_no_timestamp_counts_as_one(self):
+        """无 timestamp 且无可推断 CSV 时，预估为 1 次（仅 latest）。"""
+        from quantclass_sync_internal.orchestrator import _estimate_sync_workload
+        product = "stock-trading-data"
+        # 不写 timestamp，产品目录也不存在 CSV
+        api_date_cache = {"stock-trading-data": ("2026-03-18", "2026-03-18T10:00:00")}
+        plans = [self._plan(product)]
+        result = _estimate_sync_workload(plans, api_date_cache, self.root, api_call_limit=10)
+        self.assertEqual(result.total_calls, 1)
+        self.assertEqual(len(result.products), 1)
+        self.assertEqual(result.products[0]["estimated_calls"], 1)
+        self.assertEqual(result.products[0]["local_date"], "")
+
+    def test_no_api_cache_counts_as_one(self):
+        """产品无 API 缓存日期时，预估为 1 次。"""
+        from quantclass_sync_internal.orchestrator import _estimate_sync_workload
+        product = "stock-trading-data"
+        self._write_timestamp(product, "2026-03-18")
+        # 空缓存，该产品没有 API 日期
+        api_date_cache: dict = {}
+        plans = [self._plan(product)]
+        result = _estimate_sync_workload(plans, api_date_cache, self.root, api_call_limit=10)
+        self.assertEqual(result.total_calls, 1)
+        self.assertEqual(len(result.products), 1)
+        self.assertEqual(result.products[0]["api_date"], "")
+        self.assertEqual(result.products[0]["estimated_calls"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

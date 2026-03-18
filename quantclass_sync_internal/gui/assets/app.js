@@ -14,13 +14,14 @@ document.addEventListener('alpine:init', () => {
         canOpenDir: false,    // 数据目录是否可以点击打开（后端支持时为 true）
 
         // ===== Setup 向导状态 =====
-        setupDataRoot: '',     // 向导表单：数据目录
-        setupApiKey: '',       // 向导表单：API Key
-        setupHid: '',          // 向导表单：HID
-        setupLoading: false,   // 向导提交中
-        setupError: '',        // 向导错误信息
-        setupWarning: '',      // 向导警告（保存成功但验证失败）
-        setupConfirmDir: '',   // 待确认创建的目录路径（非空时显示确认 UI）
+        setupDataRoot: '',         // 向导表单：数据目录
+        setupApiKey: '',           // 向导表单：API Key
+        setupHid: '',              // 向导表单：HID
+        setupCourseType: 'basic',  // 向导表单：课程类型（basic / premium）
+        setupLoading: false,       // 向导提交中
+        setupError: '',            // 向导错误信息
+        setupWarning: '',          // 向导警告（保存成功但验证失败）
+        setupConfirmDir: '',       // 待确认创建的目录路径（非空时显示确认 UI）
 
         // ===== 筛选状态 =====
         searchText: '',        // 搜索文本（按产品名模糊匹配）
@@ -58,6 +59,7 @@ document.addEventListener('alpine:init', () => {
         syncProducts: [],     // 同步过程中已处理产品列表（每项含 name/status/elapsed/files_count/error）
         allProducts: [],      // 全部待同步产品名（用于计算等待中列表）
         showWaiting: false,   // 等待中产品列表是否展开
+        estimateData: null,   // API 调用量预估数据（confirm_needed 时填充，用于展示确认卡片）
 
         // ===== 初始化 =====
         // 先调 get_config() 判断视图：config_exists → main，否则 → setup
@@ -177,6 +179,7 @@ document.addEventListener('alpine:init', () => {
             this.syncProducts = [];
             this.allProducts = [];
             this.showWaiting = false;
+            this.estimateData = null;
             try {
                 const result = await window.pywebview.api.start_sync();
                 if (result.started) {
@@ -207,6 +210,7 @@ document.addEventListener('alpine:init', () => {
             this.syncProducts = [];
             this.allProducts = [];
             this.showWaiting = false;
+            this.estimateData = null;
             try {
                 // true 表示仅重试失败产品
                 const result = await window.pywebview.api.start_sync(true);
@@ -250,8 +254,13 @@ document.addEventListener('alpine:init', () => {
                         this.allProducts = p.all_products;
                     }
 
-                    if (p.status === 'done') {
+                    // confirm_needed：后台线程等待用户确认，展示确认卡片
+                    if (p.status === 'confirm_needed' && p.estimate) {
+                        this.estimateData = p.estimate;
+                        // 不切换 syncStatus，继续轮询等待用户点击确认/取消
+                    } else if (p.status === 'done') {
                         this.syncStatus = 'done';
+                        this.estimateData = null;
                         this.runSummary = p.run_summary;
                         this.historyLoaded = false; // 有新运行，下次切历史页时刷新
                         this.checkUpdateResult = null; // 同步后清除检查更新结果
@@ -259,6 +268,7 @@ document.addEventListener('alpine:init', () => {
                         return; // 终态，不再调度下次轮询
                     } else if (p.status === 'error') {
                         this.syncStatus = 'error';
+                        this.estimateData = null;
                         this.errorMessage = p.error_message || '同步失败';
                         this.runSummary = p.run_summary;  // 部分失败时也携带摘要
                         this.historyLoaded = false;
@@ -296,6 +306,32 @@ document.addEventListener('alpine:init', () => {
             this.runSummary = null;
             this.syncProducts = [];
             this.allProducts = [];
+            this.estimateData = null;
+        },
+
+        // ===== API 调用量确认 =====
+
+        // 用户点击"继续同步"：通知后台线程继续，关闭确认卡片
+        async confirmSync() {
+            try {
+                await window.pywebview.api.confirm_sync();
+            } catch (e) {
+                console.error('confirmSync failed:', e);
+            }
+            this.estimateData = null;
+        },
+
+        // 用户点击"取消"：通知后台线程取消，await 完成后再切状态（避免请求期间状态已变）
+        async cancelSync() {
+            try {
+                await window.pywebview.api.cancel_sync();
+            } catch (e) {
+                console.error('cancelSync failed:', e);
+            } finally {
+                this.estimateData = null;
+                this.syncStatus = 'idle';
+                this.stopPolling();
+            }
         },
 
         // ===== 格式化工具函数 =====
@@ -530,7 +566,8 @@ document.addEventListener('alpine:init', () => {
                     this.setupDataRoot.trim(),
                     this.setupApiKey.trim(),
                     this.setupHid.trim(),
-                    false
+                    false,
+                    this.setupCourseType
                 );
                 if (!result.ok && result.error_code === 'dir_not_found') {
                     this.setupConfirmDir = result.resolved_path;
@@ -553,7 +590,8 @@ document.addEventListener('alpine:init', () => {
                     this.setupDataRoot.trim(),
                     this.setupApiKey.trim(),
                     this.setupHid.trim(),
-                    true
+                    true,
+                    this.setupCourseType
                 );
                 this._handleSetupResult(result);
             } catch (e) {

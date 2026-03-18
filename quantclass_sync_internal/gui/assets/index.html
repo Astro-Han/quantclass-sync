@@ -87,6 +87,20 @@
             API Key 和 HID 可在 QuantClass 网站个人中心找到
           </p>
 
+          <div class="setup-field">
+            <label class="setup-label">课程类型</label>
+            <div style="display:flex; gap:16px; margin-top:4px;">
+              <label style="cursor:pointer;">
+                <input type="radio" name="courseType" value="basic" x-model="setupCourseType">
+                股票课程 / 币圈课程
+              </label>
+              <label style="cursor:pointer;">
+                <input type="radio" name="courseType" value="premium" x-model="setupCourseType">
+                分享会
+              </label>
+            </div>
+          </div>
+
           <button class="qs-btn qs-btn-primary setup-submit"
                   @click="submitSetup()"
                   :disabled="!setupValid() || setupLoading">
@@ -331,6 +345,43 @@
 
         <!-- syncing 状态 -->
         <div x-show="syncStatus === 'syncing'">
+          <!-- 确认卡片：API 调用量超阈值时展示，用户确认后消失 -->
+          <div x-show="estimateData"
+               style="border:1px solid #f59e0b; border-radius:8px; padding:14px; margin-bottom:12px; background:#fffbeb;">
+            <div style="font-weight:600; color:#b45309; margin-bottom:8px;">同步前确认</div>
+            <table style="width:100%; font-size:0.9em; margin-bottom:8px; border-collapse:collapse;">
+              <tr style="color:#6b7280;">
+                <td style="padding:2px 4px;">产品</td>
+                <td style="padding:2px 4px;">落后天数</td>
+                <td style="padding:2px 4px;">预计调用</td>
+              </tr>
+              <template x-for="p in (estimateData ? estimateData.products : [])" :key="p.name">
+                <tr>
+                  <td style="padding:2px 4px;" x-text="p.name"></td>
+                  <td style="padding:2px 4px;" x-text="p.gap_days"></td>
+                  <td style="padding:2px 4px;" x-text="p.estimated_calls"></td>
+                </tr>
+              </template>
+              <tr style="font-weight:600; border-top:1px solid #fde68a;">
+                <td style="padding:4px 4px 2px;">合计</td>
+                <td></td>
+                <td style="padding:4px 4px 2px;" x-text="estimateData ? estimateData.total_calls : 0"></td>
+              </tr>
+            </table>
+            <div style="font-size:0.85em; color:#6b7280; margin-bottom:10px;"
+                 x-text="estimateData && estimateData.course_type === 'basic'
+                   ? '你的账号每产品每天只能同步 1 次，落后较多时建议先从网页下载全量数据，或联系官方重置配额'
+                   : '落后天数较多时建议先从网页下载全量数据'">
+            </div>
+            <div style="display:flex; gap:8px;">
+              <button class="qs-btn qs-btn-primary"
+                      @click="confirmSync()"
+                      :disabled="!estimateData">继续同步</button>
+              <button class="qs-btn qs-btn-outline"
+                      @click="cancelSync()"
+                      :disabled="!estimateData">取消</button>
+            </div>
+          </div>
           <!-- 进度条 + 计数 -->
           <div class="qs-progress-wrap">
             <div class="qs-progress-bar">
