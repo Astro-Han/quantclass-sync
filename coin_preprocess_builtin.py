@@ -50,6 +50,7 @@ def _run_incremental_patch(
     swap_dict: Dict[str, pd.DataFrame],
     market_pivot_spot: Dict[str, pd.DataFrame],
     market_pivot_swap: Dict[str, pd.DataFrame],
+    progress_callback=None,
 ) -> PreprocessSummary:
     """兼容包装：调用内部增量 patch，并同步可 patch 依赖。"""
 
@@ -63,10 +64,11 @@ def _run_incremental_patch(
         swap_dict=swap_dict,
         market_pivot_spot=market_pivot_spot,
         market_pivot_swap=market_pivot_swap,
+        progress_callback=progress_callback,
     )
 
 
-def run_coin_preprocess_builtin(data_root: Path) -> PreprocessSummary:
+def run_coin_preprocess_builtin(data_root: Path, progress_callback=None) -> PreprocessSummary:
     """
     执行内置预处理并写入 pkl 产物。
 
@@ -82,6 +84,8 @@ def run_coin_preprocess_builtin(data_root: Path) -> PreprocessSummary:
     output_dir = root / PREPROCESS_PRODUCT
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    if progress_callback:
+        progress_callback(detail="加载历史基线...")
     try:
         baseline = _load_existing_baseline(output_dir)
     except Exception as exc:
@@ -92,7 +96,13 @@ def run_coin_preprocess_builtin(data_root: Path) -> PreprocessSummary:
         baseline = None
     baseline_runtime = _read_baseline_runtime(output_dir)
     if baseline is None or baseline_runtime is None:
-        return _run_full_rebuild(spot_dir=spot_dir, swap_dir=swap_dir, output_dir=output_dir, mode="full_rebuild")
+        return _run_full_rebuild(
+            spot_dir=spot_dir,
+            swap_dir=swap_dir,
+            output_dir=output_dir,
+            mode="full_rebuild",
+            progress_callback=progress_callback,
+        )
 
     spot_dict, swap_dict, market_pivot_spot, market_pivot_swap = baseline
     try:
@@ -105,6 +115,7 @@ def run_coin_preprocess_builtin(data_root: Path) -> PreprocessSummary:
             swap_dict=swap_dict,
             market_pivot_spot=market_pivot_spot,
             market_pivot_swap=market_pivot_swap,
+            progress_callback=progress_callback,
         )
     except Exception as incremental_exc:
         # 增量失败时自动回退全量，优先保证可用性与一致性。
@@ -114,6 +125,7 @@ def run_coin_preprocess_builtin(data_root: Path) -> PreprocessSummary:
                 swap_dir=swap_dir,
                 output_dir=output_dir,
                 mode="fallback_full_rebuild",
+                progress_callback=progress_callback,
             )
         except Exception as rebuild_exc:
             raise RuntimeError(

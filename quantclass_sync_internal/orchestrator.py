@@ -735,7 +735,7 @@ def _has_effective_source_delta(item: ProductRunResult) -> bool:
     stats = item.stats
     return (stats.created_files + stats.updated_files + stats.rows_added) > 0
 
-def _run_builtin_coin_preprocess(command_ctx: CommandContext) -> Tuple[str, str]:
+def _run_builtin_coin_preprocess(command_ctx: CommandContext, progress_callback=None) -> Tuple[str, str]:
     """
     执行包内置预处理逻辑（默认路径）。
 
@@ -749,7 +749,7 @@ def _run_builtin_coin_preprocess(command_ctx: CommandContext) -> Tuple[str, str]
             "内置预处理模块加载失败；请确认依赖已安装（例如 pandas）。"
         ) from exc
 
-    summary = run_coin_preprocess_builtin(command_ctx.data_root)
+    summary = run_coin_preprocess_builtin(command_ctx.data_root, progress_callback=progress_callback)
     reason_by_mode = {
         "incremental_patch": REASON_PREPROCESS_INCREMENTAL_OK,
         "full_rebuild": REASON_PREPROCESS_FULL_REBUILD_OK,
@@ -793,6 +793,7 @@ def _maybe_run_coin_preprocess(
     command_ctx: CommandContext,
     report: RunReport,
     conn: Optional[sqlite3.Connection],
+    progress_callback=None,
 ) -> bool:
     """
     条件触发币圈合成预处理。
@@ -848,11 +849,17 @@ def _maybe_run_coin_preprocess(
             log_info("dry-run 模式下跳过预处理执行。", event="PREPROCESS", target=PREPROCESS_PRODUCT)
             return False
 
+        # 构造 preprocess_cb：将内部细粒度通知转换为 postprocessing 状态通知
+        preprocess_cb = None
+        if progress_callback is not None:
+            def preprocess_cb(*, detail=""):
+                progress_callback("", 0, 0, status="postprocessing", postprocess_detail=detail)
+
         t0 = time.time()
         raw_cmd = ""
         try:
             # 统一使用仓库内置预处理实现，降低分发后的使用门槛。
-            raw_cmd, success_reason_code = _run_builtin_coin_preprocess(command_ctx)
+            raw_cmd, success_reason_code = _run_builtin_coin_preprocess(command_ctx, progress_callback=preprocess_cb)
             elapsed = time.time() - t0
 
             actual_time = _resolve_preprocess_data_date(command_ctx, source_effective)
@@ -1570,6 +1577,7 @@ def run_update_with_settings(
             command_ctx=command_ctx,
             report=report,
             conn=None,
+            progress_callback=None,
         )
         has_error = has_error or preprocess_has_error
     else:
@@ -1586,18 +1594,12 @@ def run_update_with_settings(
                     max_workers=max_workers,
                     progress_callback=progress_callback,
                 )
-                # 后处理前通知前端，postprocessing 状态用于 GUI 显示后处理进度
-                if progress_callback is not None:
-                    try:
-                        progress_callback("", len(plans), len(plans),
-                                          status="postprocessing",
-                                          postprocess_detail="币圈合成数据")
-                    except Exception:
-                        pass
+                # 细粒度进度由 _maybe_run_coin_preprocess 内部通过 preprocess_cb 发出
                 preprocess_has_error = _maybe_run_coin_preprocess(
                     command_ctx=command_ctx,
                     report=report,
                     conn=conn,
+                    progress_callback=progress_callback,
                 )
                 has_error = has_error or preprocess_has_error
             finally:

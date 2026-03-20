@@ -481,9 +481,11 @@ def _resolve_source_delta(
             changed_sources.add(symbol)
     return changed_sources, removed_sources
 
-def _run_full_rebuild(spot_dir: Path, swap_dir: Path, output_dir: Path, mode: str) -> PreprocessSummary:
+def _run_full_rebuild(spot_dir: Path, swap_dir: Path, output_dir: Path, mode: str, progress_callback=None) -> PreprocessSummary:
     """执行全量重建流程。"""
 
+    if progress_callback:
+        progress_callback(detail="加载全量数据...")
     spot_dict, spot_source_files = _load_symbol_dict(spot_dir, is_swap=False)
     swap_dict, swap_source_files = _load_symbol_dict(swap_dir, is_swap=True)
 
@@ -496,10 +498,14 @@ def _run_full_rebuild(spot_dir: Path, swap_dir: Path, output_dir: Path, mode: st
         swap_symbols=len(swap_dict),
     )
 
+    if progress_callback:
+        progress_callback(detail="生成合成数据...")
     _apply_special_symbol_mapping(spot_dict, swap_dict)
     market_pivot_spot = _make_market_pivot(spot_dict, market_type="spot")
     market_pivot_swap = _make_market_pivot(swap_dict, market_type="swap")
 
+    if progress_callback:
+        progress_callback(detail="写入产物...")
     payloads = {
         output_dir / OUTPUT_SPOT_DICT: spot_dict,
         output_dir / OUTPUT_SWAP_DICT: swap_dict,
@@ -527,6 +533,8 @@ def _patch_one_side(
     removed_sources: Set[str],
     changed_sources: Set[str],
     is_swap: bool,
+    progress_callback=None,
+    side="",
 ) -> Tuple[Set[str], Set[str]]:
     """处理单侧（spot 或 swap）的删除 + 变更，返回 (removed_symbols, changed_symbols)。"""
 
@@ -541,7 +549,13 @@ def _patch_one_side(
                 removed_symbols.add(key)
 
     # 变更源 symbol：先尝试尾部追加，失败则仅重算该 symbol。
+    _total = len(changed_sources)
+    _count = 0
     for source_symbol in sorted(changed_sources):
+        # 每 100 个 symbol 发一次进度通知
+        _count += 1
+        if progress_callback and _count % 100 == 0:
+            progress_callback(detail=f"合成 {side} ({_count}/{_total})")
         source_file = sources.get(source_symbol)
         if source_file is None:
             continue
@@ -577,8 +591,12 @@ def _run_incremental_patch(
     swap_dict: Dict[str, pd.DataFrame],
     market_pivot_spot: Dict[str, pd.DataFrame],
     market_pivot_swap: Dict[str, pd.DataFrame],
+    progress_callback=None,
 ) -> PreprocessSummary:
     """执行无 sidecar 的增量 patch。"""
+
+    if progress_callback:
+        progress_callback(detail="扫描增量数据...")
 
     spot_sources = _collect_source_csv_map(spot_dir)
     swap_sources = _collect_source_csv_map(swap_dir)
@@ -604,6 +622,8 @@ def _run_incremental_patch(
         removed_sources=removed_spot_sources,
         changed_sources=changed_spot_sources,
         is_swap=False,
+        progress_callback=progress_callback,
+        side="spot",
     )
     swap_removed_symbols, swap_changed_symbols = _patch_one_side(
         sources=swap_sources,
@@ -612,6 +632,8 @@ def _run_incremental_patch(
         removed_sources=removed_swap_sources,
         changed_sources=changed_swap_sources,
         is_swap=True,
+        progress_callback=progress_callback,
+        side="swap",
     )
 
     _validate_integrity(
@@ -640,6 +662,8 @@ def _run_incremental_patch(
         removed_symbols=swap_removed_symbols,
     )
 
+    if progress_callback:
+        progress_callback(detail="写入产物...")
     payloads = {
         output_dir / OUTPUT_SPOT_DICT: spot_dict,
         output_dir / OUTPUT_SWAP_DICT: swap_dict,
