@@ -472,6 +472,14 @@ def cmd_setup(
         secrets_file=str(secrets_path),
     )
 
+def _cli_sync_progress(product_name: str, completed: int, total: int, *,
+                       status: str = "ok", **kwargs) -> None:
+    """CLI 同步进度回调：后处理阶段打印提示，避免长时间无输出。"""
+    if status == "postprocessing":
+        detail = kwargs.get("postprocess_detail", "")
+        msg = f"正在后处理: {detail}..." if detail else "正在后处理数据..."
+        RICH_CONSOLE.print(f"  {msg}")
+
 @app.command("update")
 @command_guard("update")
 def cmd_update(
@@ -566,6 +574,7 @@ def cmd_update(
         api_call_limit=user_config.api_call_limit,
         course_type=user_config.course_type,
         auto_confirm=yes,
+        progress_callback=_cli_sync_progress,
     )
     log_info("update 执行完成。", event="CMD_DONE", exit_code=exit_code)
     if exit_code == -1:
@@ -843,6 +852,7 @@ def cmd_all_data(
         # 从 user_config 读取 API 调用限额和课程类型（影响确认提示文本，无配置时用默认值）
         api_call_limit=getattr(user_config_all, "api_call_limit", 50),
         course_type=getattr(user_config_all, "course_type", ""),
+        progress_callback=_cli_sync_progress,
     )
     log_info("all_data 执行完成。", event="CMD_DONE", exit_code=exit_code)
     if exit_code == -1:

@@ -60,6 +60,7 @@ document.addEventListener('alpine:init', () => {
         allProducts: [],      // 全部待同步产品名（用于计算等待中列表）
         showWaiting: false,   // 等待中产品列表是否展开
         postprocessing: false, // 后处理阶段标志
+        postprocessDetail: '', // 后处理描述（用户可读）
         estimateData: null,   // API 调用量预估数据（confirm_needed 时填充，用于展示确认卡片）
 
         // ===== 初始化 =====
@@ -181,6 +182,7 @@ document.addEventListener('alpine:init', () => {
             this.allProducts = [];
             this.showWaiting = false;
             this.postprocessing = false;
+            this.postprocessDetail = '';
             this.estimateData = null;
             try {
                 const result = await window.pywebview.api.start_sync();
@@ -213,6 +215,7 @@ document.addEventListener('alpine:init', () => {
             this.allProducts = [];
             this.showWaiting = false;
             this.postprocessing = false;
+            this.postprocessDetail = '';
             this.estimateData = null;
             try {
                 // true 表示仅重试失败产品
@@ -264,8 +267,11 @@ document.addEventListener('alpine:init', () => {
                         // 不切换 syncStatus，继续轮询等待用户点击确认/取消
                     } else if (p.status === 'postprocessing') {
                         this.postprocessing = true;
+                        this.postprocessDetail = p.postprocess_detail || '';
                     } else if (p.status === 'done') {
                         this.syncStatus = 'done';
+                        this.postprocessing = false;
+                        this.postprocessDetail = '';
                         this.estimateData = null;
                         this.runSummary = p.run_summary;
                         this.historyLoaded = false; // 有新运行，下次切历史页时刷新
@@ -274,6 +280,8 @@ document.addEventListener('alpine:init', () => {
                         return; // 终态，不再调度下次轮询
                     } else if (p.status === 'error') {
                         this.syncStatus = 'error';
+                        this.postprocessing = false;
+                        this.postprocessDetail = '';
                         this.estimateData = null;
                         this.errorMessage = p.error_message || '同步失败';
                         this.runSummary = p.run_summary;  // 部分失败时也携带摘要

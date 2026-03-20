@@ -1565,12 +1565,7 @@ def run_update_with_settings(
             max_workers=max_workers,
             progress_callback=progress_callback,
         )
-        # 后处理前通知前端，postprocessing 状态用于 GUI 显示"正在后处理数据..."
-        if progress_callback is not None:
-            try:
-                progress_callback("", len(plans), len(plans), status="postprocessing")
-            except Exception:
-                pass
+        # dry_run 模式下 _maybe_run_coin_preprocess 会直接跳过，不发 postprocessing 通知
         preprocess_has_error = _maybe_run_coin_preprocess(
             command_ctx=command_ctx,
             report=report,
@@ -1591,10 +1586,12 @@ def run_update_with_settings(
                     max_workers=max_workers,
                     progress_callback=progress_callback,
                 )
-                # 后处理前通知前端，postprocessing 状态用于 GUI 显示"正在后处理数据..."
+                # 后处理前通知前端，postprocessing 状态用于 GUI 显示后处理进度
                 if progress_callback is not None:
                     try:
-                        progress_callback("", len(plans), len(plans), status="postprocessing")
+                        progress_callback("", len(plans), len(plans),
+                                          status="postprocessing",
+                                          postprocess_detail="币圈合成数据")
                     except Exception:
                         pass
                 preprocess_has_error = _maybe_run_coin_preprocess(

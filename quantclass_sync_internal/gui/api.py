@@ -69,7 +69,7 @@ def _format_run_summary(raw_run: Dict[str, Any]) -> Dict[str, Any]:
 
 # _progress 的初始结构，每次 start_sync 前重置为此形态
 _PROGRESS_INIT: Dict[str, Any] = {
-    "status": "idle",          # idle / syncing / confirm_needed / done / error
+    "status": "idle",          # idle / syncing / confirm_needed / postprocessing / done / error
     "current_product": "",     # 最近完成的产品名
     "completed": 0,            # 已完成产品数
     "total": 0,                # 本次同步产品总数
@@ -79,6 +79,7 @@ _PROGRESS_INIT: Dict[str, Any] = {
     "products": [],            # 已完成产品列表 [{name, status, elapsed_seconds, files_count}]
     "all_products": [],        # 全部产品名列表（由 progress_callback 初始化调用时传入）
     "estimate": None,          # EstimateResult 的 dict 表示（confirm_needed 时填充）
+    "postprocess_detail": "",  # 后处理阶段描述（用户可读）
 }
 
 
@@ -432,8 +433,8 @@ class SyncApi:
             # 检查 worker 线程是否仍在运行（cancel 后 status 变 error，但线程可能未退出）
             if hasattr(self, "_sync_thread") and self._sync_thread and self._sync_thread.is_alive():
                 return {"started": False, "message": "同步正在进行中，请等待完成后再试。"}
-            # confirm_needed 状态表示同步已在进行中（等待用户确认），也需拦截
-            if self._progress.get("status") in ("syncing", "confirm_needed"):
+            # confirm_needed/postprocessing 状态表示同步已在进行中，也需拦截
+            if self._progress.get("status") in ("syncing", "confirm_needed", "postprocessing"):
                 return {"started": False, "message": "同步正在进行中，请等待完成后再试。"}
 
             # retry_failed 分支：从上次 run_summary 读取失败产品名
@@ -552,7 +553,7 @@ class SyncApi:
     def start_health_check(self) -> Dict[str, Any]:
         """启动后台健康检查线程。同步中（含等待确认）拒绝，重复启动拒绝。"""
         with self._lock:
-            if self._progress.get("status") in ("syncing", "confirm_needed"):
+            if self._progress.get("status") in ("syncing", "confirm_needed", "postprocessing"):
                 return {"ok": False, "error": "同步进行中，请稍后再试"}
             if self._health_progress["checking"]:
                 return {"ok": False, "error": "检查已在进行中"}
@@ -606,9 +607,9 @@ class SyncApi:
             return self._health_progress.get("result")
 
     def repair_health_issues(self) -> Dict[str, Any]:
-        """修复可修复的数据问题。同步中（含等待确认）拒绝。"""
+        """修复可修复的数据问题。同步中（含等待确认/后处理）拒绝。"""
         with self._lock:
-            if self._progress.get("status") in ("syncing", "confirm_needed"):
+            if self._progress.get("status") in ("syncing", "confirm_needed", "postprocessing"):
                 return {"ok": False, "error": "同步进行中，请稍后修复"}
             result = self._health_progress.get("result")
         if not result or not result.get("ok"):
@@ -865,6 +866,12 @@ class SyncApi:
                         self._progress["all_products"] = list(all_products)
                     if status == "init":
                         self._progress["total"] = total
+                        return
+                    # 后处理阶段：更新顶层 status 和 elapsed，供前端检测
+                    if status == "postprocessing":
+                        self._progress["status"] = "postprocessing"
+                        self._progress["elapsed_seconds"] = round(time.time() - t_start, 1)
+                        self._progress["postprocess_detail"] = _kwargs.get("postprocess_detail", "")
                         return
                     # 计算本产品同步的文件数（新建 + 更新）
                     files_count = (stats.created_files + stats.updated_files) if stats else 0
