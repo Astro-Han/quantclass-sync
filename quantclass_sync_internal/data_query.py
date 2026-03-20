@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 from .constants import (
     ENCODING_CANDIDATES, KNOWN_DATASETS, TIMESTAMP_FILE_NAME,
     BUSINESS_DAY_ONLY_PRODUCTS, FINANCIAL_PRODUCTS, NOTICE_PRODUCTS,
+    INFRA_PRODUCTS,
 )
 from .models import log_error, RULES
 from .status_store import (
@@ -99,6 +100,28 @@ def _days_behind(local_date_str: Optional[str], today: Optional[date] = None) ->
     return max(0, diff)
 
 
+def _last_trading_day(trading_calendar, today):
+    """从交易日历中找今天或之前最近的交易日。"""
+    if not trading_calendar:
+        return None
+    best = None
+    for s in trading_calendar:
+        try:
+            d = date.fromisoformat(s)
+        except ValueError:
+            continue
+        if d <= today and (best is None or d > best):
+            best = d
+    return best
+
+
+def _is_a_stock_product(product_name):
+    """判断是否为 A 股产品（排除美股/港股）。"""
+    return (product_name.startswith("stock-")
+            and not product_name.startswith("stock-us-")
+            and not product_name.startswith("stock-hk-"))
+
+
 def _status_color(days_behind: Optional[int], last_status: str) -> str:
     """根据落后天数和上次结果决定状态颜色。
 
@@ -138,8 +161,13 @@ def get_products_overview(
     log_dir = report_dir_path(data_root)
     last_results = read_or_backfill_product_last_status(log_dir)
 
+    # 过滤基础设施产品，不对用户展示
+    visible = [p for p in catalog_products if p not in INFRA_PRODUCTS]
+    # 加载 A 股交易日历（用于无缓存时修正落后天数基准）
+    trading_calendar = _load_trading_calendar(data_root)
+
     overview: List[Dict[str, Any]] = []
-    for product in catalog_products:
+    for product in visible:
         local_date = read_local_timestamp_date(data_root, product)
         last = last_results.get(product, {})
         last_status = last.get("status", "")
@@ -159,7 +187,12 @@ def get_products_overview(
                 and freshness_anchor is not None
                 and (today - freshness_anchor).days <= _STALE_GRACE_DAYS
             )
-            ref_date = cached_api_date if cache_fresh else today
+            # 无有效缓存时，A 股产品用交易日历找最近交易日，避免周末误报
+            if _is_a_stock_product(product) and trading_calendar:
+                trading_ref = _last_trading_day(trading_calendar, today)
+                ref_date = cached_api_date if cache_fresh else (trading_ref or today)
+            else:
+                ref_date = cached_api_date if cache_fresh else today
 
         behind = _days_behind(local_date, ref_date)
         # last_status=error 时 _status_color 强制返回 red，不被 api_latest_dates 覆盖（符合预期）
@@ -992,7 +1025,9 @@ def check_data_health(
     start = time.time()
     issues: List[Dict[str, Any]] = []
     scanned_files = 0
-    total_products = len(catalog_products)
+    # 过滤基础设施产品，健康检查不对其做质量扫描
+    filtered_products = [p for p in catalog_products if p not in INFRA_PRODUCTS]
+    total_products = len(filtered_products)
     # 记录每产品文件数，用于覆盖完整性基线保存
     product_file_counts: Dict[str, int] = {}
 
@@ -1001,7 +1036,7 @@ def check_data_health(
     # 加载覆盖完整性基线（仅一次）
     baseline = _load_health_baseline(data_root)
 
-    for idx, product in enumerate(catalog_products):
+    for idx, product in enumerate(filtered_products):
         if progress_callback:
             progress_callback(idx, total_products, product, "checking")
         product_dir = data_root / product

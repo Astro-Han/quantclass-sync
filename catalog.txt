@@ -45,3 +45,4 @@ stock-volume-price-factors
 stock-energy-factors
 stock-trend-factors
 stock-multi-factor-series
+period_offset

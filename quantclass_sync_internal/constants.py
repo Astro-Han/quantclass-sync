@@ -184,6 +184,9 @@ BUSINESS_DAY_ONLY_PRODUCTS = {
 
 DISCOVERY_IGNORED_PRODUCTS = {PREPROCESS_PRODUCT}
 
+# 基础设施产品：参与同步但不对用户可见（总览/健康检查/检查更新均跳过）
+INFRA_PRODUCTS = {"period_offset"}
+
 LOG_LEVELS = {
     "ERROR": 0,
     "INFO": 1,

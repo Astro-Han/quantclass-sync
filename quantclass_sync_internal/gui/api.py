@@ -31,6 +31,7 @@ from ..constants import (
     DEFAULT_WORK_DIR,
     DEFAULT_GUI_WORKERS,
     EXIT_CODE_SUCCESS,
+    INFRA_PRODUCTS,
     PRODUCT_MODE_EXPLICIT_LIST,
 )
 from ..data_query import (
@@ -688,9 +689,12 @@ class SyncApi:
             except Exception as exc:
                 return (product, None, str(exc))
 
-        executor = ThreadPoolExecutor(max_workers=max(1, min(8, len(catalog))))
+        # 过滤基础设施产品，检查更新不查询其 API 日期
+        filtered_catalog = [p for p in catalog if p not in INFRA_PRODUCTS]
+
+        executor = ThreadPoolExecutor(max_workers=max(1, min(8, len(filtered_catalog))))
         try:
-            futures = {executor.submit(_query_one, p): p for p in catalog}
+            futures = {executor.submit(_query_one, p): p for p in filtered_catalog}
             for future in as_completed(futures, timeout=30):
                 product, latest, error = future.result()
                 if error:
@@ -713,7 +717,7 @@ class SyncApi:
             return {"ok": False, "error": f"API 凭证或额度异常（HTTP {exc.status_code}）：{exc}"}
 
         # 按产品名补漏：未进入 api_latest_dates 也未进入 failed_products 的归入失败
-        for product in catalog:
+        for product in filtered_catalog:
             if product not in api_latest_dates and product not in failed_products:
                 failed_products.append(product)
 

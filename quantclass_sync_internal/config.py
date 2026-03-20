@@ -257,14 +257,14 @@ def is_product_identifier(raw: str) -> bool:
     判断文本是否像产品英文名。
 
     规则：
-    - 只允许小写字母/数字/连字符
+    - 只允许小写字母/数字/连字符/下划线（period_offset 等基础设施产品含下划线）
     - 至少包含一个字母（避免把日期误判成产品名）
     """
 
     s = raw.strip().lower()
     if not s:
         return False
-    if not re.fullmatch(r"[a-z0-9-]+", s):
+    if not re.fullmatch(r"[a-z0-9_-]+", s):
         return False
     return any(ch.isalpha() for ch in s)
 
