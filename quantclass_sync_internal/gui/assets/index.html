@@ -205,8 +205,32 @@
                 <div style="color:#6b7280;font-size:12px;margin-top:6px;" x-text="healthProgress.product||''"></div>
               </div>
             </template>
+            <!-- 修复结果摘要（优先级最高） -->
+            <template x-if="healthState === 'done' && repairResult">
+              <div class="qs-card" style="padding:14px 18px;">
+                <div style="font-weight:600; margin-bottom:8px;">修复结果</div>
+                <div style="font-size:0.93em; color:#374151;">
+                  <span style="color:#059669;" x-show="repairResult.repaired.length">
+                    成功修复 <span x-text="repairResult.repaired.length"></span> 个问题
+                  </span>
+                  <span x-show="repairResult.repaired.length && repairResult.failed.length"> · </span>
+                  <span style="color:#dc2626;" x-show="repairResult.failed.length">
+                    <span x-text="repairResult.failed.length"></span> 个失败
+                  </span>
+                </div>
+                <template x-if="repairResult.failed.length > 0">
+                  <ul style="margin:8px 0 0; padding-left:18px; font-size:0.88em; color:#6b7280;">
+                    <template x-for="f in repairResult.failed" :key="f.file">
+                      <li x-text="f.product + '/' + f.file + ': ' + (f.error || '未知错误')"></li>
+                    </template>
+                  </ul>
+                </template>
+                <button class="qs-btn qs-btn-outline" style="margin-top:10px;"
+                        @click="repairResult = null">完成</button>
+              </div>
+            </template>
             <!-- 健康检查完成（有问题） -->
-            <template x-if="healthState === 'done' && healthResult && healthResult.summary.total > 0">
+            <template x-if="healthState === 'done' && healthResult && healthResult.summary.total > 0 && !repairResult">
               <div class="qs-health-card">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
                   <div style="display:flex;align-items:center;gap:8px;">
@@ -233,13 +257,13 @@
                   </div>
                 </template>
                 <div style="margin-top:12px;padding-top:10px;border-top:1px solid #f3f4f6;display:flex;align-items:center;gap:12px;">
-                  <template x-if="repairableCount() > 0"><button class="qs-btn qs-btn-primary" @click="repairIssues()" x-text="'修复 '+repairableCount()+' 个可修复问题'"></button></template>
-                  <template x-if="repairMessage"><span style="color:#6b7280;font-size:12px;" x-text="repairMessage"></span></template>
+                  <template x-if="repairableCount() > 0"><button class="qs-btn" @click="repairIssues()" :disabled="repairing"
+                    x-text="repairing ? '修复中...' : '修复 ' + repairableCount() + ' 个可修复问题'"></button></template>
                 </div>
               </div>
             </template>
             <!-- 健康检查完成（无问题） -->
-            <template x-if="healthState === 'done' && healthResult && healthResult.summary.total === 0">
+            <template x-if="healthState === 'done' && healthResult && healthResult.summary.total === 0 && !repairResult">
               <div class="qs-health-card">
                 <div style="display:flex;align-items:center;gap:8px;">
                   <span style="color:#22c55e;font-size:16px;">&#x2713;</span>

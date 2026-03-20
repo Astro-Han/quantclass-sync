@@ -46,6 +46,8 @@ document.addEventListener('alpine:init', () => {
         healthError: '',
         healthPollTimer: null,
         repairMessage: '',
+        repairResult: null,   // 修复结果（含 repaired/failed 列表）
+        repairing: false,     // 修复中标志
 
         // ===== 同步状态 =====
         syncStatus: 'idle',   // 'idle' | 'syncing' | 'done' | 'error'
@@ -489,6 +491,8 @@ document.addEventListener('alpine:init', () => {
         cancelHealthCheck() { this.healthState = 'idle'; },
         async startHealthCheck() {
             this.repairMessage = '';
+            this.repairResult = null;
+            this.repairing = false;
             const res = await window.pywebview.api.start_health_check();
             if (!res.ok) { this.healthError = res.error; this.healthState = 'error'; return; }
             this.healthState = 'checking';
@@ -511,17 +515,39 @@ document.addEventListener('alpine:init', () => {
             }, 1000);
         },
         async repairIssues() {
-            const res = await window.pywebview.api.repair_health_issues();
-            if (res.ok) {
-                const r = res.repair;
-                this.repairMessage = '已修复 ' + r.repaired.length + ' 个问题' +
-                    (r.failed.length ? '，' + r.failed.length + ' 个失败' : '') +
-                    '。可重新检查验证结果。';
-            } else {
-                this.repairMessage = '修复失败: ' + (res.error || '未知错误');
+            this.repairing = true;
+            try {
+                const res = await window.pywebview.api.repair_health_issues();
+                if (res.ok) {
+                    const r = res.repair;
+                    // 用 (type, product, file, detail) 四元组从本地 issues 中移除已修复的
+                    const repairedSet = new Set(r.repaired.map(i => `${i.type}|${i.product}|${i.file}|${i.detail}`));
+                    this.healthResult.issues = this.healthResult.issues.filter(
+                        i => !repairedSet.has(`${i.type}|${i.product}|${i.file}|${i.detail}`)
+                    );
+                    // 重算 summary 的 issue 计数（保留 scanned_*/elapsed_seconds 不变）
+                    const issues = this.healthResult.issues;
+                    const bySeverity = {};
+                    const byRepair = {auto_repairable: 0, manual_only: 0, needs_investigation: 0};
+                    for (const i of issues) {
+                        bySeverity[i.severity] = (bySeverity[i.severity] || 0) + 1;
+                        if (i.repair_action && byRepair.hasOwnProperty(i.repair_action)) {
+                            byRepair[i.repair_action]++;
+                        }
+                    }
+                    this.healthResult.summary.total = issues.length;
+                    this.healthResult.summary.by_severity = bySeverity;
+                    this.healthResult.summary.by_repair = byRepair;
+                    this.repairResult = r;
+                    this.repairMessage = '';  // 清除旧的文字提示
+                } else {
+                    this.repairMessage = '修复失败: ' + (res.error || '未知错误');
+                }
+            } finally {
+                this.repairing = false;
             }
         },
-        closeHealthResult() { this.healthState = 'idle'; this.healthResult = null; this.repairMessage = ''; },
+        closeHealthResult() { this.healthState = 'idle'; this.healthResult = null; this.repairMessage = ''; this.repairResult = null; },
         healthIssuesByCategory() {
             if (!this.healthResult) return {};
             const groups = {};
