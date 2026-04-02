@@ -52,6 +52,23 @@ skip() {
     echo -e "  ${YELLOW}SKIP${NC}  $1"
 }
 
+# 仅当 python3 -m venv 能真实建出解释器时，才把它视为可用后端。
+probe_python_venv() {
+    local probe_root
+    local probe_env
+
+    probe_root="$(mktemp -d)"
+    probe_env="$probe_root/probe-env"
+
+    if python3 -m venv "$probe_env" >/dev/null 2>&1 && [ -x "$probe_env/bin/python" ]; then
+        rm -rf "$probe_root"
+        return 0
+    fi
+
+    rm -rf "$probe_root"
+    return 1
+}
+
 # 这里探测的是“测试用临时环境后端”，按设计文档要求为 conda -> uv -> python3 -m venv。
 detect_env_backend() {
     if command -v conda >/dev/null 2>&1; then
@@ -62,7 +79,7 @@ detect_env_backend() {
         ENV_BACKEND="uv"
         return 0
     fi
-    if command -v python3 >/dev/null 2>&1 && python3 -m venv -h >/dev/null 2>&1; then
+    if command -v python3 >/dev/null 2>&1 && probe_python_venv; then
         ENV_BACKEND="venv"
         return 0
     fi
