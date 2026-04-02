@@ -52,7 +52,7 @@ skip() {
     echo -e "  ${YELLOW}SKIP${NC}  $1"
 }
 
-# 探测优先级与启动脚本保持一致，优先 conda，再到 uv，再到 python3 -m venv。
+# 这里探测的是“测试用临时环境后端”，按设计文档要求为 conda -> uv -> python3 -m venv。
 detect_env_backend() {
     if command -v conda >/dev/null 2>&1; then
         ENV_BACKEND="conda"

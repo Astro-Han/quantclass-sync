@@ -54,28 +54,40 @@ _log_fallback() {
     echo ""
 }
 
+# 只有 source 后 conda 命令真的可用，才算加载成功。
+_source_conda_script() {
+    local script_path="$1"
+
+    if [ ! -f "$script_path" ]; then
+        return 1
+    fi
+
+    # shellcheck disable=SC1090
+    source "$script_path" >/dev/null 2>&1 || return 1
+    command -v conda >/dev/null 2>&1
+}
+
 # 尝试加载 conda shell，成功返回 0，失败返回 1。
 _load_conda_shell() {
-    if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
-        source "$HOME/miniconda3/etc/profile.d/conda.sh"
+    if _source_conda_script "$HOME/miniconda3/etc/profile.d/conda.sh"; then
         return 0
     fi
-    if [ -f "$HOME/anaconda3/etc/profile.d/conda.sh" ]; then
-        source "$HOME/anaconda3/etc/profile.d/conda.sh"
+    if _source_conda_script "$HOME/anaconda3/etc/profile.d/conda.sh"; then
         return 0
     fi
-    if [ -f "$HOME/miniforge3/etc/profile.d/conda.sh" ]; then
-        source "$HOME/miniforge3/etc/profile.d/conda.sh"
+    if _source_conda_script "$HOME/miniforge3/etc/profile.d/conda.sh"; then
         return 0
     fi
-    if [ -f "/opt/homebrew/Caskroom/miniconda/base/etc/profile.d/conda.sh" ]; then
-        source "/opt/homebrew/Caskroom/miniconda/base/etc/profile.d/conda.sh"
+    if _source_conda_script "/opt/homebrew/Caskroom/miniconda/base/etc/profile.d/conda.sh"; then
         return 0
     fi
+
     if command -v conda >/dev/null 2>&1; then
-        eval "$(conda shell.bash hook)"
-        return 0
+        eval "$(conda shell.bash hook)" >/dev/null 2>&1 || return 1
+        command -v conda >/dev/null 2>&1
+        return $?
     fi
+
     return 1
 }
 
