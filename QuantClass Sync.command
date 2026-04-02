@@ -27,7 +27,7 @@ except Exception:
 _write_conda_env() {
     python3 -c "
 import json, sys
-env = '$1'
+env = sys.argv[1]
 try:
     data = json.load(open('$CONFIG_FILE'))
 except Exception:
@@ -36,7 +36,7 @@ data['conda_env'] = env
 with open('$CONFIG_FILE', 'w') as f:
     json.dump(data, f, ensure_ascii=False, indent=2)
     f.write('\n')
-" 2>/dev/null
+" "$1" 2>/dev/null
 }
 
 # 统一暂停并退出，避免各分支散落重复交互代码。

@@ -14,7 +14,6 @@ __pycache__/
 # Editor / local tooling
 .vscode/
 .claude/
-.superpowers/
 CLAUDE.md
 
 # GUI 本地配置
