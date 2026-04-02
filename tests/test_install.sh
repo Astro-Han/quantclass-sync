@@ -62,7 +62,7 @@ detect_env_backend() {
         ENV_BACKEND="uv"
         return 0
     fi
-    if command -v python3 >/dev/null 2>&1; then
+    if command -v python3 >/dev/null 2>&1 && python3 -m venv -h >/dev/null 2>&1; then
         ENV_BACKEND="venv"
         return 0
     fi
