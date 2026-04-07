@@ -134,7 +134,7 @@ _try_activate_project_venv() {
     local venv_python="$PROJECT_DIR/.venv/bin/python"
 
     if [ ! -x "$venv_python" ]; then
-        _log_fallback "未找到项目 .venv，尝试系统 python3..."
+        _log_fallback "未找到项目 .venv，尝试共享 quant .venv..."
         return 1
     fi
 
@@ -145,6 +145,26 @@ _try_activate_project_venv() {
 
     PYTHON="$venv_python"
     ENV_TYPE="venv"
+    return 0
+}
+
+# 兼容当前仓库约定的共享 quant 工作区 .venv。
+_try_activate_workspace_venv() {
+    local workspace_venv_python="$HOME/workspace/quant/.venv/bin/python"
+    local workspace_venv_activate="$HOME/workspace/quant/.venv/bin/activate"
+
+    if [ ! -x "$workspace_venv_python" ]; then
+        _log_fallback "未找到共享 quant .venv，尝试系统 python3..."
+        return 1
+    fi
+
+    if [ -f "$workspace_venv_activate" ]; then
+        # shellcheck disable=SC1090
+        source "$workspace_venv_activate"
+    fi
+
+    PYTHON="$workspace_venv_python"
+    ENV_TYPE="workspace_venv"
     return 0
 }
 
@@ -180,15 +200,15 @@ _print_dependency_help() {
             echo "错误：依赖安装失败，请手动执行："
             echo "  $PYTHON -m pip install -r requirements.txt"
             ;;
-        venv)
+        venv|workspace_venv)
             if "$PYTHON" -m pip --version >/dev/null 2>&1; then
                 echo "错误：依赖安装失败，请手动执行："
                 echo "  $PYTHON -m pip install -r requirements.txt"
             elif command -v uv >/dev/null 2>&1; then
-                echo "错误：当前 .venv 没有 pip，请手动执行："
+                echo "错误：当前虚拟环境没有 pip，请手动执行："
                 echo "  uv pip install --python \"$PYTHON\" -r requirements.txt"
             else
-                echo "错误：当前 .venv 没有 pip，且系统未找到 uv。"
+                echo "错误：当前虚拟环境没有 pip，且系统未找到 uv。"
                 echo "请先安装 pip 或 uv 后重试。"
             fi
             ;;
@@ -219,8 +239,8 @@ _install_requirements_if_needed() {
             echo "检测到 conda 环境缺少依赖，正在安装..."
             "$PYTHON" -m pip install -r requirements.txt
             ;;
-        venv)
-            echo "检测到项目 .venv 缺少依赖，正在安装..."
+        venv|workspace_venv)
+            echo "检测到虚拟环境缺少依赖，正在安装..."
             if "$PYTHON" -m pip --version >/dev/null 2>&1; then
                 "$PYTHON" -m pip install -r requirements.txt
             elif command -v uv >/dev/null 2>&1; then
@@ -242,12 +262,13 @@ _install_requirements_if_needed() {
     fi
 }
 
-if ! _try_activate_conda && ! _try_activate_project_venv && ! _try_use_system_python; then
+if ! _try_activate_conda && ! _try_activate_project_venv && ! _try_activate_workspace_venv && ! _try_use_system_python; then
     echo "错误：未找到可用 Python 环境。"
     echo "建议安装以下任一环境："
     echo "  1. conda，并在 user_config.json 中填写 conda_env"
     echo "  2. 项目根目录 .venv，可用 uv 创建：uv venv .venv"
-    echo "  3. 系统 python3，并确保命令行可访问"
+    echo "  3. 共享 quant .venv，路径为 ~/workspace/quant/.venv"
+    echo "  4. 系统 python3，并确保命令行可访问"
     _pause_and_exit 1
 fi
 
