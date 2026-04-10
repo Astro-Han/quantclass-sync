@@ -529,6 +529,28 @@ def _resolve_requested_dates_for_plan(
 
     product_name = normalize_product_name(plan.name)
 
+    def _record_gate_skip(*, date_time: str, error: str, log_message: str, **log_fields: object) -> Tuple[List[str], bool]:
+        elapsed = time.time() - t_product_start
+        with lock if lock is not None else contextlib.nullcontext():
+            _append_result(
+                report,
+                product=product_name,
+                status="skipped",
+                strategy=plan.strategy,
+                reason_code=REASON_UP_TO_DATE,
+                date_time=date_time,
+                mode="gate",
+                elapsed=elapsed,
+                error=error,
+            )
+        log_info(
+            log_message,
+            event="SYNC_SKIP",
+            decision="skip",
+            **log_fields,
+        )
+        return [], True
+
     # 缓存检查：check_updates 已查过且未过期时跳过 HTTP
     cache_hit = False
     api_latest_candidates: List[str] = []
@@ -582,29 +604,13 @@ def _resolve_requested_dates_for_plan(
         local_date = read_local_timestamp_date(command_ctx.data_root, product_name)
         # 3) 如果本地已经不落后，则直接跳过，不进入下载链路
         if should_skip_by_timestamp(local_date, api_latest_date):
-            elapsed = time.time() - t_product_start
-            latest_raw = api_latest_date or ""
-            # 并发路径下 lock 由调用方传入，保护 report 写入的线程安全
-            with lock if lock is not None else contextlib.nullcontext():
-                _append_result(
-                    report,
-                    product=product_name,
-                    status="skipped",
-                    strategy=plan.strategy,
-                    reason_code=REASON_UP_TO_DATE,
-                    date_time=api_latest_date or latest_raw,
-                    mode="gate",
-                    elapsed=elapsed,
-                    error=f"本地 timestamp 已是最新（local={local_date}, api={api_latest_date}）。",
-                )
-            log_info(
-                f"[{product_name}] timestamp 门控命中，跳过更新。",
-                event="SYNC_SKIP",
+            return _record_gate_skip(
+                date_time=api_latest_date or "",
+                error=f"本地 timestamp 已是最新（local={local_date}, api={api_latest_date}）。",
+                log_message=f"[{product_name}] timestamp 门控命中，跳过更新。",
                 local_date=local_date,
                 api_latest_date=api_latest_date,
-                decision="skip",
             )
-            return [], True
 
         # 非回补模式：保持"单次只跑 latest 一次"的旧行为。
         if not catch_up_to_latest:
@@ -626,27 +632,13 @@ def _resolve_requested_dates_for_plan(
                 return [""], False
             # 推断后复查门控：已是最新则跳过
             if should_skip_by_timestamp(inferred, api_latest_date):
-                elapsed = time.time() - t_product_start
-                with lock if lock is not None else contextlib.nullcontext():
-                    _append_result(
-                        report,
-                        product=product_name,
-                        status="skipped",
-                        strategy=plan.strategy,
-                        reason_code=REASON_UP_TO_DATE,
-                        date_time=api_latest_date or "",
-                        mode="gate",
-                        elapsed=elapsed,
-                        error=f"CSV 推断日期已是最新（inferred={inferred}, api={api_latest_date}）。",
-                    )
-                log_info(
-                    f"[{product_name}] CSV 推断门控命中，跳过更新。",
-                    event="SYNC_SKIP",
+                return _record_gate_skip(
+                    date_time=api_latest_date or "",
+                    error=f"CSV 推断日期已是最新（inferred={inferred}, api={api_latest_date}）。",
+                    log_message=f"[{product_name}] CSV 推断门控命中，跳过更新。",
                     inferred_date=inferred,
                     api_latest_date=api_latest_date,
-                    decision="skip",
                 )
-                return [], True
             # 有 CSV 数据但无 timestamp，用推断日期走正常回补
             local_date = inferred
             log_info(
@@ -1120,6 +1112,7 @@ def _execute_plans(
     catch_up_to_latest: bool = False,
     max_workers: int = 1,
     progress_callback: Optional[Callable[..., None]] = None,
+    api_date_cache: Optional[Dict[str, Tuple[List[str], str]]] = None,
 ) -> Tuple[SyncStats, bool, float]:
     """
     执行产品计划并返回汇总统计。
@@ -1145,12 +1138,14 @@ def _execute_plans(
 
     # 并发预取所有产品的 API 最新日期，写入缓存供 Plan 阶段命中（替代单次 load_api_latest_dates）
     product_names = [normalize_product_name(p.name) for p in plans]
-    _api_date_cache = _prefetch_api_dates(
-        products=product_names,
-        command_ctx=command_ctx,
-        hid=hid,
-        headers=headers,
-    )
+    _api_date_cache = api_date_cache
+    if _api_date_cache is None:
+        _api_date_cache = _prefetch_api_dates(
+            products=product_names,
+            command_ctx=command_ctx,
+            hid=hid,
+            headers=headers,
+        )
 
     # stop-on-error 要求严格顺序控制，强制串行
     effective_workers = max(1, max_workers) if not command_ctx.stop_on_error else 1
@@ -1546,6 +1541,7 @@ def run_update_with_settings(
             no_executable_products=True,
         )
 
+    api_date_cache: Optional[Dict[str, Tuple[List[str], str]]] = None
     # 非 dry_run 时：预取 API 日期 → 预估调用量 → 超阈值时请求确认
     if not command_ctx.dry_run:
         headers_pre, hid_pre = build_headers_or_raise(command_ctx)
@@ -1587,9 +1583,10 @@ def run_update_with_settings(
             conn=None,
             force_update=force_update,
             catch_up_to_latest=True,
-            max_workers=max_workers,
-            progress_callback=progress_callback,
-        )
+                max_workers=max_workers,
+                progress_callback=progress_callback,
+                api_date_cache=api_date_cache,
+            )
         # dry_run 模式下 _maybe_run_coin_preprocess 会直接跳过，不发 postprocessing 通知
         preprocess_has_error = _maybe_run_coin_preprocess(
             command_ctx=command_ctx,
@@ -1611,6 +1608,7 @@ def run_update_with_settings(
                     catch_up_to_latest=True,
                     max_workers=max_workers,
                     progress_callback=progress_callback,
+                    api_date_cache=api_date_cache,
                 )
                 # 细粒度进度由 _maybe_run_coin_preprocess 内部通过 preprocess_cb 发出
                 preprocess_has_error = _maybe_run_coin_preprocess(

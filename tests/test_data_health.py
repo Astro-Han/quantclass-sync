@@ -7,7 +7,11 @@ import unittest
 from pathlib import Path
 
 from quantclass_sync_internal.constants import TIMESTAMP_FILE_NAME
-from quantclass_sync_internal.data_query import check_data_health, repair_data_issues
+from quantclass_sync_internal.data_query import (
+    _choose_csv_samples,
+    check_data_health,
+    repair_data_issues,
+)
 
 
 class TestNoIssuesHealthyData(unittest.TestCase):
@@ -999,6 +1003,81 @@ class TestRepairTruncateTail(unittest.TestCase):
         self.assertEqual(len(last_line.split(",")), 3)
         # 残行 "4,5" 应已被移除
         self.assertNotIn("4,5", csv_path.read_text(encoding="utf-8"))
+
+    def test_repair_truncate_tail_preserves_multiline_rows(self):
+        """修复尾残行时，带引号换行的合法记录必须原样保留。"""
+        product = "trunc-product"
+        pdir = self.data_root / product
+        pdir.mkdir()
+        csv_path = pdir / "data.csv"
+        csv_path.write_text(
+            'col1,col2\n"hello\nworld",x\nbroken\n',
+            encoding="utf-8",
+        )
+
+        issue = {
+            "type": "tail_corruption",
+            "severity": "error",
+            "category": "file_integrity",
+            "product": product,
+            "detail": "末尾行不完整",
+            "file": "data.csv",
+            "repairable": True,
+            "repair_action": "truncate_tail",
+        }
+        result = repair_data_issues(self.data_root, [issue])
+
+        self.assertEqual(len(result["repaired"]), 1)
+        self.assertEqual(len(result["failed"]), 0)
+        self.assertEqual(
+            csv_path.read_text(encoding="utf-8"),
+            'col1,col2\n"hello\nworld",x\n',
+        )
+
+    def test_repair_truncate_tail_drops_truncated_multiline_record(self):
+        """若最后一条逻辑记录本身被截断，应整条移除，且后续健康检查不再报 tail_corruption。"""
+        product = "trunc-product"
+        pdir = self.data_root / product
+        pdir.mkdir()
+        csv_path = pdir / "data.csv"
+        csv_path.write_text(
+            'col1,col2\n"hello\nworld\n',
+            encoding="utf-8",
+        )
+
+        issue = {
+            "type": "tail_corruption",
+            "severity": "error",
+            "category": "file_integrity",
+            "product": product,
+            "detail": "末尾行不完整",
+            "file": "data.csv",
+            "repairable": True,
+            "repair_action": "truncate_tail",
+        }
+        result = repair_data_issues(self.data_root, [issue])
+
+        self.assertEqual(len(result["repaired"]), 1)
+        self.assertEqual(len(result["failed"]), 0)
+        self.assertEqual(csv_path.read_text(encoding="utf-8"), "col1,col2\n")
+
+        health = check_data_health(self.data_root, [product])
+        tail_issues = [i for i in health["issues"] if i["type"] == "tail_corruption"]
+        self.assertEqual(tail_issues, [])
+
+
+class TestChooseCsvSamples(unittest.TestCase):
+    """大产品采样应稳定，不能依赖随机数。"""
+
+    def test_choose_csv_samples_is_deterministic(self):
+        csv_files = [Path(f"/tmp/file_{index:03d}.csv") for index in range(200)]
+        first = _choose_csv_samples(csv_files, 100)
+        second = _choose_csv_samples(csv_files, 100)
+
+        self.assertEqual(first, second)
+        self.assertEqual(first[0], Path("/tmp/file_000.csv"))
+        self.assertEqual(first[-1], Path("/tmp/file_199.csv"))
+        self.assertEqual(len(first), 100)
 
 
 class TestRepairDeleteTempFile(unittest.TestCase):

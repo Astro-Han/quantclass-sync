@@ -129,6 +129,29 @@ def _write_runtime_timestamp(output_dir: Path, data_date: str) -> None:
             type(exc).__name__,
         )
 
+
+def _persist_outputs(
+    *,
+    output_dir: Path,
+    spot_dict: Dict[str, pd.DataFrame],
+    swap_dict: Dict[str, pd.DataFrame],
+    market_pivot_spot: Dict[str, pd.DataFrame],
+    market_pivot_swap: Dict[str, pd.DataFrame],
+) -> None:
+    """统一写入预处理产物和 runtime timestamp。"""
+
+    payloads = {
+        output_dir / OUTPUT_SPOT_DICT: spot_dict,
+        output_dir / OUTPUT_SWAP_DICT: swap_dict,
+        output_dir / OUTPUT_PIVOT_SPOT: market_pivot_spot,
+        output_dir / OUTPUT_PIVOT_SWAP: market_pivot_swap,
+    }
+    _write_pickles_atomically(payloads)
+    _write_runtime_timestamp(
+        output_dir=output_dir,
+        data_date=_resolve_output_data_date(spot_dict=spot_dict, swap_dict=swap_dict),
+    )
+
 def _has_relist_break(prev_time: pd.Timestamp, prev_close: float, next_time: pd.Timestamp, next_open: float) -> bool:
     """判断边界处是否触发 relist 切段。"""
 
@@ -372,23 +395,24 @@ def _try_tail_append_symbol(
     if tail_raw.empty:
         return False, set()
 
-    tail_min = pd.to_datetime(tail_raw["candle_begin_time"].min(), errors="coerce")
+    tail_times = tail_raw["candle_begin_time"]
+    tail_min = tail_times.min()
     if pd.isna(tail_min) or pd.Timestamp(tail_min) > last_time:
         # 尾部窗口没覆盖到旧边界，无法证明"只需追加"，回退单 symbol 全量重算。
         return False, set()
 
     overlap_snapshot = _build_overlap_snapshot(data_dict, keys)
-    overlap_raw = tail_raw[pd.to_datetime(tail_raw["candle_begin_time"], errors="coerce") <= last_time]
+    overlap_raw = tail_raw[tail_times <= last_time]
     if not _overlap_matches_existing(overlap_raw=overlap_raw, overlap_snapshot=overlap_snapshot, is_swap=is_swap):
         return False, set()
 
-    new_raw = tail_raw[pd.to_datetime(tail_raw["candle_begin_time"], errors="coerce") > last_time]
+    new_raw = tail_raw[tail_times > last_time]
     if new_raw.empty:
         # mtime 变化但无新增行：保守回退单 symbol 全量重算，避免漏算。
         return False, set()
 
     prev_close = _safe_float(active_frame["close"].iloc[-1], fallback=0.0)
-    next_time = pd.Timestamp(pd.to_datetime(new_raw["candle_begin_time"].min(), errors="coerce"))
+    next_time = pd.Timestamp(new_raw["candle_begin_time"].min())
     next_open_raw = new_raw.sort_values("candle_begin_time").iloc[0].get("open", pd.NA)
     next_open = _safe_float(next_open_raw, fallback=prev_close)
     if _has_relist_break(last_time, prev_close, next_time, next_open):
@@ -506,16 +530,12 @@ def _run_full_rebuild(spot_dir: Path, swap_dir: Path, output_dir: Path, mode: st
 
     if progress_callback:
         progress_callback(detail="写入产物...")
-    payloads = {
-        output_dir / OUTPUT_SPOT_DICT: spot_dict,
-        output_dir / OUTPUT_SWAP_DICT: swap_dict,
-        output_dir / OUTPUT_PIVOT_SPOT: market_pivot_spot,
-        output_dir / OUTPUT_PIVOT_SWAP: market_pivot_swap,
-    }
-    _write_pickles_atomically(payloads)
-    _write_runtime_timestamp(
+    _persist_outputs(
         output_dir=output_dir,
-        data_date=_resolve_output_data_date(spot_dict=spot_dict, swap_dict=swap_dict),
+        spot_dict=spot_dict,
+        swap_dict=swap_dict,
+        market_pivot_spot=market_pivot_spot,
+        market_pivot_swap=market_pivot_swap,
     )
 
     return PreprocessSummary(
@@ -664,16 +684,12 @@ def _run_incremental_patch(
 
     if progress_callback:
         progress_callback(detail="写入产物...")
-    payloads = {
-        output_dir / OUTPUT_SPOT_DICT: spot_dict,
-        output_dir / OUTPUT_SWAP_DICT: swap_dict,
-        output_dir / OUTPUT_PIVOT_SPOT: market_pivot_spot,
-        output_dir / OUTPUT_PIVOT_SWAP: market_pivot_swap,
-    }
-    _write_pickles_atomically(payloads)
-    _write_runtime_timestamp(
+    _persist_outputs(
         output_dir=output_dir,
-        data_date=_resolve_output_data_date(spot_dict=spot_dict, swap_dict=swap_dict),
+        spot_dict=spot_dict,
+        swap_dict=swap_dict,
+        market_pivot_spot=market_pivot_spot,
+        market_pivot_swap=market_pivot_swap,
     )
 
     changed_count = (

@@ -11,12 +11,14 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from .config import atomic_temp_path
 from .constants import (
     ENCODING_CANDIDATES, KNOWN_DATASETS, TIMESTAMP_FILE_NAME,
     BUSINESS_DAY_ONLY_PRODUCTS, FINANCIAL_PRODUCTS, NOTICE_PRODUCTS,
     INFRA_PRODUCTS,
 )
-from .models import log_error, RULES
+from .csv_engine import write_csv_payload
+from .models import CsvPayload, log_error, RULES
 from .status_store import (
     normalize_data_date, read_local_timestamp_date,
     read_or_backfill_product_last_status,
@@ -416,6 +418,37 @@ def _looks_like_note(line):
     return any(kw in line for kw in note_keywords)
 
 
+def _advance_csv_quote_state(line: str, in_quotes: bool) -> bool:
+    """扫描一行文本后，返回 CSV 引号状态是否仍处于未闭合。"""
+
+    index = 0
+    while index < len(line):
+        if line[index] != '"':
+            index += 1
+            continue
+        if in_quotes and index + 1 < len(line) and line[index + 1] == '"':
+            index += 2
+            continue
+        in_quotes = not in_quotes
+        index += 1
+    return in_quotes
+
+
+def _collect_complete_csv_record_groups(lines: Sequence[str]) -> List[List[str]]:
+    """按 CSV 引号规则切分逻辑记录，只返回完整闭合的记录组。"""
+
+    groups: List[List[str]] = []
+    current: List[str] = []
+    in_quotes = False
+    for line in lines:
+        current.append(line)
+        in_quotes = _advance_csv_quote_state(line, in_quotes)
+        if not in_quotes:
+            groups.append(current)
+            current = []
+    return groups
+
+
 def _read_csv_head_tail(csv_path):
     """读取 CSV 首行（表头）和最后一个非空行。返回 (header_fields, last_fields) 或 (None, None)。
 
@@ -468,10 +501,11 @@ def _read_csv_full(csv_path, rule):
     return header, rows
 
 
-def _check_content_integrity(product, product_dir, rule):
+def _check_content_integrity(product, product_dir, rule, csv_files=None):
     """检查 #5 重复行, #6 关键字段空值。仅 KNOWN_DATASETS 中有 key_cols 的产品。"""
     issues = []
-    csv_files = _list_csv_files(product_dir)
+    if csv_files is None:
+        csv_files = _list_csv_files(product_dir)
     key_cols = rule.key_cols
     # 合并 key_cols + sort_cols 去重保序，用于空值检查
     check_cols = list(dict.fromkeys(list(key_cols) + list(rule.sort_cols)))
@@ -518,7 +552,7 @@ def _check_content_integrity(product, product_dir, rule):
     return issues
 
 
-def _check_file_integrity(data_root, product, product_dir, rule):
+def _check_file_integrity(data_root, product, product_dir, rule, data_files=None, temp_files=None, csv_files=None):
     """检查 #1 缺失数据, #2 残留临时文件, #3 CSV 完整性。返回 (file_count, issues)。"""
     issues = []
     file_count = 0
@@ -528,7 +562,8 @@ def _check_file_integrity(data_root, product, product_dir, rule):
 
     # #1 缺失数据：有 timestamp 但无数据文件
     ts = read_local_timestamp_date(data_root, product)
-    data_files = _list_data_files(product_dir)
+    if data_files is None:
+        data_files = _list_data_files(product_dir)
     file_count = len(data_files)
     if ts and not data_files:
         issues.append(_issue("missing_data", "error", "file_integrity",
@@ -536,13 +571,16 @@ def _check_file_integrity(data_root, product, product_dir, rule):
                              False, "needs_resync"))
 
     # #2 残留临时文件
-    for f in _list_temp_files(product_dir):
+    if temp_files is None:
+        temp_files = _list_temp_files(product_dir)
+    for f in temp_files:
         issues.append(_issue("orphan_temp", "warning", "file_integrity",
                              product, f"残留临时文件: {f.name}", f.name,
                              True, "delete_temp"))
 
     # #3 CSV 完整性（首行可读 + 尾部残行检查）
-    csv_files = _list_csv_files(product_dir)
+    if csv_files is None:
+        csv_files = _list_csv_files(product_dir)
     for csv_file in csv_files:
         try:
             header, last_line = _read_csv_head_tail(csv_file)
@@ -647,34 +685,31 @@ def _generate_weekdays(start_date, end_date):
     return dates
 
 
-def _sample_max_date(csv_files, rule, date_col, sample_size=20):
-    """从抽样文件中提取最大日期值（YYYY-MM-DD 格式）。"""
-    import random
-    samples = random.sample(csv_files, min(sample_size, len(csv_files)))
-    max_date = None
-    for f in samples:
-        try:
-            header, rows = _read_csv_full(f, rule)
-            if not header or not rows or date_col not in header:
-                continue
-            idx = header.index(date_col)
-            for row in rows:
-                if idx < len(row) and row[idx].strip():
-                    d = row[idx].strip()[:10]
-                    if len(d) == 10 and d[4] == "-":
-                        if max_date is None or d > max_date:
-                            max_date = d
-        except Exception:
-            continue
-    return max_date
+def _choose_csv_samples(csv_files: Sequence[Path], sample_size: int) -> List[Path]:
+    """按固定顺序稳定抽样，供后续多个检查阶段复用同一批文件。"""
+
+    ordered_files = sorted(csv_files, key=lambda path: str(path))
+    if len(ordered_files) <= sample_size:
+        return ordered_files
+    if sample_size <= 0:
+        return []
+    if sample_size == 1:
+        return [ordered_files[-1]]
+    last_index = len(ordered_files) - 1
+    step_denominator = sample_size - 1
+    return [
+        ordered_files[(index * last_index) // step_denominator]
+        for index in range(sample_size)
+    ]
 
 
-def _sample_min_date(csv_files, rule, date_col, sample_size=20):
-    """从抽样文件中提取最小日期值（YYYY-MM-DD 格式），用于确定连续性检查的起点。"""
-    import random
-    samples = random.sample(csv_files, min(sample_size, len(csv_files)))
+def _collect_date_stats(csv_files, rule, date_col):
+    """从一组 CSV 中一次性提取最小日期、最大日期和实际日期集合。"""
+
     min_date = None
-    for f in samples:
+    max_date = None
+    actual_dates = set()
+    for f in csv_files:
         try:
             header, rows = _read_csv_full(f, rule)
             if not header or not rows or date_col not in header:
@@ -683,40 +718,19 @@ def _sample_min_date(csv_files, rule, date_col, sample_size=20):
             for row in rows:
                 if idx < len(row) and row[idx].strip():
                     d = row[idx].strip()[:10]
-                    if len(d) == 10 and d[4] == "-":
-                        if min_date is None or d < min_date:
-                            min_date = d
+                    if len(d) != 10 or d[4] != "-":
+                        continue
+                    actual_dates.add(d)
+                    if min_date is None or d < min_date:
+                        min_date = d
+                    if max_date is None or d > max_date:
+                        max_date = d
         except Exception:
             continue
-    return min_date
+    return min_date, max_date, actual_dates
 
 
-def _extract_actual_dates(csv_files, rule, date_col):
-    """从 CSV 文件中提取实际存在的日期集合。大产品（>100 文件）抽样以控制性能。"""
-    import random
-    # 超过 100 个文件时抽样，避免对大产品全量读取导致检查超时
-    if len(csv_files) > 100:
-        samples = random.sample(csv_files, 100)
-    else:
-        samples = csv_files
-    dates = set()
-    for f in samples:
-        try:
-            header, rows = _read_csv_full(f, rule)
-            if not header or not rows or date_col not in header:
-                continue
-            idx = header.index(date_col)
-            for row in rows:
-                if idx < len(row) and row[idx].strip():
-                    d = row[idx].strip()[:10]
-                    if len(d) == 10 and d[4] == "-":
-                        dates.add(d)
-        except Exception:
-            continue
-    return dates
-
-
-def _check_temporal_integrity(data_root, product, rule, trading_calendar):
+def _check_temporal_integrity(data_root, product, rule, trading_calendar, csv_files=None):
     """检查 #7 timestamp-数据日期一致性, #8 日期连续性。"""
     issues = []
     if not rule:
@@ -742,12 +756,15 @@ def _check_temporal_integrity(data_root, product, rule, trading_calendar):
         return issues
 
     product_dir = data_root / product
-    csv_files = _list_csv_files(product_dir)
+    if csv_files is None:
+        csv_files = _list_csv_files(product_dir)
     if not csv_files:
         return issues
 
+    temporal_samples = _choose_csv_samples(csv_files, sample_size=100)
+    min_date, max_date, actual_dates = _collect_date_stats(temporal_samples, rule, date_col)
+
     # #7 timestamp-数据日期一致性：推断模式跳过（endpoint 和 max_date 来自同一数据源，比较无意义）
-    max_date = _sample_max_date(csv_files, rule, date_col, sample_size=20)
     if max_date and not inferred_mode:
         if max_date > ts_date:
             issues.append(_issue("date_exceeds_timestamp", "error", "temporal_integrity",
@@ -771,7 +788,6 @@ def _check_temporal_integrity(data_root, product, rule, trading_calendar):
     end_date = max_date if inferred_mode else ts_date
 
     # 抽样最小日期，作为连续性检查的起始点
-    min_date = _sample_min_date(csv_files, rule, date_col, sample_size=20)
     if not min_date:
         return issues
 
@@ -790,8 +806,7 @@ def _check_temporal_integrity(data_root, product, rule, trading_calendar):
     if expected is None:
         return issues
 
-    # 从 CSV 文件内容提取实际日期集合，对比期望集合找出缺失
-    actual_dates = _extract_actual_dates(csv_files, rule, date_col)
+    # 从同一批抽样文件中提取实际日期集合，对比期望集合找出缺失
     missing = sorted(expected - actual_dates)
     # 缺失超过 30 天时不报告（可能是数据本身不连续，如分钟线等，避免大量误报）
     if missing and len(missing) <= 30:
@@ -830,7 +845,8 @@ def _save_health_baseline(data_root, product_file_counts, issues):
     rdir = report_dir_path(data_root)
     baseline_path = rdir / "health_baseline.json"
     baseline_path.parent.mkdir(parents=True, exist_ok=True)
-    baseline_path.write_text(json.dumps(product_file_counts, ensure_ascii=False), encoding="utf-8")
+    with atomic_temp_path(baseline_path, tag="health-baseline") as tmp:
+        tmp.write_text(json.dumps(product_file_counts, ensure_ascii=False), encoding="utf-8")
 
 
 def _check_coverage_integrity(product, product_dir, file_count, baseline):
@@ -848,10 +864,11 @@ def _check_coverage_integrity(product, product_dir, file_count, baseline):
     return issues
 
 
-def _check_format_integrity(product, product_dir):
+def _check_format_integrity(product, product_dir, csv_files=None):
     """检查 #10 列名一致性：同产品内抽样比对，发现不同列名组合时告警。"""
     issues = []
-    csv_files = _list_csv_files(product_dir)
+    if csv_files is None:
+        csv_files = _list_csv_files(product_dir)
     if len(csv_files) < 2:
         return issues
     import random
@@ -937,8 +954,27 @@ def _repair_truncate_tail(data_root: Path, issue: Dict) -> None:
     if header_idx < len(lines):
         header_fields = next(csv.reader(io.StringIO(lines[header_idx])))
         if len(last_fields) != len(header_fields):
-            lines.pop()  # 末行列数不符，移除残行
-    csv_path.write_text("\n".join(lines) + "\n", encoding=detected_enc or "utf-8")
+            preserved_prefix = lines[:header_idx + 1]
+            record_groups = _collect_complete_csv_record_groups(lines[header_idx + 1:])
+            while record_groups:
+                candidate = "\n".join(record_groups[-1])
+                candidate_fields = next(csv.reader(io.StringIO(candidate)))
+                if len(candidate_fields) == len(header_fields):
+                    break
+                record_groups.pop()
+            flattened_records = [
+                line
+                for group in record_groups
+                for line in group
+            ]
+            lines = preserved_prefix + flattened_records
+    normalized = "\n".join(lines) + "\n"
+    if not normalized.strip():
+        return
+    # 这里只删除已确认损坏的物理尾行，保留原始 CSV 记录边界，
+    # 避免带引号换行的合法记录在逐行重组时被破坏。
+    with atomic_temp_path(csv_path, tag="repair-truncate-tail") as tmp:
+        tmp.write_text(normalized, encoding=detected_enc or "utf-8")
 
 
 def _repair_delete_temp(data_root: Path, issue: Dict) -> None:
@@ -976,22 +1012,20 @@ def _repair_dedup_rows(data_root: Path, issue: Dict) -> None:
         key = tuple(row[j] for j in key_indices if j < len(row))
         seen[key] = i
     unique_rows = [rows[i] for i in sorted(seen.values())]
-    # 重写文件：有备注行时保留首行备注，用 csv.writer 正确处理含逗号字段
-    import io as _io
-    import csv as _csv
-    output_parts = []
+    # 重写文件：沿用统一 CSV 写入链路，避免修复路径与主写盘规则漂移
+    note = None
     if rule.has_note:
         from .csv_engine import decode_text
         text, _ = decode_text(csv_path, preferred_encoding=rule.encoding)
-        first_line = text.split("\n")[0] if text else ""
-        output_parts.append(first_line + "\n")
-    # 写表头和数据行
-    buf = _io.StringIO()
-    writer = _csv.writer(buf, lineterminator="\n")
-    writer.writerow(header)
-    writer.writerows(unique_rows)
-    output_parts.append(buf.getvalue())
-    csv_path.write_text("".join(output_parts), encoding=rule.encoding)
+        note = text.split("\n")[0] if text else None
+    payload = CsvPayload(
+        note=note,
+        header=header,
+        rows=unique_rows,
+        encoding=rule.encoding,
+        delimiter=",",
+    )
+    write_csv_payload(csv_path, payload, rule, dry_run=False)
 
 
 def _repair_rebuild_status_db(data_root: Path) -> None:
@@ -1041,20 +1075,37 @@ def check_data_health(
             progress_callback(idx, total_products, product, "checking")
         product_dir = data_root / product
         rule = RULES.get(product)
+        data_files = _list_data_files(product_dir)
+        temp_files = _list_temp_files(product_dir)
+        csv_files = _list_csv_files(product_dir)
 
         # 文件完整性检查 (#1-3)
-        file_count, fi_issues = _check_file_integrity(data_root, product, product_dir, rule)
+        file_count, fi_issues = _check_file_integrity(
+            data_root,
+            product,
+            product_dir,
+            rule,
+            data_files=data_files,
+            temp_files=temp_files,
+            csv_files=csv_files,
+        )
         issues.extend(fi_issues)
         scanned_files += file_count
         product_file_counts[product] = file_count
 
         # 内容完整性（仅 KNOWN_DATASETS 中有 key_cols 的产品）
         if rule and rule.key_cols:
-            ci_issues = _check_content_integrity(product, product_dir, rule)
+            ci_issues = _check_content_integrity(product, product_dir, rule, csv_files=csv_files)
             issues.extend(ci_issues)
 
         # 时间完整性 (#7-8)
-        ti_issues = _check_temporal_integrity(data_root, product, rule, trading_calendar)
+        ti_issues = _check_temporal_integrity(
+            data_root,
+            product,
+            rule,
+            trading_calendar,
+            csv_files=csv_files,
+        )
         issues.extend(ti_issues)
 
         # 覆盖完整性 (#9)
@@ -1062,7 +1113,7 @@ def check_data_health(
         issues.extend(cov_issues)
 
         # 格式完整性 (#10)
-        fmt_issues = _check_format_integrity(product, product_dir)
+        fmt_issues = _check_format_integrity(product, product_dir, csv_files=csv_files)
         issues.extend(fmt_issues)
 
     # 基础设施检查 (#4, 全局一次性)

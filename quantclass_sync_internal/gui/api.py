@@ -68,6 +68,40 @@ def _format_run_summary(raw_run: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _format_overview_products(
+    raw_products: list,
+    *,
+    api_latest_dates: Optional[Dict[str, str]] = None,
+) -> list:
+    """把 overview 原始记录转换为前端字段。"""
+
+    products = []
+    for item in raw_products:
+        product = {
+            "name": item["name"],
+            "color": item["status_color"],
+            "local_date": item["local_date"],
+            "behind_days": item["days_behind"],
+            "last_result": item["last_status"],
+            "last_error": item["last_error"],
+        }
+        if api_latest_dates is not None:
+            product["source"] = "api" if item["name"] in api_latest_dates else "cached"
+        products.append(product)
+    return products
+
+
+def _summarize_product_colors(products: list) -> Dict[str, int]:
+    """统计 overview 颜色分布。"""
+
+    summary = {"green": 0, "yellow": 0, "red": 0, "gray": 0}
+    for product in products:
+        color = product.get("color", "gray")
+        if color in summary:
+            summary[color] += 1
+    return summary
+
+
 # _progress 的初始结构，每次 start_sync 前重置为此形态
 _PROGRESS_INIT: Dict[str, Any] = {
     "status": "idle",          # idle / syncing / confirm_needed / postprocessing / done / error
@@ -156,6 +190,47 @@ class SyncApi:
         with self._lock:
             self._progress.update(kwargs)
 
+    def _set_progress_init(self, *, total: int, all_products=None) -> None:
+        """写入初始化阶段的进度状态。"""
+
+        if all_products is not None:
+            self._progress["all_products"] = list(all_products)
+        self._progress["total"] = total
+
+    def _set_progress_postprocessing(self, *, started_at: float, detail: str) -> None:
+        """写入后处理阶段的进度状态。"""
+
+        self._progress["status"] = "postprocessing"
+        self._progress["elapsed_seconds"] = round(time.time() - started_at, 1)
+        self._progress["postprocess_detail"] = detail
+
+    def _append_product_progress(
+        self,
+        *,
+        product_name: str,
+        completed: int,
+        total: int,
+        elapsed_seconds: float,
+        stats,
+        status: str,
+        error: str,
+        started_at: float,
+    ) -> None:
+        """写入单产品完成后的进度状态。"""
+
+        files_count = (stats.created_files + stats.updated_files) if stats else 0
+        self._progress["products"].append({
+            "name": product_name,
+            "status": status,
+            "elapsed_seconds": round(elapsed_seconds, 2),
+            "files_count": files_count,
+            "error": error,
+        })
+        self._progress["current_product"] = product_name
+        self._progress["completed"] = completed
+        self._progress["total"] = total
+        self._progress["elapsed_seconds"] = round(time.time() - started_at, 1)
+
     # ------------------------------------------------------------------
     # 公开 API 方法（供 JS 调用）
     # ------------------------------------------------------------------
@@ -191,24 +266,8 @@ class SyncApi:
         except Exception as exc:
             return {"ok": False, "error": f"产品状态读取失败：{exc}"}
 
-        # 转换为前端友好的字段名
-        products = []
-        for p in raw_products:
-            products.append({
-                "name": p["name"],
-                "color": p["status_color"],
-                "local_date": p["local_date"],
-                "behind_days": p["days_behind"],
-                "last_result": p["last_status"],
-                "last_error": p["last_error"],
-            })
-
-        # 颜色统计
-        summary = {"green": 0, "yellow": 0, "red": 0, "gray": 0}
-        for p in products:
-            color = p.get("color", "gray")
-            if color in summary:
-                summary[color] += 1
+        products = _format_overview_products(raw_products)
+        summary = _summarize_product_colors(products)
 
         # 最近运行摘要（转换为前端友好格式）
         try:
@@ -739,26 +798,8 @@ class SyncApi:
         except Exception as exc:
             return {"ok": False, "error": f"状态计算失败：{exc}"}
 
-        # 转换为前端字段名，附加 source 标记
-        products = []
-        for p in raw_products:
-            source = "api" if p["name"] in api_latest_dates else "cached"
-            products.append({
-                "name": p["name"],
-                "color": p["status_color"],
-                "local_date": p["local_date"],
-                "behind_days": p["days_behind"],
-                "last_result": p["last_status"],
-                "last_error": p["last_error"],
-                "source": source,
-            })
-
-        # 统计卡片
-        summary = {"green": 0, "yellow": 0, "red": 0, "gray": 0}
-        for p in products:
-            color = p.get("color", "gray")
-            if color in summary:
-                summary[color] += 1
+        products = _format_overview_products(raw_products, api_latest_dates=api_latest_dates)
+        summary = _summarize_product_colors(products)
 
         return {
             "ok": True,
@@ -867,34 +908,25 @@ class SyncApi:
                   error           -- 失败时的错误描述（由 orchestrator 透传）
                 """
                 with self._lock:
-                    # 初始化调用：写入全部产品名并记录总数
-                    if all_products is not None:
-                        self._progress["all_products"] = list(all_products)
                     if status == "init":
-                        self._progress["total"] = total
+                        self._set_progress_init(total=total, all_products=all_products)
                         return
-                    # 后处理阶段：更新顶层 status 和 elapsed，供前端检测
                     if status == "postprocessing":
-                        self._progress["status"] = "postprocessing"
-                        self._progress["elapsed_seconds"] = round(time.time() - t_start, 1)
-                        self._progress["postprocess_detail"] = _kwargs.get("postprocess_detail", "")
+                        self._set_progress_postprocessing(
+                            started_at=t_start,
+                            detail=_kwargs.get("postprocess_detail", ""),
+                        )
                         return
-                    # 计算本产品同步的文件数（新建 + 更新）
-                    files_count = (stats.created_files + stats.updated_files) if stats else 0
-                    # 追加到已完成产品列表，包含 error 字段供前端展示失败原因
-                    self._progress["products"].append({
-                        "name": product_name,
-                        "status": status,
-                        "elapsed_seconds": round(elapsed_seconds, 2),
-                        "files_count": files_count,
-                        "error": error,
-                    })
-                    # 同时更新原有字段，保持前端兼容
-                    elapsed = time.time() - t_start
-                    self._progress["current_product"] = product_name
-                    self._progress["completed"] = completed
-                    self._progress["total"] = total
-                    self._progress["elapsed_seconds"] = round(elapsed, 1)
+                    self._append_product_progress(
+                        product_name=product_name,
+                        completed=completed,
+                        total=total,
+                        elapsed_seconds=elapsed_seconds,
+                        stats=stats,
+                        status=status,
+                        error=error,
+                        started_at=t_start,
+                    )
 
             # 产品选择逻辑，与 CLI update 对齐：
             # retry_products 不为空时直接覆盖，只重跑失败产品
