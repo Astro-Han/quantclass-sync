@@ -381,6 +381,19 @@ def _is_business_day_only_product(product: str) -> bool:
 
     return normalize_product_name(product) in BUSINESS_DAY_ONLY_PRODUCTS
 
+
+def _normalize_cached_api_dates(raw_dates: object, product: str) -> List[str]:
+    """兼容新旧缓存格式，统一转成日期列表。"""
+
+    if isinstance(raw_dates, str):
+        items = [raw_dates]
+    elif isinstance(raw_dates, (list, tuple, set)):
+        items = [str(x) for x in raw_dates]
+    else:
+        items = []
+    return _normalize_date_queue(items, product=product, apply_business_day_filter=False)
+
+
 def _normalize_date_queue(
     raw_dates: Sequence[str],
     *,
@@ -499,7 +512,7 @@ def _resolve_requested_dates_for_plan(
     t_product_start: float,
     catch_up_to_latest: bool = False,
     lock: Optional[threading.Lock] = None,
-    api_date_cache: Optional[Dict[str, Tuple[str, str]]] = None,
+    api_date_cache: Optional[Dict[str, Tuple[List[str], str]]] = None,
 ) -> Tuple[List[str], bool]:
     """
     解析单产品执行日期列表，并处理 timestamp 门控。
@@ -522,8 +535,9 @@ def _resolve_requested_dates_for_plan(
     if api_date_cache:
         cached = api_date_cache.get(product_name) or api_date_cache.get(plan.name)
         if cached:
-            cached_date, checked_at_str = cached
+            cached_dates, checked_at_str = cached
             if _is_cache_fresh(checked_at_str):
+                api_latest_candidates = _normalize_cached_api_dates(cached_dates, product_name)
                 # 计算缓存年龄用于日志
                 try:
                     checked_at = datetime.strptime(checked_at_str, "%Y-%m-%dT%H:%M:%S")
@@ -531,10 +545,9 @@ def _resolve_requested_dates_for_plan(
                 except ValueError:
                     age_seconds = 0.0
                 log_info(
-                    f"[{plan.name}] 使用缓存 API 日期 {cached_date}（{int(age_seconds)}s 前查询）",
+                    f"[{plan.name}] 使用缓存 API 日期 {api_latest_candidates[-1]}（{int(age_seconds)}s 前查询）",
                     event="PRODUCT_PLAN", decision="cache_hit",
                 )
-                api_latest_candidates = [cached_date]
                 cache_hit = True
 
     if not cache_hit:
@@ -703,8 +716,14 @@ def _upsert_product_status_after_success(
     status.last_update_time = utc_now_iso()
     status.data_time = actual_time
     status.data_content_time = actual_time
-    upsert_product_status(conn, status)
-    write_local_timestamp(command_ctx.data_root, product, actual_time)
+    try:
+        upsert_product_status(conn, status, commit_immediately=False)
+        write_local_timestamp(command_ctx.data_root, product, actual_time)
+        conn.commit()
+    except Exception:
+        with contextlib.suppress(Exception):
+            conn.rollback()
+        raise
 
 
 def _collect_preprocess_source_successes(report: RunReport) -> List[ProductRunResult]:
@@ -916,7 +935,7 @@ def _prefetch_api_dates(
     hid: str,
     headers: Dict[str, str],
     max_workers: int = 8,
-) -> Dict[str, Tuple[str, str]]:
+) -> Dict[str, Tuple[List[str], str]]:
     """并发预取产品的 API 最新日期，写入缓存并返回。
 
     已在缓存中且未过期的产品跳过。失败的产品静默跳过，
@@ -947,18 +966,18 @@ def _prefetch_api_dates(
         f"[预取] 并发查询 {len(uncached)}/{len(products)} 个产品",
         event="PREFETCH", decision="fetching",
     )
-    fetched: Dict[str, str] = {}  # 写入仅在主线程的 as_completed 循环内，无并发写入
+    fetched: Dict[str, List[str]] = {}  # 写入仅在主线程的 as_completed 循环内，无并发写入
     # abort_event 只能拦截尚未开始的 worker，已在执行的请求会自然完成或超时
     abort_event = threading.Event()
     t_start = time.time()
 
-    def _fetch_one(product: str) -> Tuple[str, Optional[str]]:
+    def _fetch_one(product: str) -> Tuple[str, Optional[List[str]]]:
         """单产品 HTTP 查询，401/403 触发全局中止。"""
         if abort_event.is_set():
             return product, None
         try:
-            date_str = get_latest_time(api_base, product, hid, headers)
-            return product, date_str
+            date_list = get_latest_times(api_base, product, hid, headers)
+            return product, date_list
         except FatalRequestError as exc:
             # 认证失败时中止整个预取
             if exc.status_code in (401, 403):
@@ -973,9 +992,9 @@ def _prefetch_api_dates(
         futures = {executor.submit(_fetch_one, p): p for p in uncached}
         for future in as_completed(futures, timeout=30):
             try:
-                product, date_str = future.result()
-                if date_str:
-                    fetched[product] = date_str
+                product, date_list = future.result()
+                if date_list:
+                    fetched[product] = date_list
             except Exception:
                 pass
             if abort_event.is_set():
@@ -999,15 +1018,15 @@ def _prefetch_api_dates(
             pass
     # 合并：保留新鲜的已有缓存 + 刚预取的结果
     checked_at_now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-    merged: Dict[str, Tuple[str, str]] = dict(existing_cache)
-    for product, date_str in fetched.items():
-        merged[product] = (date_str, checked_at_now)
+    merged: Dict[str, Tuple[List[str], str]] = dict(existing_cache)
+    for product, date_list in fetched.items():
+        merged[product] = (list(date_list), checked_at_now)
     return merged
 
 
 def _estimate_sync_workload(
     plans: Sequence[ProductPlan],
-    api_date_cache: Dict[str, Tuple[str, str]],
+    api_date_cache: Dict[str, Tuple[List[str], str]],
     data_root: Path,
     api_call_limit: int = 50,
     course_type: str = "",
@@ -1032,7 +1051,8 @@ def _estimate_sync_workload(
                 local_date = infer_local_date_from_csv(data_root, product_name, rule)
         # 读 API 最新日期（来自预取缓存）
         cached = api_date_cache.get(product_name)
-        api_date = cached[0] if cached else None
+        api_dates = _normalize_cached_api_dates(cached[0], product_name) if cached else []
+        api_date = api_dates[-1] if api_dates else None
         if not api_date:
             # 无 API 日期，计为 1 次
             products_list.append({
@@ -1053,9 +1073,10 @@ def _estimate_sync_workload(
         try:
             local_d = date.fromisoformat(local_date)
             api_d = date.fromisoformat(api_date)
-            gap = max(0, (api_d - local_d).days)
+            calendar_gap = max(0, (api_d - local_d).days)
         except ValueError:
-            gap = 1
+            calendar_gap = 1
+        gap = len(_expected_catchup_dates(local_date, api_date, product_name)) or calendar_gap
         if gap == 0:
             continue  # 已是最新，不计入
         products_list.append({
@@ -1238,7 +1259,6 @@ def _execute_plans(
                     continue
 
                 # 成功路径：total.merge + 状态持久化 + _append_result 在同一锁作用域
-                status_persist_warning = ""
                 with _lock:
                     total.merge(stats)
                     product_stats.merge(stats)  # 累积本产品 stats 用于进度回调
@@ -1250,9 +1270,13 @@ def _execute_plans(
                             actual_time=actual_time,
                         )
                     except Exception as status_exc:
-                        status_persist_warning = (
-                            f"状态持久化失败（已忽略，不影响本次成功结果）: {status_exc}"
-                        )
+                        raise ProductSyncError(
+                            message=(
+                                f"产品 {product} 状态持久化失败；"
+                                f"为避免数据文件与 timestamp/状态库不一致，本次按失败处理。原始错误：{status_exc}"
+                            ),
+                            reason_code=REASON_MERGE_ERROR,
+                        ) from status_exc
                     _append_result(
                         report,
                         product=product,
@@ -1265,12 +1289,6 @@ def _execute_plans(
                         source_path=source_path,
                     )
                     report.phase_sync_seconds += max(0.0, time.time() - t_sync_phase)
-                if status_persist_warning:
-                    log_info(
-                        f"[{plan.name}] {status_persist_warning}",
-                        event="SYNC_WARN",
-                        reason_code=reason_code,
-                    )
                 continue
             except ProductSyncError as exc:
                 # 可预期业务错误：带有明确 reason_code。

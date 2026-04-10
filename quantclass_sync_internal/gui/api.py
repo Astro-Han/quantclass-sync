@@ -451,6 +451,8 @@ class SyncApi:
                     item.get("product", "") for item in failed
                     if isinstance(item, dict) and item.get("product")
                 ]
+                if not retry_products:
+                    return {"started": False, "message": "没有失败产品"}
 
             self._progress = dict(_PROGRESS_INIT)
             self._progress["status"] = "syncing"

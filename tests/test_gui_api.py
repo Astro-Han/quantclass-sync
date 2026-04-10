@@ -1129,6 +1129,33 @@ class TestStartSyncRetryFailedNoFailed(unittest.TestCase):
         self.assertEqual(result["message"], "没有失败产品")
 
 
+class TestStartSyncRetryFailedMalformedEntries(unittest.TestCase):
+    """start_sync(retry_failed=True) 遇到坏数据时不应退化成全量同步。"""
+
+    def test_malformed_failed_products_returns_error(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "user_config.json"
+            config_file.write_text("{}", encoding="utf-8")
+            mock_config = _make_mock_config(tmp_dir)
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.load_user_config_or_raise", return_value=mock_config), \
+                 patch(f"{_API_MOD}.load_catalog_or_raise", return_value=["product-a"]):
+
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+
+                with api._lock:
+                    api._progress["run_summary"] = {
+                        "failed_products": [{"error": "missing product key"}]
+                    }
+
+                result = api.start_sync(retry_failed=True)
+
+        self.assertFalse(result["started"])
+        self.assertEqual(result["message"], "没有失败产品")
+
+
 class TestStartSyncRetryFailedNoSummary(unittest.TestCase):
     """start_sync(retry_failed=True) 但无 run_summary 时返回错误。"""
 

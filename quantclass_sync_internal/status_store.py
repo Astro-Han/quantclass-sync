@@ -37,6 +37,18 @@ _SOURCE_API_CHECK = "api_check"
 _SOURCE_SYNC = "sync"
 
 
+def _normalize_api_date_candidates(raw: object) -> List[str]:
+    """把缓存里的 API 日期载荷规范化为升序去重列表。"""
+
+    if isinstance(raw, str):
+        items = [x for x in re.split(r"[,\s]+", raw) if x]
+    elif isinstance(raw, (list, tuple, set)):
+        items = [str(x).strip() for x in raw if str(x).strip()]
+    else:
+        items = []
+    return sorted({x for x in (normalize_data_date(item) for item in items) if x})
+
+
 def _status_db_has_rows(path: Path) -> bool:
     """判断状态库是否可用（存在 product_status 且至少 1 行）。"""
 
@@ -483,7 +495,7 @@ def _update_product_last_status(log_dir: Path, report: RunReport) -> None:
             tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def update_api_latest_dates(log_dir: Path, api_latest_dates: Dict[str, str]) -> None:
+def update_api_latest_dates(log_dir: Path, api_latest_dates: Dict[str, object]) -> None:
     """将检查更新查到的 API 最新日期写入累积状态文件的 date_time 字段。
 
     只更新 api_latest_dates 中有的产品，其他产品保持不变。
@@ -505,26 +517,31 @@ def update_api_latest_dates(log_dir: Path, api_latest_dates: Dict[str, str]) -> 
         else:
             existing = _scan_reports_for_backfill(log_dir)
         checked_at = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-        for product, date_str in api_latest_dates.items():
+        for product, raw_dates in api_latest_dates.items():
+            candidates = _normalize_api_date_candidates(raw_dates)
+            if not candidates:
+                continue
+            latest_date = candidates[-1]
             if product in existing:
-                existing[product]["date_time"] = date_str
+                existing[product]["date_time"] = latest_date
+                existing[product]["api_dates"] = candidates
                 existing[product]["checked_at"] = checked_at
                 existing[product]["source"] = _SOURCE_API_CHECK
             else:
                 existing[product] = {
                     "status": "", "reason_code": "", "error": "",
-                    "date_time": date_str, "checked_at": checked_at,
+                    "date_time": latest_date, "api_dates": candidates, "checked_at": checked_at,
                     "source": _SOURCE_API_CHECK,
                 }
         with atomic_temp_path(status_path, tag="last_status") as tmp:
             tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def load_api_latest_dates(log_dir: Path) -> Dict[str, Tuple[str, str]]:
+def load_api_latest_dates(log_dir: Path) -> Dict[str, Tuple[List[str], str]]:
     """读取 product_last_status.json 中由 check_updates 写入的 API 最新日期缓存。
 
     只返回 source=="api_check" 的记录（排除同步结果写入的记录）。
-    返回 {product: (date_time, checked_at)}。
+    返回 {product: ([date_time...], checked_at)}。
     文件不存在或解析失败时返回空字典（静默降级）。
     """
     status_path = log_dir / PRODUCT_LAST_STATUS_FILE
@@ -536,14 +553,15 @@ def load_api_latest_dates(log_dir: Path) -> Dict[str, Tuple[str, str]]:
         return {}
     if not isinstance(data, dict):
         return {}
-    result: Dict[str, Tuple[str, str]] = {}
+    result: Dict[str, Tuple[List[str], str]] = {}
     for product, info in data.items():
         if not isinstance(info, dict):
             continue
         # 只读取 check_updates 写入的记录，排除同步结果
         if info.get("source") != _SOURCE_API_CHECK:
             continue
-        dt, ca = info.get("date_time"), info.get("checked_at")
-        if isinstance(dt, str) and isinstance(ca, str):
-            result[product] = (dt, ca)
+        candidates = _normalize_api_date_candidates(info.get("api_dates", info.get("date_time")))
+        checked_at = info.get("checked_at")
+        if candidates and isinstance(checked_at, str):
+            result[product] = (candidates, checked_at)
     return result

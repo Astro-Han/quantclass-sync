@@ -188,15 +188,15 @@ class TestLoadApiLatestDates(unittest.TestCase):
     """load_api_latest_dates 读取缓存日期。"""
 
     def test_normal_read(self):
-        """正常读取，返回 {product: (date_time, checked_at)}。"""
+        """正常读取，返回 {product: ([date_time...], checked_at)}。"""
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             update_api_latest_dates(log_dir, {"prod-a": "2026-03-18", "prod-b": "2026-03-17"})
             cache = load_api_latest_dates(log_dir)
             self.assertIn("prod-a", cache)
             self.assertIn("prod-b", cache)
-            date_time, checked_at = cache["prod-a"]
-            self.assertEqual(date_time, "2026-03-18")
+            date_times, checked_at = cache["prod-a"]
+            self.assertEqual(date_times, ["2026-03-18"])
             self.assertIn("T", checked_at)
 
     def test_missing_file_returns_empty(self):

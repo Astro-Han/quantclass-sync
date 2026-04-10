@@ -309,7 +309,7 @@ class UpdateCatchUpTests(unittest.TestCase):
         self.assertEqual(["2025-12-01", "2025-12-02", "2025-12-15", "2025-12-16", "2025-12-30", "2025-12-31"], queue)
         probe_mock.assert_called_once()
 
-    def test_execute_plans_status_write_failure_keeps_ok_result(self) -> None:
+    def test_execute_plans_status_write_failure_marks_product_error(self) -> None:
         self._write_local_timestamp("2026-02-06")
         report = self._report()
         ctx = self._ctx(dry_run=False)
@@ -352,9 +352,10 @@ class UpdateCatchUpTests(unittest.TestCase):
         finally:
             conn.close()
 
-        self.assertFalse(has_error)
+        self.assertTrue(has_error)
         self.assertEqual(1, total.updated_files)
-        self.assertEqual(["ok"], [item.status for item in report.products])
+        self.assertEqual(["error"], [item.status for item in report.products])
+        self.assertEqual(REASON_MERGE_ERROR, report.products[0].reason_code)
         ts_text = (self.root / self.product / TIMESTAMP_FILE_NAME).read_text(encoding="utf-8")
         self.assertTrue(ts_text.startswith("2026-02-06,"))
 
@@ -722,20 +723,20 @@ class TestPrefetchApiDates(unittest.TestCase):
             api_base="http://fake",
         )
 
-    @patch("quantclass_sync_internal.orchestrator.get_latest_time")
+    @patch("quantclass_sync_internal.orchestrator.get_latest_times")
     def test_fetches_uncached_products(self, mock_get):
-        """无缓存时并发调用 get_latest_time。"""
-        mock_get.return_value = "2026-03-18"
+        """无缓存时并发调用 get_latest_times，并保留候选日期列表。"""
+        mock_get.return_value = ["2026-03-17", "2026-03-18"]
         from quantclass_sync_internal.orchestrator import _prefetch_api_dates
         cache = _prefetch_api_dates(
             products=["prod-a", "prod-b"],
             command_ctx=self._ctx(), hid="hid", headers={},
         )
         self.assertEqual(mock_get.call_count, 2)
-        self.assertIn("prod-a", cache)
-        self.assertIn("prod-b", cache)
+        self.assertEqual(cache["prod-a"][0], ["2026-03-17", "2026-03-18"])
+        self.assertEqual(cache["prod-b"][0], ["2026-03-17", "2026-03-18"])
 
-    @patch("quantclass_sync_internal.orchestrator.get_latest_time")
+    @patch("quantclass_sync_internal.orchestrator.get_latest_times")
     def test_skips_fresh_cache(self, mock_get):
         """缓存新鲜时不调用 HTTP。"""
         from quantclass_sync_internal.orchestrator import _prefetch_api_dates
@@ -749,10 +750,10 @@ class TestPrefetchApiDates(unittest.TestCase):
         mock_get.assert_not_called()
         self.assertIn("prod-a", cache)
 
-    @patch("quantclass_sync_internal.orchestrator.get_latest_time")
+    @patch("quantclass_sync_internal.orchestrator.get_latest_times")
     def test_partial_cache_only_fetches_missing(self, mock_get):
         """部分缓存命中时只查询缺失的产品。"""
-        mock_get.return_value = "2026-03-17"
+        mock_get.return_value = ["2026-03-17"]
         from quantclass_sync_internal.orchestrator import _prefetch_api_dates
         from quantclass_sync_internal.status_store import update_api_latest_dates
         update_api_latest_dates(self.log_dir, {"prod-a": "2026-03-18"})
@@ -765,7 +766,7 @@ class TestPrefetchApiDates(unittest.TestCase):
         self.assertIn("prod-a", cache)
         self.assertIn("prod-b", cache)
 
-    @patch("quantclass_sync_internal.orchestrator.get_latest_time", side_effect=Exception("network"))
+    @patch("quantclass_sync_internal.orchestrator.get_latest_times", side_effect=Exception("network"))
     def test_failure_returns_partial_cache(self, mock_get):
         """预取失败时返回已有缓存，不阻断流程。"""
         from quantclass_sync_internal.orchestrator import _prefetch_api_dates
@@ -776,7 +777,7 @@ class TestPrefetchApiDates(unittest.TestCase):
         # 失败但不抛异常，返回空缓存
         self.assertEqual(cache, {})
 
-    @patch("quantclass_sync_internal.orchestrator.get_latest_time")
+    @patch("quantclass_sync_internal.orchestrator.get_latest_times")
     def test_expired_cache_refetches(self, mock_get):
         """缓存过期时重新查询。"""
         from datetime import datetime, timedelta
@@ -791,15 +792,15 @@ class TestPrefetchApiDates(unittest.TestCase):
                 "date_time": "2026-03-17",
                 "checked_at": expired_time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "source": _SOURCE_API_CHECK,
-            }
-        }))
-        mock_get.return_value = "2026-03-18"
+                }
+            }))
+        mock_get.return_value = ["2026-03-18"]
         cache = _prefetch_api_dates(
             products=["prod-a"],
             command_ctx=self._ctx(), hid="hid", headers={},
         )
         mock_get.assert_called_once()  # 过期缓存触发重查
-        self.assertEqual(cache["prod-a"][0], "2026-03-18")  # 返回新日期
+        self.assertEqual(cache["prod-a"][0], ["2026-03-18"])  # 返回新日期列表
 
 
 class TestEstimateSyncWorkload(unittest.TestCase):
@@ -827,7 +828,7 @@ class TestEstimateSyncWorkload(unittest.TestCase):
         product = "stock-trading-data"
         self._write_timestamp(product, "2026-03-18")
         # API 日期与本地日期相同，gap=0
-        api_date_cache = {"stock-trading-data": ("2026-03-18", "2026-03-18T10:00:00")}
+        api_date_cache = {"stock-trading-data": (["2026-03-18"], "2026-03-18T10:00:00")}
         plans = [self._plan(product)]
         result = _estimate_sync_workload(plans, api_date_cache, self.root, api_call_limit=10)
         self.assertEqual(result.total_calls, 0)
@@ -840,21 +841,21 @@ class TestEstimateSyncWorkload(unittest.TestCase):
         from quantclass_sync_internal.orchestrator import _estimate_sync_workload
         product = "stock-trading-data"
         self._write_timestamp(product, "2026-03-03")  # 落后 15 天
-        api_date_cache = {"stock-trading-data": ("2026-03-18", "2026-03-18T10:00:00")}
+        api_date_cache = {"stock-trading-data": (["2026-03-18"], "2026-03-18T10:00:00")}
         plans = [self._plan(product)]
         result = _estimate_sync_workload(plans, api_date_cache, self.root, api_call_limit=10)
-        self.assertEqual(result.total_calls, 15)
+        self.assertEqual(result.total_calls, 11)
         self.assertTrue(result.needs_confirm)
         self.assertEqual(len(result.products), 1)
-        self.assertEqual(result.products[0]["gap_days"], 15)
-        self.assertEqual(result.products[0]["estimated_calls"], 15)
+        self.assertEqual(result.products[0]["gap_days"], 11)
+        self.assertEqual(result.products[0]["estimated_calls"], 11)
 
     def test_no_timestamp_counts_as_one(self):
         """无 timestamp 且无可推断 CSV 时，预估为 1 次（仅 latest）。"""
         from quantclass_sync_internal.orchestrator import _estimate_sync_workload
         product = "stock-trading-data"
         # 不写 timestamp，产品目录也不存在 CSV
-        api_date_cache = {"stock-trading-data": ("2026-03-18", "2026-03-18T10:00:00")}
+        api_date_cache = {"stock-trading-data": (["2026-03-18"], "2026-03-18T10:00:00")}
         plans = [self._plan(product)]
         result = _estimate_sync_workload(plans, api_date_cache, self.root, api_call_limit=10)
         self.assertEqual(result.total_calls, 1)
@@ -874,6 +875,18 @@ class TestEstimateSyncWorkload(unittest.TestCase):
         self.assertEqual(result.total_calls, 1)
         self.assertEqual(len(result.products), 1)
         self.assertEqual(result.products[0]["api_date"], "")
+        self.assertEqual(result.products[0]["estimated_calls"], 1)
+
+    def test_business_day_product_uses_business_day_gap(self):
+        """业务日产品的预估调用量应排除周末。"""
+        from quantclass_sync_internal.orchestrator import _estimate_sync_workload
+        product = "stock-trading-data"
+        self._write_timestamp(product, "2026-03-06")
+        api_date_cache = {"stock-trading-data": (["2026-03-09"], "2026-03-09T10:00:00")}
+        plans = [self._plan(product)]
+        result = _estimate_sync_workload(plans, api_date_cache, self.root, api_call_limit=10)
+        self.assertEqual(result.total_calls, 1)
+        self.assertEqual(result.products[0]["gap_days"], 1)
         self.assertEqual(result.products[0]["estimated_calls"], 1)
 
 
