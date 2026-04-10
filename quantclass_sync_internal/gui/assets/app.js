@@ -1,3 +1,16 @@
+function deriveSyncStartedAtMs(syncStartedAtMs, backendElapsedSeconds, nowMs) {
+    if (syncStartedAtMs != null) return syncStartedAtMs;
+    const elapsedSeconds = Math.max(0, Number(backendElapsedSeconds) || 0);
+    if (elapsedSeconds > 0) return nowMs - elapsedSeconds * 1000;
+    return nowMs;
+}
+
+function computeDisplayedElapsedSeconds(syncStartedAtMs, backendElapsedSeconds, nowMs) {
+    const elapsedSeconds = Math.max(0, Number(backendElapsedSeconds) || 0);
+    if (syncStartedAtMs == null) return elapsedSeconds;
+    return Math.max(elapsedSeconds, Math.max(0, (nowMs - syncStartedAtMs) / 1000));
+}
+
 // Alpine.js 数据组件
 // 等待 alpine:init 事件注册组件，再等待 pywebviewready 后初始化数据
 document.addEventListener('alpine:init', () => {
@@ -55,6 +68,9 @@ document.addEventListener('alpine:init', () => {
         completed: 0,         // 已完成产品数
         total: 0,             // 总产品数
         elapsedSeconds: 0,    // 已用秒数
+        displayElapsedSeconds: 0, // 顶部展示用耗时，可在前端平滑递增
+        pausedDisplayElapsedSeconds: null, // confirm_needed 时冻结的展示耗时
+        syncStartedAtMs: null, // 前端本地记录的同步起点，用于平滑显示总耗时
         errorMessage: '',     // 错误信息（error 状态时）
         runSummary: null,     // 完成后的摘要对象
         pollTimer: null,      // setTimeout 句柄
@@ -178,6 +194,9 @@ document.addEventListener('alpine:init', () => {
             this.total = 0;
             this.currentProduct = '';
             this.elapsedSeconds = 0;
+            this.displayElapsedSeconds = 0;
+            this.pausedDisplayElapsedSeconds = null;
+            this.syncStartedAtMs = null;
             this.errorMessage = '';
             this.runSummary = null;
             this.syncProducts = [];
@@ -189,16 +208,19 @@ document.addEventListener('alpine:init', () => {
             try {
                 const result = await window.pywebview.api.start_sync();
                 if (result.started) {
+                    this.syncStartedAtMs = Date.now();
                     this.startPolling();
                 } else {
                     // Python 端拒绝启动（如已有任务在跑）
                     this.errorMessage = result.message || '无法启动同步';
                     this.syncStatus = 'error';
+                    this.syncStartedAtMs = null;
                 }
             } catch (e) {
                 console.error('startSync failed:', e);
                 this.errorMessage = String(e);
                 this.syncStatus = 'error';
+                this.syncStartedAtMs = null;
             }
         },
 
@@ -211,6 +233,9 @@ document.addEventListener('alpine:init', () => {
             this.total = 0;
             this.currentProduct = '';
             this.elapsedSeconds = 0;
+            this.displayElapsedSeconds = 0;
+            this.pausedDisplayElapsedSeconds = null;
+            this.syncStartedAtMs = null;
             this.errorMessage = '';
             this.runSummary = null;
             this.syncProducts = [];
@@ -223,15 +248,18 @@ document.addEventListener('alpine:init', () => {
                 // true 表示仅重试失败产品
                 const result = await window.pywebview.api.start_sync(true);
                 if (result.started) {
+                    this.syncStartedAtMs = Date.now();
                     this.startPolling();
                 } else {
                     this.errorMessage = result.message || '无法启动同步';
                     this.syncStatus = 'error';
+                    this.syncStartedAtMs = null;
                 }
             } catch (e) {
                 console.error('retryFailed failed:', e);
                 this.errorMessage = String(e);
                 this.syncStatus = 'error';
+                this.syncStartedAtMs = null;
             }
         },
 
@@ -252,7 +280,7 @@ document.addEventListener('alpine:init', () => {
                     this.currentProduct = p.current_product || '';
                     this.completed = p.completed || 0;
                     this.total = p.total || 0;
-                    this.elapsedSeconds = p.elapsed_seconds || 0;
+                    this.syncElapsedFromProgress(p);
 
                     // 更新产品列表和全部产品名
                     if (p.products && Array.isArray(p.products)) {
@@ -266,7 +294,8 @@ document.addEventListener('alpine:init', () => {
                     if (p.status === 'confirm_needed' && p.estimate) {
                         this.estimateData = p.estimate;
                         this.postprocessing = false;
-                        // 不切换 syncStatus，继续轮询等待用户点击确认/取消
+                        this.pollTimer = null;
+                        return; // 等待用户确认，不再继续轮询
                     } else if (p.status === 'postprocessing') {
                         this.postprocessing = true;
                         this.postprocessDetail = p.postprocess_detail || '';
@@ -275,6 +304,7 @@ document.addEventListener('alpine:init', () => {
                         this.postprocessing = false;
                         this.postprocessDetail = '';
                         this.estimateData = null;
+                        this.syncStartedAtMs = null;
                         this.runSummary = p.run_summary;
                         this.historyLoaded = false; // 有新运行，下次切历史页时刷新
                         this.checkUpdateResult = null; // 同步后清除检查更新结果
@@ -285,10 +315,19 @@ document.addEventListener('alpine:init', () => {
                         this.postprocessing = false;
                         this.postprocessDetail = '';
                         this.estimateData = null;
+                        this.syncStartedAtMs = null;
                         this.errorMessage = p.error_message || '同步失败';
                         this.runSummary = p.run_summary;  // 部分失败时也携带摘要
                         this.historyLoaded = false;
                         this.checkUpdateResult = null;
+                        this.pollTimer = null;
+                        return; // 终态，不再调度下次轮询
+                    } else if (p.status === 'idle') {
+                        this.syncStatus = 'idle';
+                        this.postprocessing = false;
+                        this.postprocessDetail = '';
+                        this.estimateData = null;
+                        this.syncStartedAtMs = null;
                         this.pollTimer = null;
                         return; // 终态，不再调度下次轮询
                     }
@@ -318,11 +357,15 @@ document.addEventListener('alpine:init', () => {
             this.completed = 0;
             this.total = 0;
             this.elapsedSeconds = 0;
+            this.displayElapsedSeconds = 0;
+            this.pausedDisplayElapsedSeconds = null;
+            this.syncStartedAtMs = null;
             this.errorMessage = '';
             this.runSummary = null;
             this.syncProducts = [];
             this.allProducts = [];
             this.estimateData = null;
+            this.pausedDisplayElapsedSeconds = null;
         },
 
         // ===== API 调用量确认 =====
@@ -331,10 +374,13 @@ document.addEventListener('alpine:init', () => {
         async confirmSync() {
             try {
                 await window.pywebview.api.confirm_sync();
+                this.estimateData = null;
+                this.pausedDisplayElapsedSeconds = null;
+                this.syncStartedAtMs = Date.now() - this.displayElapsedSeconds * 1000;
+                this.startPolling();
             } catch (e) {
                 console.error('confirmSync failed:', e);
             }
-            this.estimateData = null;
         },
 
         // 用户点击"取消"：通知后台线程取消，await 完成后再切状态（避免请求期间状态已变）
@@ -346,8 +392,44 @@ document.addEventListener('alpine:init', () => {
             } finally {
                 this.estimateData = null;
                 this.syncStatus = 'idle';
+                this.pausedDisplayElapsedSeconds = null;
+                this.syncStartedAtMs = null;
                 this.stopPolling();
             }
+        },
+
+        syncElapsedFromProgress(progress) {
+            const backendElapsedSeconds = progress && progress.elapsed_seconds != null
+                ? progress.elapsed_seconds
+                : 0;
+            const status = progress && progress.status ? progress.status : '';
+            this.elapsedSeconds = backendElapsedSeconds;
+            if (status === 'confirm_needed') {
+                if (this.pausedDisplayElapsedSeconds == null) {
+                    this.pausedDisplayElapsedSeconds = this.displayElapsedSeconds > 0
+                        ? this.displayElapsedSeconds
+                        : backendElapsedSeconds;
+                }
+                this.displayElapsedSeconds = this.pausedDisplayElapsedSeconds;
+                this.syncStartedAtMs = null;
+                return;
+            }
+            this.pausedDisplayElapsedSeconds = null;
+            if (status === 'done' || status === 'error' || status === 'idle') {
+                this.displayElapsedSeconds = backendElapsedSeconds;
+                return;
+            }
+            const nowMs = Date.now();
+            this.syncStartedAtMs = deriveSyncStartedAtMs(
+                this.syncStartedAtMs,
+                backendElapsedSeconds,
+                nowMs,
+            );
+            this.displayElapsedSeconds = computeDisplayedElapsedSeconds(
+                this.syncStartedAtMs,
+                backendElapsedSeconds,
+                nowMs,
+            );
         },
 
         // ===== 格式化工具函数 =====
