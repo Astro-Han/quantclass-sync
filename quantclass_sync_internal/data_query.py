@@ -176,6 +176,8 @@ def get_products_overview(
         last_reason = last.get("reason_code", "")
         last_source = last.get("source", "")
         last_date = _parse_date(last.get("date_time", ""))
+        cached_api_date = _parse_date(last.get("api_date_time", ""))
+        cached_api_anchor = _parse_date(last.get("api_checked_at", "")) or cached_api_date
         freshness_anchor = _parse_date(last.get("checked_at", "")) or last_date
         last_result_fresh = (
             freshness_anchor is not None
@@ -187,7 +189,7 @@ def get_products_overview(
         if api_date is not None:
             # 同一最新日期已在同步阶段确认无有效输出时，不再把它计为待更新。
             if (
-                last_source == "sync"
+                last_status == "skipped"
                 and last_reason == REASON_NO_VALID_OUTPUT
                 and last_result_fresh
                 and last_date == api_date
@@ -199,14 +201,16 @@ def get_products_overview(
         else:
             # 用缓存的 API 日期作为参考，避免周末/假日误报落后；
             # 缓存超过宽限期或无缓存时降级回 today，提示可能有新数据。
-            # 仅排除明确来自同步结果(source="sync")的 date_time；
-            # 旧安装缺少 source 字段时保持兼容，仍沿用原缓存逻辑。
-            cached_api_date = last_date if last_source != "sync" else None
-            cache_fresh = (
-                cached_api_date is not None
-                and freshness_anchor is not None
-                and (today - freshness_anchor).days <= _STALE_GRACE_DAYS
-            )
+            # 新格式优先读取专用 API 缓存字段；旧格式继续兼容非 sync 来源的 date_time。
+            if cached_api_date is not None and cached_api_anchor is not None:
+                cache_fresh = (today - cached_api_anchor).days <= _STALE_GRACE_DAYS
+            else:
+                cached_api_date = last_date if last_source != "sync" else None
+                cache_fresh = (
+                    cached_api_date is not None
+                    and freshness_anchor is not None
+                    and (today - freshness_anchor).days <= _STALE_GRACE_DAYS
+                )
             # 无有效缓存时，A 股产品用交易日历找最近交易日，避免周末误报
             if _is_a_stock_product(product) and trading_calendar:
                 trading_ref = _last_trading_day(trading_calendar, today)

@@ -523,14 +523,27 @@ def update_api_latest_dates(log_dir: Path, api_latest_dates: Dict[str, object]) 
                 continue
             latest_date = candidates[-1]
             if product in existing:
-                existing[product]["date_time"] = latest_date
                 existing[product]["api_dates"] = candidates
-                existing[product]["checked_at"] = checked_at
-                existing[product]["source"] = _SOURCE_API_CHECK
+                existing[product]["api_date_time"] = latest_date
+                existing[product]["api_checked_at"] = checked_at
+                has_sync_payload = any(
+                    bool(existing[product].get(field))
+                    for field in ("status", "reason_code", "error")
+                )
+                if has_sync_payload:
+                    existing[product]["source"] = _SOURCE_SYNC
+                if not has_sync_payload and existing[product].get("source") != _SOURCE_SYNC:
+                    existing[product]["date_time"] = latest_date
+                    existing[product]["checked_at"] = checked_at
+                    existing[product]["source"] = _SOURCE_API_CHECK
             else:
                 existing[product] = {
                     "status": "", "reason_code": "", "error": "",
-                    "date_time": latest_date, "api_dates": candidates, "checked_at": checked_at,
+                    "date_time": latest_date,
+                    "checked_at": checked_at,
+                    "api_date_time": latest_date,
+                    "api_checked_at": checked_at,
+                    "api_dates": candidates,
                     "source": _SOURCE_API_CHECK,
                 }
         with atomic_temp_path(status_path, tag="last_status") as tmp:
@@ -557,11 +570,18 @@ def load_api_latest_dates(log_dir: Path) -> Dict[str, Tuple[List[str], str]]:
     for product, info in data.items():
         if not isinstance(info, dict):
             continue
-        # 只读取 check_updates 写入的记录，排除同步结果
+        candidates = _normalize_api_date_candidates(
+            info.get("api_dates", info.get("api_date_time", info.get("date_time")))
+        )
+        checked_at = info.get("api_checked_at") or info.get("checked_at")
+        # 新格式：只要显式存在 api_checked_at / api_date_time，即视为 API 检查缓存。
+        if info.get("api_checked_at") or info.get("api_date_time"):
+            if candidates and isinstance(checked_at, str):
+                result[product] = (candidates, checked_at)
+            continue
+        # 旧格式：只读取 source=="api_check" 的记录，排除同步结果。
         if info.get("source") != _SOURCE_API_CHECK:
             continue
-        candidates = _normalize_api_date_candidates(info.get("api_dates", info.get("date_time")))
-        checked_at = info.get("checked_at")
         if candidates and isinstance(checked_at, str):
             result[product] = (candidates, checked_at)
     return result

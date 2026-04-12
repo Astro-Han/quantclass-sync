@@ -14,6 +14,7 @@ from quantclass_sync_internal.data_query import (
     get_run_detail,
     get_run_history,
 )
+from quantclass_sync_internal.status_store import update_api_latest_dates
 
 
 class TestDaysBehind(unittest.TestCase):
@@ -358,6 +359,65 @@ class TestGetProductsOverview(unittest.TestCase):
                 "date_time": "2026-03-11",
                 "checked_at": "2026-03-13T09:00:00",
                 "source": "sync",
+            }
+        })
+
+        import unittest.mock
+        with unittest.mock.patch(
+            "quantclass_sync_internal.data_query.report_dir_path",
+            return_value=self.log_dir,
+        ):
+            overview = get_products_overview(
+                self.data_root,
+                ["coin-cap"],
+                today=date(2026, 3, 13),
+                api_latest_dates={"coin-cap": "2026-03-11"},
+            )
+
+        self.assertEqual(overview[0]["days_behind"], 0)
+        self.assertEqual(overview[0]["status_color"], "green")
+
+    def test_overview_same_api_date_after_check_updates_keeps_no_valid_output_suppressed(self):
+        """check_updates 写入 API 缓存后，仍保留 same-date no_valid_output 抑制。"""
+        self._write_timestamp("coin-cap", "2026-03-10")
+        self._write_product_last_status({
+            "coin-cap": {
+                "status": "skipped",
+                "reason_code": "no_valid_output",
+                "error": "同步未产生可用输出，已跳过状态推进。",
+                "date_time": "2026-03-11",
+                "checked_at": "2026-03-13T09:00:00",
+                "source": "sync",
+            }
+        })
+        update_api_latest_dates(self.log_dir, {"coin-cap": "2026-03-11"})
+
+        import unittest.mock
+        with unittest.mock.patch(
+            "quantclass_sync_internal.data_query.report_dir_path",
+            return_value=self.log_dir,
+        ):
+            overview = get_products_overview(
+                self.data_root,
+                ["coin-cap"],
+                today=date(2026, 3, 13),
+                api_latest_dates={"coin-cap": "2026-03-11"},
+            )
+
+        self.assertEqual(overview[0]["days_behind"], 0)
+        self.assertEqual(overview[0]["status_color"], "green")
+
+    def test_overview_suppresses_same_date_no_valid_output_even_if_source_was_polluted(self):
+        """旧状态文件 source 被污染为 api_check 时，same-date no_valid_output 仍应抑制待更新。"""
+        self._write_timestamp("coin-cap", "2026-03-10")
+        self._write_product_last_status({
+            "coin-cap": {
+                "status": "skipped",
+                "reason_code": "no_valid_output",
+                "error": "同步未产生可用输出，已跳过状态推进。",
+                "date_time": "2026-03-11",
+                "checked_at": "2026-03-13T09:00:00",
+                "source": "api_check",
             }
         })
 

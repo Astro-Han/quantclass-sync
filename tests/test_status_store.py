@@ -250,6 +250,56 @@ class TestLoadApiLatestDates(unittest.TestCase):
             cache_after = load_api_latest_dates(log_dir)
             self.assertNotIn("prod-a", cache_after)
 
+    def test_api_check_does_not_overwrite_sync_provenance(self):
+        """已有 sync 结果时，check_updates 只补 API 缓存，不覆盖同步来源。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            report = _new_report("test", mode="network")
+            _append_result(
+                report,
+                product="prod-a",
+                status="skipped",
+                reason_code="no_valid_output",
+                error="同步未产生可用输出，已跳过状态推进。",
+                date_time="2026-03-18",
+            )
+            _update_product_last_status(log_dir, report)
+
+            update_api_latest_dates(log_dir, {"prod-a": "2026-03-18"})
+
+            status = json.loads((log_dir / "product_last_status.json").read_text(encoding="utf-8"))
+            entry = status["prod-a"]
+            self.assertEqual(entry["source"], _SOURCE_SYNC)
+            self.assertEqual(entry["reason_code"], "no_valid_output")
+            self.assertEqual(entry["status"], "skipped")
+            self.assertEqual(entry["api_dates"], ["2026-03-18"])
+            self.assertEqual(entry["api_date_time"], "2026-03-18")
+            self.assertIn("T", entry["api_checked_at"])
+
+            cache = load_api_latest_dates(log_dir)
+            self.assertIn("prod-a", cache)
+
+    def test_api_check_heals_old_polluted_source_to_sync(self):
+        """旧版本把 source 污染成 api_check 时，下次检查更新应自愈回 sync。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_dir = Path(tmpdir)
+            status_path = log_dir / "product_last_status.json"
+            status_path.write_text(json.dumps({
+                "prod-a": {
+                    "status": "skipped",
+                    "reason_code": "no_valid_output",
+                    "error": "同步未产生可用输出，已跳过状态推进。",
+                    "date_time": "2026-03-18",
+                    "checked_at": "2026-03-18T10:00:00",
+                    "source": _SOURCE_API_CHECK,
+                }
+            }), encoding="utf-8")
+
+            update_api_latest_dates(log_dir, {"prod-a": "2026-03-18"})
+
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(status["prod-a"]["source"], _SOURCE_SYNC)
+
 
 if __name__ == "__main__":
     unittest.main()
