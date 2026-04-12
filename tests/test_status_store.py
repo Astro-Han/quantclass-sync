@@ -237,8 +237,8 @@ class TestLoadApiLatestDates(unittest.TestCase):
             self.assertIn("prod-a", cache)
             self.assertNotIn("prod-b", cache)
 
-    def test_source_residual_after_sync_overwrite(self):
-        """先 api_check 写入再同步覆盖，旧 source 不残留。"""
+    def test_sync_overwrite_preserves_api_cache_fields(self):
+        """先 api_check 再同步时，保留 API 缓存字段但同步来源仍为 sync。"""
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir)
             update_api_latest_dates(log_dir, {"prod-a": "2026-03-18"})
@@ -247,8 +247,15 @@ class TestLoadApiLatestDates(unittest.TestCase):
             report = _new_report("test", mode="network")
             _append_result(report, product="prod-a", status="ok", date_time="2026-03-17")
             _update_product_last_status(log_dir, report)
+            status = json.loads((log_dir / "product_last_status.json").read_text(encoding="utf-8"))
+            entry = status["prod-a"]
+            self.assertEqual(entry["source"], _SOURCE_SYNC)
+            self.assertEqual(entry["date_time"], "2026-03-17")
+            self.assertEqual(entry["api_date_time"], "2026-03-18")
+            self.assertIn("api_checked_at", entry)
             cache_after = load_api_latest_dates(log_dir)
-            self.assertNotIn("prod-a", cache_after)
+            self.assertIn("prod-a", cache_after)
+            self.assertEqual(cache_after["prod-a"][0], ["2026-03-18"])
 
     def test_api_check_does_not_overwrite_sync_provenance(self):
         """已有 sync 结果时，check_updates 只补 API 缓存，不覆盖同步来源。"""

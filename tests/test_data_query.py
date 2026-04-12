@@ -6,6 +6,7 @@ import unittest
 from datetime import date
 from pathlib import Path
 
+from quantclass_sync_internal.reporting import _append_result, _new_report
 from quantclass_sync_internal.data_query import (
     _days_behind,
     _status_color,
@@ -14,7 +15,7 @@ from quantclass_sync_internal.data_query import (
     get_run_detail,
     get_run_history,
 )
-from quantclass_sync_internal.status_store import update_api_latest_dates
+from quantclass_sync_internal.status_store import _update_product_last_status, update_api_latest_dates
 
 
 class TestDaysBehind(unittest.TestCase):
@@ -402,6 +403,35 @@ class TestGetProductsOverview(unittest.TestCase):
                 ["coin-cap"],
                 today=date(2026, 3, 13),
                 api_latest_dates={"coin-cap": "2026-03-11"},
+            )
+
+        self.assertEqual(overview[0]["days_behind"], 0)
+        self.assertEqual(overview[0]["status_color"], "green")
+
+    def test_overview_preserves_green_after_sync_when_api_cache_exists(self):
+        """同步结果为 up_to_date 时，若保留 API 缓存字段，总览仍应显示绿色。"""
+        self._write_timestamp("coin-cap", "2026-03-11")
+        update_api_latest_dates(self.log_dir, {"coin-cap": "2026-03-11"})
+        report = _new_report("test", mode="network")
+        _append_result(
+            report,
+            product="coin-cap",
+            status="skipped",
+            reason_code="up_to_date",
+            error="本地 timestamp 已是最新（local=2026-03-11, api=2026-03-11）。",
+            date_time="2026-03-11",
+        )
+        _update_product_last_status(self.log_dir, report)
+
+        import unittest.mock
+        with unittest.mock.patch(
+            "quantclass_sync_internal.data_query.report_dir_path",
+            return_value=self.log_dir,
+        ):
+            overview = get_products_overview(
+                self.data_root,
+                ["coin-cap"],
+                today=date(2026, 3, 13),
             )
 
         self.assertEqual(overview[0]["days_behind"], 0)

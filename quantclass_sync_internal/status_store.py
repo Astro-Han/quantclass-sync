@@ -482,7 +482,18 @@ def _update_product_last_status(log_dir: Path, report: RunReport) -> None:
                 pass
         # 用本轮结果覆盖（同产品多次出现时后面的覆盖前面的）
         for item in report.products:
-            existing[item.product] = {
+            previous = existing.get(item.product, {}) if isinstance(existing.get(item.product), dict) else {}
+            api_date_time = previous.get("api_date_time")
+            api_checked_at = previous.get("api_checked_at")
+            api_dates = previous.get("api_dates")
+            # 兼容旧格式：若上一版只有 api_check 的 date_time/checked_at，也在同步覆盖时提升为专用 API 缓存字段。
+            if previous.get("source") == _SOURCE_API_CHECK:
+                api_date_time = api_date_time or previous.get("date_time")
+                api_checked_at = api_checked_at or previous.get("checked_at")
+                if api_dates is None and api_date_time:
+                    api_dates = [api_date_time]
+
+            merged = {
                 "status": item.status,
                 "reason_code": item.reason_code,
                 "error": item.error,
@@ -490,6 +501,13 @@ def _update_product_last_status(log_dir: Path, report: RunReport) -> None:
                 "checked_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
                 "source": _SOURCE_SYNC,
             }
+            if api_date_time:
+                merged["api_date_time"] = api_date_time
+            if api_checked_at:
+                merged["api_checked_at"] = api_checked_at
+            if api_dates:
+                merged["api_dates"] = api_dates
+            existing[item.product] = merged
         # 原子写入
         with atomic_temp_path(status_path, tag="last_status") as tmp:
             tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
