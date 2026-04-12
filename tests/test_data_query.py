@@ -126,6 +126,12 @@ class TestGetProductsOverview(unittest.TestCase):
             json.dumps(existing, ensure_ascii=False), encoding="utf-8"
         )
 
+    def _write_product_last_status(self, payload: dict) -> None:
+        """直接写入 product_last_status.json，用于覆盖 source/checked_at 等字段。"""
+        (self.log_dir / "product_last_status.json").write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+        )
+
     def test_basic_overview(self):
         """有 timestamp + 有报告的基本场景。"""
         self._write_timestamp("stock-trading-data", "2026-03-13")
@@ -308,6 +314,63 @@ class TestGetProductsOverview(unittest.TestCase):
                 ["stock-trading-data"],
                 today=date(2026, 3, 15),
                 api_latest_dates={"stock-trading-data": "2026-03-14"},
+            )
+
+        self.assertEqual(overview[0]["days_behind"], 0)
+        self.assertEqual(overview[0]["status_color"], "green")
+
+    def test_overview_sync_source_date_is_not_used_as_api_cache(self):
+        """sync 写入的 date_time 不能当作 API 缓存日期使用。"""
+        self._write_timestamp("coin-cap", "2026-03-10")
+        self._write_product_last_status({
+            "coin-cap": {
+                "status": "skipped",
+                "reason_code": "no_valid_output",
+                "error": "同步未产生可用输出，已跳过状态推进。",
+                "date_time": "2026-03-11",
+                "checked_at": "2026-03-13T09:00:00",
+                "source": "sync",
+            }
+        })
+
+        import unittest.mock
+        with unittest.mock.patch(
+            "quantclass_sync_internal.data_query.report_dir_path",
+            return_value=self.log_dir,
+        ):
+            overview = get_products_overview(
+                self.data_root,
+                ["coin-cap"],
+                today=date(2026, 3, 13),
+            )
+
+        self.assertEqual(overview[0]["days_behind"], 3)
+        self.assertEqual(overview[0]["status_color"], "yellow")
+
+    def test_overview_same_api_date_after_no_valid_output_is_not_pending(self):
+        """同一 API 日期已确认 no_valid_output 时，不再标记为待更新。"""
+        self._write_timestamp("coin-cap", "2026-03-10")
+        self._write_product_last_status({
+            "coin-cap": {
+                "status": "skipped",
+                "reason_code": "no_valid_output",
+                "error": "同步未产生可用输出，已跳过状态推进。",
+                "date_time": "2026-03-11",
+                "checked_at": "2026-03-13T09:00:00",
+                "source": "sync",
+            }
+        })
+
+        import unittest.mock
+        with unittest.mock.patch(
+            "quantclass_sync_internal.data_query.report_dir_path",
+            return_value=self.log_dir,
+        ):
+            overview = get_products_overview(
+                self.data_root,
+                ["coin-cap"],
+                today=date(2026, 3, 13),
+                api_latest_dates={"coin-cap": "2026-03-11"},
             )
 
         self.assertEqual(overview[0]["days_behind"], 0)

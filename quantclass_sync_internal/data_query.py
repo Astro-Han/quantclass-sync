@@ -15,7 +15,7 @@ from .config import atomic_temp_path
 from .constants import (
     ENCODING_CANDIDATES, KNOWN_DATASETS, TIMESTAMP_FILE_NAME,
     BUSINESS_DAY_ONLY_PRODUCTS, FINANCIAL_PRODUCTS, NOTICE_PRODUCTS,
-    INFRA_PRODUCTS,
+    INFRA_PRODUCTS, REASON_NO_VALID_OUTPUT,
 )
 from .csv_engine import write_csv_payload
 from .models import CsvPayload, log_error, RULES
@@ -173,17 +173,35 @@ def get_products_overview(
         local_date = read_local_timestamp_date(data_root, product)
         last = last_results.get(product, {})
         last_status = last.get("status", "")
+        last_reason = last.get("reason_code", "")
+        last_source = last.get("source", "")
+        last_date = _parse_date(last.get("date_time", ""))
+        freshness_anchor = _parse_date(last.get("checked_at", "")) or last_date
+        last_result_fresh = (
+            freshness_anchor is not None
+            and (today - freshness_anchor).days <= _STALE_GRACE_DAYS
+        )
 
         # 优先用传入的 API 实时日期（检查更新按钮场景）
         api_date = _parse_date((api_latest_dates or {}).get(product, ""))
         if api_date is not None:
-            ref_date = api_date
+            # 同一最新日期已在同步阶段确认无有效输出时，不再把它计为待更新。
+            if (
+                last_source == "sync"
+                and last_reason == REASON_NO_VALID_OUTPUT
+                and last_result_fresh
+                and last_date == api_date
+                and _parse_date(local_date) is not None
+            ):
+                ref_date = _parse_date(local_date)
+            else:
+                ref_date = api_date
         else:
             # 用缓存的 API 日期作为参考，避免周末/假日误报落后；
             # 缓存超过宽限期或无缓存时降级回 today，提示可能有新数据。
-            # 宽限期从"上次查询/同步时间"算起（checked_at 优先，降级到 date_time）
-            cached_api_date = _parse_date(last.get("date_time", ""))
-            freshness_anchor = _parse_date(last.get("checked_at", "")) or cached_api_date
+            # 仅排除明确来自同步结果(source="sync")的 date_time；
+            # 旧安装缺少 source 字段时保持兼容，仍沿用原缓存逻辑。
+            cached_api_date = last_date if last_source != "sync" else None
             cache_fresh = (
                 cached_api_date is not None
                 and freshness_anchor is not None
