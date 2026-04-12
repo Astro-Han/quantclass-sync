@@ -408,6 +408,35 @@ class TestGetProductsOverview(unittest.TestCase):
         self.assertEqual(overview[0]["days_behind"], 0)
         self.assertEqual(overview[0]["status_color"], "green")
 
+    def test_overview_cached_api_date_after_no_valid_output_is_not_pending(self):
+        """更新后仅依赖缓存 API 日期时，same-date no_valid_output 仍不应显示落后。"""
+        self._write_timestamp("coin-cap", "2026-03-10")
+        update_api_latest_dates(self.log_dir, {"coin-cap": "2026-03-11"})
+        report = _new_report("test", mode="network")
+        _append_result(
+            report,
+            product="coin-cap",
+            status="skipped",
+            reason_code="no_valid_output",
+            error="同步未产生可用输出，已跳过状态推进。",
+            date_time="2026-03-11",
+        )
+        _update_product_last_status(self.log_dir, report)
+
+        import unittest.mock
+        with unittest.mock.patch(
+            "quantclass_sync_internal.data_query.report_dir_path",
+            return_value=self.log_dir,
+        ):
+            overview = get_products_overview(
+                self.data_root,
+                ["coin-cap"],
+                today=date(2026, 3, 13),
+            )
+
+        self.assertEqual(overview[0]["days_behind"], 0)
+        self.assertEqual(overview[0]["status_color"], "green")
+
     def test_overview_preserves_green_after_sync_when_api_cache_exists(self):
         """同步结果为 up_to_date 时，若保留 API 缓存字段，总览仍应显示绿色。"""
         self._write_timestamp("coin-cap", "2026-03-11")

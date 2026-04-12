@@ -211,8 +211,16 @@ def get_products_overview(
                     and freshness_anchor is not None
                     and (today - freshness_anchor).days <= _STALE_GRACE_DAYS
                 )
+            if (
+                cache_fresh
+                and last_status == "skipped"
+                and last_reason == REASON_NO_VALID_OUTPUT
+                and last_date == cached_api_date
+                and _parse_date(local_date) is not None
+            ):
+                ref_date = _parse_date(local_date)
             # 无有效缓存时，A 股产品用交易日历找最近交易日，避免周末误报
-            if _is_a_stock_product(product) and trading_calendar:
+            elif _is_a_stock_product(product) and trading_calendar:
                 trading_ref = _last_trading_day(trading_calendar, today)
                 ref_date = cached_api_date if cache_fresh else (trading_ref or today)
             else:
