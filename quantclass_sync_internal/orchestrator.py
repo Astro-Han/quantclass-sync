@@ -634,15 +634,15 @@ def _resolve_requested_dates_for_plan(
             if should_skip_by_timestamp(inferred, api_latest_date):
                 return _record_gate_skip(
                     date_time=api_latest_date or "",
-                    error=f"CSV 推断日期已是最新（inferred={inferred}, api={api_latest_date}）。",
-                    log_message=f"[{product_name}] CSV 推断门控命中，跳过更新。",
+                    error=f"本地数据推断日期已是最新（inferred={inferred}, api={api_latest_date}）。",
+                    log_message=f"[{product_name}] 本地数据推断门控命中，跳过更新。",
                     inferred_date=inferred,
                     api_latest_date=api_latest_date,
                 )
-            # 有 CSV 数据但无 timestamp，用推断日期走正常回补
+            # 有本地数据但无 timestamp，用推断日期走正常回补
             local_date = inferred
             log_info(
-                f"[{product_name}] 无 timestamp，从 CSV 推断基线日期。",
+                f"[{product_name}] 无 timestamp，从本地数据推断基线日期。",
                 event="PRODUCT_PLAN",
                 inferred_date=inferred,
                 decision="infer_baseline",
