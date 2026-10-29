@@ -10,675 +10,642 @@
   <script defer src="alpine.min.js"></script>
 </head>
 <body>
-  <div class="app" x-data="app()">
+  <div class="app" x-data="app()" @keydown.escape.window="checkUpdateConfirmVisible = false">
 
-    <!-- 顶部导航 -->
-    <header class="header">
-      <span class="header-title">QuantClass Sync</span>
-      <nav class="tabs" x-show="currentView === 'main'">
-        <button
-          class="tab"
-          :class="{ active: tab === 'overview' }"
-          @click="switchTab('overview')"
-        >总览</button>
-        <button
-          class="tab"
-          :class="{ active: tab === 'sync' }"
-          @click="switchTab('sync')"
-        >同步</button>
-        <button
-          class="tab"
-          :class="{ active: tab === 'history' }"
-          @click="switchTab('history')"
-        >历史</button>
-      </nav>
-    </header>
+    <!-- ===== 侧栏 ===== -->
+    <aside class="sidebar" x-show="currentView === 'main'">
+      <div class="sidebar-drag pywebview-drag-region"></div>
+      <div class="sidebar-scroll">
+        <nav class="nav">
+          <button class="nav-item" :class="{ active: page === 'overview' && !category }" @click="category = ''; go('overview')">
+            <span class="icon i-overview"></span>
+            <span class="nav-label">总览</span>
+            <span class="nav-badge" :class="{ bad: summary.red > 0 }" x-show="attentionCount() > 0" x-text="attentionCount()"></span>
+          </button>
+          <button class="nav-item" :class="{ active: page === 'sync' }" @click="go('sync')">
+            <span class="icon i-sync"></span>
+            <span class="nav-label">同步</span>
+            <span class="nav-badge info" x-show="syncStatus === 'syncing'" x-text="total > 0 ? completed + '/' + total : '…'"></span>
+            <span class="nav-badge bad" x-show="syncStatus !== 'syncing' && runSummary && runSummary.error > 0" x-text="runSummary ? runSummary.error : ''"></span>
+          </button>
+          <button class="nav-item" :class="{ active: page === 'history' }" @click="go('history')">
+            <span class="icon i-history"></span>
+            <span class="nav-label">历史记录</span>
+          </button>
+          <button class="nav-item" :class="{ active: page === 'health' }" @click="go('health')">
+            <span class="icon i-health"></span>
+            <span class="nav-label">数据健康</span>
+            <span class="nav-badge info" x-show="healthState === 'checking'" x-text="healthPercent() + '%'"></span>
+            <span class="nav-badge" x-show="healthState === 'done' && healthResult && healthResult.summary.total > 0" x-text="healthResult ? healthResult.summary.total : ''"></span>
+          </button>
+        </nav>
 
-    <!-- ===== Setup 向导 ===== -->
-    <div x-show="currentView === 'setup'" class="setup-container">
-      <div class="setup-card">
-        <h2 class="setup-title">QuantClass Sync 初始设置</h2>
+        <div class="nav-section" x-show="categories().length > 0">数据分类</div>
+        <nav class="nav">
+          <template x-for="c in categories()" :key="c.name">
+            <button class="nav-item" :class="{ active: page === 'overview' && category === c.name }" @click="pickCategory(c.name)">
+              <span class="tile" :style="'--tile:' + c.tile"><span class="icon" :class="c.icon"></span></span>
+              <span class="nav-label" x-text="c.name"></span>
+              <span class="nav-count" :class="{ zero: c.local === 0 }" x-text="c.local"></span>
+            </button>
+          </template>
+        </nav>
+      </div>
 
-        <!-- 错误提示 -->
-        <div class="error-banner" x-show="setupError" x-text="setupError"></div>
+      <div class="sidebar-footer">
+        <button class="dir-button" @click="openDataDir()" :disabled="!canOpenDir"
+                :title="canOpenDir ? '在访达中打开 ' + dataRoot : dataRoot">
+          <span class="icon i-folder"></span>
+          <span class="dir-text">
+            <span class="dir-name" x-text="dataDirName()"></span>
+            <span class="dir-path" x-text="shortPath(dataRoot)"></span>
+          </span>
+        </button>
+        <button class="icon-button" title="账号与数据目录" @click="goToSetup()" :disabled="syncStatus === 'syncing'">
+          <span class="icon i-settings"></span>
+        </button>
+      </div>
+    </aside>
 
-        <!-- 验证警告（保存成功但连通性失败） -->
-        <div class="setup-warning" x-show="setupWarning">
-          <p x-text="setupWarning"></p>
-          <div class="setup-warning-actions">
-            <button class="btn-outline" @click="retrySetup()">重新填写</button>
-            <button class="qs-btn qs-btn-primary" @click="continueAnyway()">仍然继续</button>
+    <!-- ===== 主区域 ===== -->
+    <main class="main" x-show="currentView === 'main'">
+      <header class="toolbar pywebview-drag-region">
+        <div class="toolbar-title pywebview-drag-region">
+          <span x-text="pageTitle()"></span><small x-show="page === 'overview' && category" x-text="category"></small>
+        </div>
+
+        <label class="search" x-show="page === 'overview'">
+          <span class="icon icon-sm i-search"></span>
+          <input type="text" placeholder="搜索产品" x-model="searchText" @keydown.escape="searchText = ''" />
+          <button class="search-clear" x-show="searchText" @click="searchText = ''" title="清除"><span class="icon i-xmark"></span></button>
+        </label>
+
+        <button class="button" x-show="page === 'overview'" @click="checkUpdateConfirmVisible = true"
+                :disabled="checkUpdateLoading || syncStatus === 'syncing'">
+          <span class="status busy" style="width:14px;height:14px" x-show="checkUpdateLoading"></span>
+          <span class="icon i-refresh" x-show="!checkUpdateLoading"></span>
+          <span x-text="checkUpdateLoading ? '检查中…' : '检查更新'"></span>
+        </button>
+
+        <template x-if="syncStatus === 'syncing' && page !== 'sync'">
+          <button class="button primary progress" @click="go('sync')">
+            <span class="status busy"></span>
+            <span x-text="total > 0 ? '同步中 ' + completed + '/' + total : '同步中…'"></span>
+          </button>
+        </template>
+        <template x-if="syncStatus !== 'syncing' && page !== 'sync'">
+          <button class="button primary" @click="startSync()" :disabled="loading && products.length === 0">
+            <span class="icon i-sync"></span>立即同步
+          </button>
+        </template>
+      </header>
+
+      <!-- ===== 总览 ===== -->
+      <section class="page" x-show="page === 'overview'">
+        <div class="page-inner">
+          <div class="loading" x-show="loading && products.length === 0 && !overviewError"><span class="status busy"></span></div>
+
+          <div class="banner tone-bad" x-show="overviewError">
+            <span class="icon i-exclaim"></span>
+            <div class="banner-text">
+              <div class="banner-title">无法读取产品状态</div>
+              <div class="banner-body selectable" x-text="overviewError"></div>
+            </div>
+            <button class="button" @click="goToSetup()">检查配置</button>
+          </div>
+
+          <template x-if="!overviewError && products.length > 0">
+            <div>
+              <div class="hero" :class="overviewTone()">
+                <div class="hero-glyph">
+                  <span class="icon icon-xl" :class="overviewTone() === 'tone-ok' ? 'i-check' : (overviewTone() === 'tone-accent' ? 'i-download' : 'i-exclaim')"></span>
+                </div>
+                <div class="hero-text">
+                  <div class="hero-title" x-text="overviewHeadline()"></div>
+                  <div class="hero-sub" x-text="overviewSub()"></div>
+                </div>
+              </div>
+
+              <div class="banner" :class="checkUpdateResult && checkUpdateResult.isError ? 'tone-bad' : 'tone-accent'" x-show="checkUpdateResult" x-cloak>
+                <span class="icon" :class="checkUpdateResult && checkUpdateResult.isError ? 'i-exclaim' : 'i-refresh'"></span>
+                <div class="banner-text">
+                  <div class="banner-title" x-text="checkUpdateResult && checkUpdateResult.isError ? '检查更新失败' : '已按最新日期刷新状态'"></div>
+                  <div class="banner-body" x-text="checkUpdateResult ? checkUpdateResult.message : ''"></div>
+                </div>
+                <button class="icon-button" title="关闭" @click="checkUpdateResult = null"><span class="icon icon-sm i-xmark"></span></button>
+              </div>
+
+              <div class="filter-bar">
+                <div class="segmented" role="tablist">
+                  <button class="segment" :class="{ active: segment === 'local' }" @click="segment = 'local'">已下载<small x-text="segmentCount('local')"></small></button>
+                  <button class="segment" :class="{ active: segment === 'attention' }" @click="segment = 'attention'">需关注<small x-text="segmentCount('attention')"></small></button>
+                  <button class="segment" :class="{ active: segment === 'fresh' }" @click="segment = 'fresh'">最新<small x-text="segmentCount('fresh')"></small></button>
+                  <button class="segment" :class="{ active: segment === 'missing' }" @click="segment = 'missing'">未下载<small x-text="segmentCount('missing')"></small></button>
+                </div>
+                <button class="chip" x-show="category" @click="category = ''">
+                  <span x-text="category"></span><span class="icon i-xmark"></span>
+                </button>
+              </div>
+
+              <p class="footnote" x-show="segment === 'missing'">从 QuantClass 官网下载全量数据并放进数据目录后，这些产品会被自动识别并保持更新。</p>
+
+              <template x-for="g in groupedProducts()" :key="g.name">
+                <div>
+                  <div class="section-head">
+                    <span class="tile tile-sm" :style="'--tile:' + g.tile"><span class="icon" :class="g.icon"></span></span>
+                    <span x-text="g.name"></span><small x-text="g.items.length + ' 个'"></small>
+                  </div>
+                  <div class="group">
+                    <template x-for="p in g.items" :key="p.name">
+                      <div class="row" :class="{ clickable: p.last_result === 'error' && p.last_error, muted: p.color === 'gray' }"
+                           @click="p.last_result === 'error' && p.last_error && toggleExpanded(p.name)">
+                        <span class="status" :class="statusOf(p).cls"><span class="icon" :class="statusOf(p).icon"></span></span>
+                        <div class="row-main">
+                          <div class="row-title" x-text="p.label"></div>
+                          <div class="row-sub mono" x-text="p.name"></div>
+                          <div class="row-error selectable" :class="{ expanded: expanded[p.name] }"
+                               x-show="p.last_result === 'error' && p.last_error"
+                               x-text="expanded[p.name] ? p.last_error : errorSummary(p.last_error)"></div>
+                        </div>
+                        <div class="row-meta" x-show="p.local_date" x-text="'数据至 ' + formatDataDate(p.local_date)"></div>
+                        <span class="pill" :class="statusOf(p).tone || 'plain'" x-text="statusOf(p).text"></span>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+
+              <div class="empty" x-show="groupedProducts().length === 0">
+                <span class="icon icon-xl" :class="segment === 'attention' && !searchText ? 'i-check' : 'i-search'"></span>
+                <div class="empty-title" x-text="segment === 'attention' && !searchText ? '没有需要关注的产品' : '没有匹配的产品'"></div>
+                <div x-show="searchText">换个关键词试试，支持中文名和产品 ID</div>
+              </div>
+
+              <template x-if="segment === 'local' && missingProducts().length > 0">
+                <div>
+                  <button class="disclosure" :class="{ open: showMissing }" @click="showMissing = !showMissing">
+                    <span class="icon i-chevron"></span>未下载的产品<small x-text="missingProducts().length + ' 个'"></small>
+                  </button>
+                  <div x-show="showMissing">
+                    <div class="group">
+                      <template x-for="p in missingProducts()" :key="'missing-' + p.name">
+                        <div class="row compact muted">
+                          <span class="status idle"><span class="icon i-download"></span></span>
+                          <div class="row-main">
+                            <div class="row-title" x-text="p.label"></div>
+                            <div class="row-sub mono" x-text="p.name"></div>
+                          </div>
+                          <span class="row-meta" x-text="categoryOf(p)"></span>
+                        </div>
+                      </template>
+                    </div>
+                    <p class="footnote">从 QuantClass 官网下载全量数据并放进数据目录后，这些产品会被自动识别并保持更新。</p>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+      </section>
+
+      <!-- ===== 同步 ===== -->
+      <section class="page" x-show="page === 'sync'">
+        <div class="page-inner">
+
+          <!-- 空闲 -->
+          <template x-if="syncStatus === 'idle'">
+            <div>
+              <div class="hero tone-accent">
+                <div class="hero-glyph"><span class="icon icon-xl i-sync"></span></div>
+                <div class="hero-text">
+                  <div class="hero-title">准备同步</div>
+                  <div class="hero-sub"
+                       x-text="'将检查 ' + localProducts().length + ' 个已下载产品' + (attentionCount() > 0 ? '，其中 ' + attentionCount() + ' 个落后于最新数据' : '，目前都是最新的')"></div>
+                </div>
+                <div class="hero-actions">
+                  <button class="button primary large" @click="startSync()" :disabled="localProducts().length === 0">开始同步</button>
+                </div>
+              </div>
+              <p class="footnote" style="margin-top:-12px">本地落后多天时会按交易日自动补齐缺口，每个产品每天会消耗 API 下载次数。</p>
+
+              <template x-if="lastRun">
+                <div>
+                  <div class="section-head"><span>上次同步</span><small x-text="formatRelative(lastRun.started_at)"></small></div>
+                  <div class="group">
+                    <div class="row compact">
+                      <span class="status" :class="lastRun.error > 0 ? 'bad' : 'ok'"><span class="icon" :class="lastRun.error > 0 ? 'i-xmark' : 'i-check'"></span></span>
+                      <div class="row-main stats">
+                        <span class="ok">成功 <b x-text="lastRun.ok"></b></span>
+                        <span class="bad">失败 <b x-text="lastRun.error"></b></span>
+                        <span>跳过 <b x-text="lastRun.skipped"></b></span>
+                      </div>
+                      <span class="row-meta" x-text="'耗时 ' + formatDuration(lastRun.duration_seconds)"></span>
+                    </div>
+                    <template x-for="fp in (lastRun.failed_products || [])" :key="'lf-' + fp.product">
+                      <div class="row">
+                        <span class="status bad"><span class="icon i-xmark"></span></span>
+                        <div class="row-main">
+                          <div class="row-title" x-text="labelOf(fp.product)"></div>
+                          <div class="row-error selectable" :title="fp.error" x-text="errorSummary(fp.error)"></div>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </template>
+
+          <!-- 同步中 -->
+          <template x-if="syncStatus === 'syncing'">
+            <div>
+              <div class="hero">
+                <div class="ring" x-show="total > 0">
+                  <svg viewBox="0 0 52 52"><circle class="track" cx="26" cy="26" r="22.5"></circle><circle class="value" cx="26" cy="26" r="22.5" stroke-dasharray="141.37" :stroke-dashoffset="ringOffset()"></circle></svg>
+                  <span x-text="progressPercent() + '%'"></span>
+                </div>
+                <div class="hero-glyph tone-accent" x-show="total === 0"><span class="status busy" style="width:24px;height:24px"></span></div>
+                <div class="hero-text">
+                  <div class="hero-title" x-text="postprocessing ? '正在后处理' : (estimateData ? '等待确认' : '正在同步')"></div>
+                  <div class="hero-sub">
+                    <span x-show="postprocessing" x-text="postprocessDetail ? postprocessDetail + '…' : '整理数据中…'"></span>
+                    <span x-show="!postprocessing && total === 0">正在准备产品清单…</span>
+                    <span x-show="!postprocessing && total > 0" x-text="'已完成 ' + completed + ' / ' + total + ' 个产品'"></span>
+                    <span x-text="' · 已用 ' + formatDuration(displayElapsedSeconds)"></span>
+                    <span x-show="estimatedRemaining() !== '--' && !postprocessing" x-text="' · 预计还需 ' + estimatedRemaining()"></span>
+                  </div>
+                </div>
+              </div>
+              <div class="bar sync-progress" x-show="total > 0"><div class="bar-fill" :style="'width:' + progressPercent() + '%'"></div></div>
+
+              <div class="section-head" x-show="syncProducts.length > 0 || waitingProducts().length > 0"><span>产品</span></div>
+              <div class="group" x-show="syncProducts.length > 0 || waitingProducts().length > 0">
+                <template x-for="sp in syncProducts.slice().reverse()" :key="sp.name">
+                  <div class="row compact">
+                    <span class="status" :class="resultStatus(sp.status).cls"><span class="icon" :class="resultStatus(sp.status).icon"></span></span>
+                    <div class="row-main">
+                      <div class="row-title" x-text="labelOf(sp.name)"></div>
+                      <div class="row-error" x-show="sp.status === 'error' && sp.error" :title="sp.error" x-text="errorSummary(sp.error)"></div>
+                    </div>
+                    <span class="row-meta" x-show="sp.status !== 'error'" x-text="sp.status === 'skipped' ? '已是最新' : formatProductMeta(sp.elapsed_seconds, sp.files_count)"></span>
+                  </div>
+                </template>
+                <template x-if="waitingProducts().length > 0">
+                  <div class="row compact clickable" @click="showWaiting = !showWaiting">
+                    <span class="status wait"></span>
+                    <div class="row-main"><div class="row-title" style="font-weight:400;color:var(--label-2)" x-text="'还有 ' + waitingProducts().length + ' 个产品等待中'"></div></div>
+                    <span class="icon icon-sm i-chevron" style="color:var(--label-3)" :style="showWaiting ? 'transform:rotate(90deg)' : ''"></span>
+                  </div>
+                </template>
+                <template x-for="name in waitingProducts()" :key="'wait-' + name">
+                  <div class="row compact muted" x-show="showWaiting">
+                    <span class="status wait"></span>
+                    <div class="row-main"><div class="row-title" x-text="labelOf(name)"></div></div>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+
+          <!-- 完成 / 失败 -->
+          <template x-if="syncStatus === 'done' || syncStatus === 'error'">
+            <div>
+              <div class="hero" :class="syncStatus === 'error' ? 'tone-bad' : (runSummary && runSummary.error > 0 ? 'tone-warn' : 'tone-ok')">
+                <div class="hero-glyph"><span class="icon icon-xl" :class="syncStatus === 'error' ? 'i-xmark' : (runSummary && runSummary.error > 0 ? 'i-exclaim' : 'i-check')"></span></div>
+                <div class="hero-text">
+                  <div class="hero-title"
+                       x-text="syncStatus === 'error' ? '同步失败' : (runSummary && runSummary.error > 0 ? '同步完成，' + runSummary.error + ' 个产品失败' : '同步完成')"></div>
+                  <div class="hero-sub stats" x-show="runSummary">
+                    <span class="ok">成功 <b x-text="runSummary ? runSummary.ok || 0 : 0"></b></span>
+                    <span class="bad">失败 <b x-text="runSummary ? runSummary.error || 0 : 0"></b></span>
+                    <span>跳过 <b x-text="runSummary ? runSummary.skipped || 0 : 0"></b></span>
+                    <span x-text="'耗时 ' + formatDuration(runSummary ? runSummary.duration_seconds : 0)"></span>
+                    <span x-show="runSummary && runSummary.phase_plan_seconds != null && runSummary.phase_sync_seconds != null"
+                          x-text="runSummary ? '探测 ' + Math.round(runSummary.phase_plan_seconds) + ' 秒 + 同步 ' + Math.round(runSummary.phase_sync_seconds) + ' 秒' : ''"></span>
+                  </div>
+                </div>
+                <div class="hero-actions">
+                  <button class="button" x-show="runSummary && runSummary.failed_products && runSummary.failed_products.length > 0" @click="retryFailed()">重试失败产品</button>
+                  <button class="button" x-show="syncStatus === 'error'" @click="resetSync()">返回</button>
+                  <button class="button primary" x-show="syncStatus === 'error'" @click="startSync()">重新同步</button>
+                  <button class="button primary" x-show="syncStatus === 'done'" @click="resetSync(); go('overview')">完成</button>
+                </div>
+              </div>
+
+              <div class="banner tone-bad" x-show="syncStatus === 'error' && errorMessage">
+                <span class="icon i-exclaim"></span>
+                <div class="banner-text"><div class="banner-body selectable" style="margin:0;color:var(--label)" x-text="errorMessage"></div></div>
+              </div>
+
+              <template x-if="syncProducts.length > 0">
+                <div>
+                  <div class="section-head"><span>产品结果</span><small x-text="syncProducts.length + ' 个'"></small></div>
+                  <div class="group">
+                    <template x-for="sp in sortedSyncProducts()" :key="'r-' + sp.name">
+                      <div class="row compact">
+                        <span class="status" :class="resultStatus(sp.status).cls"><span class="icon" :class="resultStatus(sp.status).icon"></span></span>
+                        <div class="row-main">
+                          <div class="row-title" x-text="labelOf(sp.name)"></div>
+                          <div class="row-error selectable" x-show="sp.status === 'error' && sp.error" :title="sp.error" x-text="errorSummary(sp.error)"></div>
+                        </div>
+                        <span class="row-meta" x-show="sp.status !== 'error'" x-text="sp.status === 'skipped' ? '已是最新' : formatProductMeta(sp.elapsed_seconds, sp.files_count)"></span>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+      </section>
+
+      <!-- ===== 历史记录 ===== -->
+      <section class="page" x-show="page === 'history'" style="overflow:hidden">
+        <div class="loading" x-show="historyLoading"><span class="status busy"></span></div>
+
+        <div class="page-inner" x-show="!historyLoading && historyList.length === 0">
+          <div class="banner tone-bad" x-show="historyError">
+            <span class="icon i-exclaim"></span>
+            <div class="banner-text"><div class="banner-title">历史记录加载失败</div><div class="banner-body" x-text="historyError"></div></div>
+          </div>
+          <div class="empty" x-show="!historyError">
+            <span class="icon icon-xl i-history"></span>
+            <div class="empty-title">还没有同步记录</div>
+            <div>完成第一次同步后，每次运行的结果都会出现在这里。</div>
           </div>
         </div>
 
-        <!-- 目录不存在确认（页内替代 window.confirm） -->
-        <div class="setup-warning" x-show="setupConfirmDir">
-          <p>该目录不存在，是否创建？</p>
-          <p class="setup-confirm-path" x-text="setupConfirmDir"></p>
-          <div class="setup-warning-actions">
-            <button class="btn-outline" @click="cancelCreateDir()">取消</button>
-            <button class="qs-btn qs-btn-primary" @click="confirmCreateDir()">创建</button>
-          </div>
-        </div>
-
-        <!-- 表单（无警告且无确认时显示） -->
-        <div x-show="!setupWarning && !setupConfirmDir">
-          <div class="setup-field">
-            <label class="setup-label">数据存储目录</label>
-            <input type="text" class="setup-input" x-model="setupDataRoot"
-                   placeholder="/Users/xxx/data" />
-            <p class="setup-hint">
-              请先从 QuantClass 官网下载数据，填入数据所在目录<br/>
-              工具会自动识别已有产品并保持更新
-            </p>
+        <div class="split" x-show="!historyLoading && historyList.length > 0">
+          <div class="split-list">
+            <template x-for="g in historyByDay()" :key="g.day">
+              <div>
+                <div class="day-head" x-text="g.day"></div>
+                <template x-for="run in g.runs" :key="run.run_id">
+                  <button class="run" :class="{ active: historySelected === run.report_file }" @click="viewDetail(run.report_file)">
+                    <span class="dot" :class="{ bad: run.failed_total > 0 }"></span>
+                    <span class="run-main">
+                      <span class="run-time" x-text="formatClock(run.started_at)"></span>
+                      <span class="run-sub" style="display:block"
+                            x-text="'成功 ' + run.success_total + ' · 失败 ' + run.failed_total + (run.skipped_total ? ' · 跳过 ' + run.skipped_total : '')"></span>
+                    </span>
+                    <span class="run-duration" x-text="formatDuration(run.duration_seconds)"></span>
+                  </button>
+                </template>
+              </div>
+            </template>
           </div>
 
-          <div class="setup-field">
-            <label class="setup-label">API Key</label>
-            <input type="password" class="setup-input" x-model="setupApiKey" />
-          </div>
-
-          <div class="setup-field">
-            <label class="setup-label">HID</label>
-            <input type="password" class="setup-input" x-model="setupHid" />
-          </div>
-
-          <p class="setup-hint" style="margin-bottom: 20px;">
-            API Key 和 HID 可在 QuantClass 网站个人中心找到
-          </p>
-
-          <div class="setup-field">
-            <label class="setup-label">课程类型</label>
-            <div style="display:flex; gap:16px; margin-top:4px;">
-              <label style="cursor:pointer;">
-                <input type="radio" name="courseType" value="basic" x-model="setupCourseType">
-                股票课程 / 币圈课程
-              </label>
-              <label style="cursor:pointer;">
-                <input type="radio" name="courseType" value="premium" x-model="setupCourseType">
-                分享会
-              </label>
+          <div class="split-detail">
+            <div class="page-inner">
+              <div class="loading" x-show="detailLoading && !historyDetail"><span class="status busy"></span></div>
+              <div class="banner tone-bad" x-show="historyError">
+                <span class="icon i-exclaim"></span>
+                <div class="banner-text"><div class="banner-body" style="margin:0" x-text="historyError"></div></div>
+              </div>
+              <template x-if="historyDetail">
+                <div>
+                  <div class="hero" :class="historyDetail.failed_total > 0 ? 'tone-bad' : 'tone-ok'">
+                    <div class="hero-glyph"><span class="icon icon-xl" :class="historyDetail.failed_total > 0 ? 'i-exclaim' : 'i-check'"></span></div>
+                    <div class="hero-text">
+                      <div class="hero-title" x-text="formatDay(historyDetail.started_at) + ' ' + formatClock(historyDetail.started_at)"></div>
+                      <div class="hero-sub stats">
+                        <span class="ok">成功 <b x-text="historyDetail.success_total"></b></span>
+                        <span class="bad">失败 <b x-text="historyDetail.failed_total"></b></span>
+                        <span>跳过 <b x-text="historyDetail.skipped_total"></b></span>
+                        <span x-text="'耗时 ' + formatDuration(historyDetail.duration_seconds)"></span>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="group" x-show="sortedDetailProducts().length > 0">
+                    <template x-for="p in sortedDetailProducts()" :key="'d-' + p.product">
+                      <div class="row">
+                        <span class="status" :class="resultStatus(p.status).cls"><span class="icon" :class="resultStatus(p.status).icon"></span></span>
+                        <div class="row-main">
+                          <div class="row-title" x-text="labelOf(p.product)"></div>
+                          <div class="row-sub mono" x-text="p.product"></div>
+                          <div class="row-error selectable" x-show="p.status === 'error' && p.error" :title="p.error" x-text="errorSummary(p.error)"></div>
+                        </div>
+                        <span class="row-meta" x-show="p.status !== 'error'" x-text="p.status === 'skipped' ? '已是最新' : formatProductMeta(p.elapsed_seconds, p.files_count)"></span>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
             </div>
           </div>
+        </div>
+      </section>
 
-          <button class="qs-btn qs-btn-primary setup-submit"
-                  @click="submitSetup()"
-                  :disabled="!setupValid() || setupLoading">
-            <span x-show="!setupLoading">开始使用</span>
-            <span x-show="setupLoading">配置中...</span>
-          </button>
+      <!-- ===== 数据健康 ===== -->
+      <section class="page" x-show="page === 'health'">
+        <div class="page-inner">
+
+          <template x-if="healthState === 'idle' || healthState === 'error'">
+            <div>
+              <div class="hero tone-accent">
+                <div class="hero-glyph"><span class="icon icon-xl i-health"></span></div>
+                <div class="hero-text">
+                  <div class="hero-title">数据健康检查</div>
+                  <div class="hero-sub">逐个扫描已下载产品的数据文件，检查完整性、重复行和交易日连续性。</div>
+                </div>
+                <div class="hero-actions">
+                  <button class="button primary large" @click="startHealthCheck()" :disabled="syncStatus === 'syncing'">开始检查</button>
+                </div>
+              </div>
+              <p class="footnote" style="margin-top:-12px">通常需要 5–10 分钟，不消耗 API 下载次数。同步进行中时无法检查。</p>
+              <div class="banner tone-bad" style="margin-top:18px" x-show="healthState === 'error'">
+                <span class="icon i-exclaim"></span>
+                <div class="banner-text"><div class="banner-title">检查没有完成</div><div class="banner-body selectable" x-text="healthError"></div></div>
+              </div>
+            </div>
+          </template>
+
+          <template x-if="healthState === 'checking'">
+            <div>
+              <div class="hero">
+                <div class="ring">
+                  <svg viewBox="0 0 52 52"><circle class="track" cx="26" cy="26" r="22.5"></circle><circle class="value" cx="26" cy="26" r="22.5" stroke-dasharray="141.37" :stroke-dashoffset="141.37 * (1 - healthPercent() / 100)"></circle></svg>
+                  <span x-text="healthPercent() + '%'"></span>
+                </div>
+                <div class="hero-text">
+                  <div class="hero-title">正在检查数据</div>
+                  <div class="hero-sub"
+                       x-text="healthProgress && healthProgress.total ? '第 ' + Math.min(healthProgress.current + 1, healthProgress.total) + ' / ' + healthProgress.total + ' 个产品' + (healthProgress.product ? ' · ' + labelOf(healthProgress.product) : '') : '准备中…'"></div>
+                </div>
+              </div>
+              <div class="bar sync-progress"><div class="bar-fill" :style="'width:' + healthPercent() + '%'"></div></div>
+            </div>
+          </template>
+
+          <template x-if="healthState === 'done' && healthResult">
+            <div>
+              <div class="hero" :class="healthResult.summary.total === 0 ? 'tone-ok' : ((healthResult.summary.by_severity.error || 0) > 0 ? 'tone-bad' : 'tone-warn')">
+                <div class="hero-glyph"><span class="icon icon-xl" :class="healthResult.summary.total === 0 ? 'i-check' : 'i-exclaim'"></span></div>
+                <div class="hero-text">
+                  <div class="hero-title" x-text="healthResult.summary.total === 0 ? '未发现问题' : '发现 ' + healthResult.summary.total + ' 个问题'"></div>
+                  <div class="hero-sub" x-text="healthMeta()"></div>
+                </div>
+                <div class="hero-actions">
+                  <button class="button" @click="startHealthCheck()" :disabled="syncStatus === 'syncing'">重新检查</button>
+                  <button class="button primary" x-show="repairableCount() > 0" @click="repairIssues()" :disabled="repairing"
+                          x-text="repairing ? '修复中…' : '修复 ' + repairableCount() + ' 个问题'"></button>
+                </div>
+              </div>
+
+              <div class="banner" :class="repairResult && repairResult.failed.length ? 'tone-warn' : 'tone-ok'" x-show="repairResult">
+                <span class="icon" :class="repairResult && repairResult.failed.length ? 'i-exclaim' : 'i-check'"></span>
+                <div class="banner-text">
+                  <div class="banner-title"
+                       x-text="repairResult ? '已修复 ' + repairResult.repaired.length + ' 个问题' + (repairResult.failed.length ? '，' + repairResult.failed.length + ' 个失败' : '') : ''"></div>
+                  <template x-for="f in (repairResult ? repairResult.failed : [])" :key="'rf-' + f.product + f.file">
+                    <div class="banner-body selectable" x-text="labelOf(f.product) + ' / ' + f.file + '：' + (f.error || '未知错误')"></div>
+                  </template>
+                </div>
+                <button class="icon-button" title="关闭" @click="repairResult = null"><span class="icon icon-sm i-xmark"></span></button>
+              </div>
+              <div class="banner tone-bad" x-show="repairMessage">
+                <span class="icon i-exclaim"></span>
+                <div class="banner-text"><div class="banner-body" style="margin:0" x-text="repairMessage"></div></div>
+              </div>
+
+              <template x-for="[cat, catIssues] in Object.entries(healthIssuesByCategory())" :key="cat">
+                <div>
+                  <div class="section-head"><span x-text="categoryLabel(cat)"></span><small x-text="catIssues.length + ' 个'"></small></div>
+                  <div class="group">
+                    <template x-for="issue in catIssues" :key="issue.type + issue.product + issue.file + issue.detail">
+                      <div class="row">
+                        <span class="status" :class="issue.severity === 'error' ? 'bad' : 'warn'"><span class="icon i-exclaim"></span></span>
+                        <div class="row-main">
+                          <div class="row-title" x-text="issueTypeLabel(issue.type) + ' · ' + labelOf(issue.product)"></div>
+                          <div class="row-sub selectable" style="white-space:normal" x-text="(issue.file ? issue.file + ' — ' : '') + issue.detail"></div>
+                        </div>
+                        <span class="pill" :class="issue.repairable ? 'tone-accent' : (issue.repair_action === 'needs_resync' ? 'tone-warn' : 'plain')" x-text="repairLabel(issue)"></span>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </template>
+        </div>
+      </section>
+    </main>
+
+    <!-- ===== 设置向导 ===== -->
+    <section class="setup" x-show="currentView === 'setup'" x-cloak>
+      <div class="setup-drag pywebview-drag-region"></div>
+      <form class="setup-card" @submit.prevent="submitSetup()">
+        <div class="setup-head">
+          <div class="app-glyph"><span class="icon i-sync"></span></div>
+          <div class="setup-title" x-text="setupFromMain ? '账号与数据目录' : '欢迎使用 QuantClass Sync'"></div>
+          <div class="setup-sub">连接 QuantClass 账号，让本地数据每天自动保持最新。</div>
+        </div>
+
+        <div class="banner tone-bad" x-show="setupError">
+          <span class="icon i-exclaim"></span>
+          <div class="banner-text"><div class="banner-title">配置没有保存</div><div class="banner-body selectable" x-text="setupError"></div></div>
+        </div>
+
+        <div class="banner tone-warn" x-show="setupWarning">
+          <span class="icon i-exclaim"></span>
+          <div class="banner-text">
+            <div class="banner-title">配置已保存，但连接验证没有通过</div>
+            <div class="banner-body selectable" x-text="setupWarning"></div>
+            <div class="setup-actions" style="justify-content:flex-start;margin-top:10px">
+              <button type="button" class="button" @click="retrySetup()">重新填写</button>
+              <button type="button" class="button primary" @click="continueAnyway()">仍然继续</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="banner tone-accent" x-show="setupConfirmDir">
+          <span class="icon i-folder"></span>
+          <div class="banner-text">
+            <div class="banner-title">这个目录还不存在，要创建吗？</div>
+            <div class="banner-body selectable" style="font-family:var(--mono);font-size:12px" x-text="setupConfirmDir"></div>
+            <div class="setup-actions" style="justify-content:flex-start;margin-top:10px">
+              <button type="button" class="button" @click="cancelCreateDir()">取消</button>
+              <button type="button" class="button primary" @click="confirmCreateDir()">创建目录</button>
+            </div>
+          </div>
+        </div>
+
+        <div x-show="!setupWarning && !setupConfirmDir">
+          <div class="group">
+            <div class="form-row">
+              <label for="setup-root">数据目录</label>
+              <input id="setup-root" type="text" class="mono" x-model="setupDataRoot" placeholder="/Users/你的用户名/quant-data" spellcheck="false" />
+            </div>
+          </div>
+          <p class="footnote">填写从 QuantClass 官网下载的数据所在目录，已有产品会被自动识别并保持更新。</p>
+
+          <div class="group" style="margin-top:18px">
+            <div class="form-row">
+              <label for="setup-key">API Key</label>
+              <input id="setup-key" type="password" x-model="setupApiKey" autocomplete="off" />
+            </div>
+            <div class="form-row">
+              <label for="setup-hid">HID</label>
+              <input id="setup-hid" type="password" x-model="setupHid" autocomplete="off" />
+            </div>
+          </div>
+          <p class="footnote">在 QuantClass 官网的个人中心可以找到 API Key 和 HID。</p>
+
+          <div class="group" style="margin-top:18px">
+            <div class="form-row">
+              <label>课程类型</label>
+              <div class="segmented">
+                <button type="button" class="segment" :class="{ active: setupCourseType === 'basic' }" @click="setupCourseType = 'basic'">股票 / 币圈课程</button>
+                <button type="button" class="segment" :class="{ active: setupCourseType === 'premium' }" @click="setupCourseType = 'premium'">分享会</button>
+              </div>
+            </div>
+          </div>
+          <p class="footnote">用于估算每日下载额度，下载次数较多时会先请你确认。</p>
+
+          <div class="setup-actions">
+            <button type="button" class="button large" x-show="setupFromMain" @click="cancelSetup()">取消</button>
+            <button type="submit" class="button primary large" :disabled="!setupValid() || setupLoading"
+                    x-text="setupLoading ? '正在验证…' : (setupFromMain ? '保存' : '开始使用')"></button>
+          </div>
+        </div>
+      </form>
+    </section>
+
+    <!-- ===== 检查更新确认 ===== -->
+    <div class="overlay" x-show="checkUpdateConfirmVisible" x-cloak @click.self="checkUpdateConfirmVisible = false">
+      <div class="alert" role="alertdialog" aria-labelledby="check-title">
+        <div class="app-glyph"><span class="icon i-refresh"></span></div>
+        <div class="alert-title" id="check-title">检查最新数据日期？</div>
+        <div class="alert-body">将向 QuantClass 查询每个产品的最新日期，每个产品消耗 1 次 API 访问。</div>
+        <div class="alert-actions">
+          <button class="button" @click="checkUpdateConfirmVisible = false">取消</button>
+          <button class="button primary" @click="doCheckUpdates()">检查</button>
         </div>
       </div>
     </div>
 
-    <!-- 主内容区 -->
-    <main class="content" x-show="currentView === 'main'">
-
-      <!-- ===== 总览页面 ===== -->
-      <div x-show="tab === 'overview'">
-
-        <!-- 加载状态 -->
-        <div class="loading" x-show="loading">加载中...</div>
-
-        <!-- 错误提示 -->
-        <div class="error-banner" x-show="!loading && overviewError" x-text="overviewError"></div>
-
-        <template x-if="!loading && !overviewError">
-          <div>
-            <!-- 统计条（点击筛选） -->
-            <div class="qs-stats">
-              <div class="qs-stat" :class="{ 'qs-stat-active': filterColor === 'green' }" @click="toggleFilter('green')">
-                <span class="qs-stat-dot" style="background:#22c55e;"></span>
-                <span class="qs-stat-num" x-text="summary.green"></span>
-                <span class="qs-stat-label">最新</span>
-              </div>
-              <div class="qs-stat" :class="{ 'qs-stat-active': filterColor === 'yellow' }" @click="toggleFilter('yellow')">
-                <span class="qs-stat-dot" style="background:#eab308;"></span>
-                <span class="qs-stat-num" x-text="summary.yellow"></span>
-                <span class="qs-stat-label">落后</span>
-              </div>
-              <div class="qs-stat" :class="{ 'qs-stat-active': filterColor === 'red' }" @click="toggleFilter('red')">
-                <span class="qs-stat-dot" style="background:#ef4444;"></span>
-                <span class="qs-stat-num" x-text="summary.red"></span>
-                <span class="qs-stat-label">异常</span>
-              </div>
-              <div class="qs-stat" :class="{ 'qs-stat-active': filterColor === 'gray' }" @click="toggleFilter('gray')">
-                <span class="qs-stat-dot" style="background:#b0b5bc;"></span>
-                <span class="qs-stat-num" x-text="summary.gray"></span>
-                <span class="qs-stat-label">未同步</span>
-              </div>
-            </div>
-
-            <!-- 工具栏：搜索 + 检查更新 + 数据健康 并排 -->
-            <div class="qs-toolbar">
-              <input
-                type="text"
-                class="qs-search"
-                placeholder="搜索产品..."
-                x-model="searchText"
-              />
-              <button
-                class="qs-btn-sm"
-                @click="checkUpdateConfirmVisible = true"
-                :disabled="checkUpdateLoading || syncStatus === 'syncing'"
-              >
-                <span x-show="!checkUpdateLoading">检查更新</span>
-                <span x-show="checkUpdateLoading">检查中...</span>
-              </button>
-              <button class="qs-btn-sm"
-                      @click="showHealthConfirm()"
-                      :disabled="healthState === 'checking' || syncStatus === 'syncing'"
-                      x-text="healthState === 'checking' ? '检查中...' : '数据健康'">
-              </button>
-            </div>
-
-            <!-- 检查更新结果提示 -->
-            <div x-show="checkUpdateResult" class="health-result" x-cloak style="margin-bottom: 12px;">
-              <p :class="checkUpdateResult?.isError ? 'text-error' : 'text-success'"
-                 x-text="checkUpdateResult?.message"></p>
-            </div>
-
-            <!-- 健康检查确认 -->
-            <template x-if="healthState === 'confirming'">
-              <div class="qs-health-card">
-                <div style="display:flex;align-items:flex-start;gap:10px;">
-                  <span style="color:#eab308;font-size:15px;">&#9888;</span>
-                  <div style="flex:1;">
-                    <div style="font-weight:600;margin-bottom:3px;">数据质量全面检查</div>
-                    <div style="color:#6b7280;font-size:12px;">扫描所有产品数据文件，检查完整性、一致性和异常值。预计耗时 5-10 分钟。</div>
-                    <div style="margin-top:10px;display:flex;gap:8px;">
-                      <button class="qs-btn qs-btn-primary" @click="startHealthCheck()">开始检查</button>
-                      <button class="qs-btn qs-btn-outline" @click="cancelHealthCheck()">取消</button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </template>
-            <!-- 健康检查进行中 -->
-            <template x-if="healthState === 'checking' && healthProgress">
-              <div class="qs-health-card">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-                  <span style="font-weight:600;">正在检查数据质量...</span>
-                  <span style="color:#6b7280;font-size:12px;" x-text="healthProgress.total ? ((healthProgress.current+1)+'/'+healthProgress.total+' 产品') : '准备中...'"></span>
-                </div>
-                <div class="qs-progress-wrap"><div class="qs-progress-bar"><div class="qs-progress-fill" :style="'width:'+(healthProgress.total?(healthProgress.current/healthProgress.total*100):0)+'%'"></div></div></div>
-                <div style="color:#6b7280;font-size:12px;margin-top:6px;" x-text="healthProgress.product||''"></div>
-              </div>
-            </template>
-            <!-- 修复结果摘要（优先级最高） -->
-            <template x-if="healthState === 'done' && repairResult">
-              <div class="qs-card" style="padding:14px 18px;">
-                <div style="font-weight:600; margin-bottom:8px;">修复结果</div>
-                <div style="font-size:0.93em; color:#374151;">
-                  <span style="color:#059669;" x-show="repairResult.repaired.length">
-                    成功修复 <span x-text="repairResult.repaired.length"></span> 个问题
-                  </span>
-                  <span x-show="repairResult.repaired.length && repairResult.failed.length"> · </span>
-                  <span style="color:#dc2626;" x-show="repairResult.failed.length">
-                    <span x-text="repairResult.failed.length"></span> 个失败
-                  </span>
-                </div>
-                <template x-if="repairResult.failed.length > 0">
-                  <ul style="margin:8px 0 0; padding-left:18px; font-size:0.88em; color:#6b7280;">
-                    <template x-for="f in repairResult.failed" :key="f.file">
-                      <li x-text="f.product + '/' + f.file + ': ' + (f.error || '未知错误')"></li>
-                    </template>
-                  </ul>
-                </template>
-                <button class="qs-btn qs-btn-outline" style="margin-top:10px;"
-                        @click="repairResult = null">完成</button>
-              </div>
-            </template>
-            <!-- 健康检查完成（有问题） -->
-            <template x-if="healthState === 'done' && healthResult && healthResult.summary.total > 0 && !repairResult">
-              <div class="qs-health-card">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-                  <div style="display:flex;align-items:center;gap:8px;">
-                    <span style="font-weight:600;">检查完成</span>
-                    <template x-if="healthResult.summary.by_severity.error > 0"><span class="qs-tag qs-tag-error" x-text="healthResult.summary.by_severity.error+' 错误'"></span></template>
-                    <template x-if="healthResult.summary.by_severity.warning > 0"><span class="qs-tag qs-tag-warning" x-text="healthResult.summary.by_severity.warning+' 警告'"></span></template>
-                  </div>
-                  <div style="display:flex;align-items:center;gap:8px;">
-                    <span style="color:#6b7280;font-size:11px;" x-text="healthResult.summary.scanned_products+' 产品 · '+healthResult.summary.scanned_files+' 文件 · '+healthResult.summary.elapsed_seconds+'s'"></span>
-                    <span style="cursor:pointer;color:#9ca3af;" @click="closeHealthResult()">&#x2715;</span>
-                  </div>
-                </div>
-                <template x-for="[cat,catIssues] in Object.entries(healthIssuesByCategory())" :key="cat">
-                  <div style="margin-bottom:10px;">
-                    <div class="qs-health-category" x-text="categoryLabel(cat)"></div>
-                    <template x-for="issue in catIssues" :key="issue.type+issue.product+issue.file">
-                      <div class="qs-health-issue">
-                        <span :class="issue.severity==='error'?'qs-dot-error':'qs-dot-warning'">&#x25CF;</span>
-                        <span style="font-weight:500;min-width:70px;" x-text="issueTypeLabel(issue.type)"></span>
-                        <span style="color:#6b7280;flex:1;" x-text="issue.product+(issue.file?' / '+issue.file:'')+' — '+issue.detail"></span>
-                        <span class="qs-repair-tag" :class="issue.repairable?'qs-repair-fix':(issue.repair_action==='needs_resync'?'qs-repair-resync':'qs-repair-investigate')" x-text="repairLabel(issue)"></span>
-                      </div>
-                    </template>
-                  </div>
-                </template>
-                <div style="margin-top:12px;padding-top:10px;border-top:1px solid #f3f4f6;display:flex;align-items:center;gap:12px;">
-                  <template x-if="repairableCount() > 0"><button class="qs-btn" @click="repairIssues()" :disabled="repairing"
-                    x-text="repairing ? '修复中...' : '修复 ' + repairableCount() + ' 个可修复问题'"></button></template>
-                </div>
-              </div>
-            </template>
-            <!-- 健康检查完成（无问题） -->
-            <template x-if="healthState === 'done' && healthResult && healthResult.summary.total === 0 && !repairResult">
-              <div class="qs-health-card">
-                <div style="display:flex;align-items:center;gap:8px;">
-                  <span style="color:#22c55e;font-size:16px;">&#x2713;</span>
-                  <span style="font-weight:600;">数据健康，未发现问题</span>
-                  <span style="color:#6b7280;font-size:11px;margin-left:auto;" x-text="healthResult.summary.scanned_products+' 产品 · '+healthResult.summary.scanned_files+' 文件 · '+healthResult.summary.elapsed_seconds+'s'"></span>
-                  <span style="cursor:pointer;color:#9ca3af;margin-left:8px;" @click="closeHealthResult()">&#x2715;</span>
-                </div>
-              </div>
-            </template>
-            <!-- 健康检查错误 -->
-            <template x-if="healthState === 'error'">
-              <div class="qs-health-card" style="border-color:#fecaca;">
-                <div style="display:flex;align-items:center;gap:8px;">
-                  <span style="color:#ef4444;">&#x2717;</span>
-                  <span style="color:#ef4444;" x-text="healthError"></span>
-                  <span style="cursor:pointer;color:#9ca3af;margin-left:auto;" @click="closeHealthResult()">&#x2715;</span>
-                </div>
-              </div>
-            </template>
-
-            <!-- 产品状态表格（6 列） -->
-            <table class="qs-table">
-              <thead>
-                <tr>
-                  <th style="width:40px;"></th>
-                  <th>产品名称</th>
-                  <th style="width:120px;">最后更新</th>
-                  <th style="width:80px;">落后天数</th>
-                  <th style="width:64px;">结果</th>
-                  <th>错误信息</th>
-                </tr>
-              </thead>
-              <tbody>
-                <template x-for="p in filteredProducts()" :key="p.name">
-                  <tr>
-                    <td>
-                      <span class="qs-dot" :style="'background:' + { green: '#22c55e', yellow: '#eab308', red: '#ef4444', gray: '#b0b5bc' }[p.color]"></span>
-                    </td>
-                    <!-- 未同步行：产品名弱化 -->
-                    <td :class="{ 'muted': p.color === 'gray' }" x-text="p.name"></td>
-                    <td :class="{ 'muted': p.color === 'gray' }" x-text="p.local_date || '--'"></td>
-                    <td :class="{ 'muted': p.color === 'gray' }" x-text="p.behind_days != null ? p.behind_days : '--'"></td>
-                    <td>
-                      <template x-if="p.last_result === 'ok'"><span class="result-ok">成功</span></template>
-                      <template x-if="p.last_result === 'error'"><span class="result-err">失败</span></template>
-                      <template x-if="p.last_result === 'skipped'"><span class="result-skip">跳过</span></template>
-                      <template x-if="!p.last_result || (p.last_result !== 'ok' && p.last_result !== 'error' && p.last_result !== 'skipped')">
-                        <span x-text="p.last_result || ''"></span>
-                      </template>
-                    </td>
-                    <!-- 错误信息：仅失败时显示，跳过/成功不显示 -->
-                    <td class="err-cell"
-                        :title="p.last_result === 'error' ? (p.last_error || '') : ''"
-                        x-text="p.last_result === 'error' ? (p.last_error || '') : ''"></td>
-                  </tr>
-                </template>
-              </tbody>
-            </table>
-            <div class="empty-state" x-show="filteredProducts().length === 0 && products.length > 0">
-              无匹配产品
-            </div>
-
-            <!-- 底部栏：同步时间 + 数据目录（可点击）+ 重新配置 -->
-            <div class="qs-footer">
-              <div class="qs-footer-left">
-                <span x-text="lastRun ? '上次同步: ' + formatLocalTime(lastRun.started_at) + '  耗时: ' + formatDuration(lastRun.duration_seconds) : '尚未同步'"></span>
-                <!-- 数据目录：canOpenDir=true 时可点击打开文件管理器 -->
-                <template x-if="dataRoot">
-                  <span
-                    class="qs-dir-path"
-                    :title="canOpenDir ? dataRoot + ' — 点击打开' : dataRoot"
-                    :style="canOpenDir ? '' : 'cursor:default;'"
-                    @click="canOpenDir && openDataDir()"
-                    x-text="dataRoot"
-                  ></span>
-                </template>
-              </div>
-              <div class="qs-footer-right">
-                <a class="reconfigure-link"
-                   :class="{ 'reconfigure-disabled': syncStatus === 'syncing' }"
-                   @click="syncStatus !== 'syncing' && goToSetup()">重新配置</a>
-              </div>
-            </div>
-          </div>
-        </template>
-      </div>
-
-      <!-- ===== 同步页面 ===== -->
-      <div x-show="tab === 'sync'" class="sync-panel">
-
-        <!-- idle 状态 -->
-        <div x-show="syncStatus === 'idle'">
-          <div class="error-banner" x-show="overviewError" x-text="overviewError"></div>
-          <div class="qs-card" x-show="!overviewError">
-            <div style="font-size:13px; color:#8b8f96; margin-bottom:6px;">数据目录</div>
-            <div style="font-size:13px; color:#3a3f47; font-family:'SF Mono',Menlo,Consolas,monospace; margin-bottom:12px;" x-text="dataRoot || '--'"></div>
-            <div style="font-size:13px; color:#3a3f47;">
-              待更新产品: <strong x-text="(summary.yellow + summary.red)"></strong> 个
-            </div>
-          </div>
-          <button class="qs-btn qs-btn-primary" style="width:100%;" @click="startSync()">开始同步</button>
+    <!-- ===== 下载次数确认 ===== -->
+    <div class="overlay sheet-overlay" x-show="estimateData" x-cloak>
+      <div class="sheet" role="dialog" aria-labelledby="estimate-title">
+        <div class="sheet-head">
+          <div class="sheet-title" id="estimate-title">这次同步需要较多下载次数</div>
+          <div class="sheet-sub"
+               x-text="estimateData ? '预计调用 ' + estimateData.total_calls + ' 次 API。' + (estimateData.course_type === 'basic' ? '你的账号每个产品每天只能同步 1 次，落后较多时建议先从官网下载全量数据，或联系官方重置配额。' : '落后天数较多时，建议先从官网下载全量数据。') : ''"></div>
         </div>
-
-        <!-- syncing 状态 -->
-        <div x-show="syncStatus === 'syncing'">
-          <!-- 确认卡片：API 调用量超阈值时展示，用户确认后消失 -->
-          <div x-show="estimateData"
-               style="border:1px solid #f59e0b; border-radius:8px; padding:14px; margin-bottom:12px; background:#fffbeb;">
-            <div style="font-weight:600; color:#b45309; margin-bottom:8px;">同步前确认</div>
-            <table style="width:100%; font-size:0.9em; margin-bottom:8px; border-collapse:collapse;">
-              <tr style="color:#6b7280;">
-                <td style="padding:2px 4px;">产品</td>
-                <td style="padding:2px 4px;">落后天数</td>
-                <td style="padding:2px 4px;">预计调用</td>
-              </tr>
-              <template x-for="p in (estimateData ? estimateData.products : [])" :key="p.name">
-                <tr>
-                  <td style="padding:2px 4px;" x-text="p.name"></td>
-                  <td style="padding:2px 4px;" x-text="p.gap_days"></td>
-                  <td style="padding:2px 4px;" x-text="p.estimated_calls"></td>
-                </tr>
-              </template>
-              <tr style="font-weight:600; border-top:1px solid #fde68a;">
-                <td style="padding:4px 4px 2px;">合计</td>
-                <td></td>
-                <td style="padding:4px 4px 2px;" x-text="estimateData ? estimateData.total_calls : 0"></td>
-              </tr>
-            </table>
-            <div style="font-size:0.85em; color:#6b7280; margin-bottom:10px;"
-                 x-text="estimateData && estimateData.course_type === 'basic'
-                   ? '你的账号每产品每天只能同步 1 次，落后较多时建议先从网页下载全量数据，或联系官方重置配额'
-                   : '落后天数较多时建议先从网页下载全量数据'">
-            </div>
-            <div style="display:flex; gap:8px;">
-              <button class="qs-btn qs-btn-primary"
-                      @click="confirmSync()"
-                      :disabled="!estimateData">继续同步</button>
-              <button class="qs-btn qs-btn-outline"
-                      @click="cancelSync()"
-                      :disabled="!estimateData">取消</button>
-            </div>
-          </div>
-          <!-- 进度条 + 计数 -->
-          <div class="qs-progress-wrap">
-            <div class="qs-progress-bar">
-              <div class="qs-progress-fill" :style="'width: ' + progressPercent() + '%'"></div>
-            </div>
-            <span class="qs-progress-text" x-text="total > 0 ? completed + ' / ' + total : '准备中...'"></span>
-          </div>
-          <!-- 进度指示行 -->
-          <div x-show="postprocessing" style="font-size:0.92em; color:#6b7280; margin:6px 0 2px;"
-               x-text="'正在后处理' + (postprocessDetail ? ': ' + postprocessDetail : '') + '...'">
-          </div>
-          <div x-show="total > 0 && !postprocessing" style="font-size:0.92em; color:#6b7280; margin:6px 0 2px;">
-            <span x-text="'已完成 ' + completed + '/' + total"></span>
-            <span x-show="currentProduct"> · 最新: <span style="font-weight:600" x-text="currentProduct"></span></span>
-          </div>
-          <!-- 耗时/预估 -->
-          <div class="qs-meta-row">
-            <span x-text="'已用时: ' + formatDuration(displayElapsedSeconds)"></span>
-            <span x-text="'预估剩余: ' + estimatedRemaining()"></span>
-          </div>
-          <!-- 产品列表 -->
-          <div class="qs-card" style="padding:10px 14px;">
-            <ul class="qs-product-list">
-              <!-- 已完成产品（倒序：最新完成的显示在最前面） -->
-              <template x-for="sp in syncProducts.slice().reverse()" :key="sp.name">
-                <li class="qs-product-item">
-                  <!-- 状态图标：✓绿/✗红/–灰 -->
-                  <div class="qs-product-icon"
-                    :class="{ 'icon-check': sp.status === 'ok', 'icon-cross': sp.status === 'error', 'icon-skip': sp.status === 'skipped' }"
-                    x-text="sp.status === 'ok' ? '✓' : (sp.status === 'error' ? '✗' : '–')">
-                  </div>
-                  <span class="qs-product-name"
-                    :class="{ 'fail': sp.status === 'error', 'muted': sp.status === 'skipped' }"
-                    x-text="sp.name"></span>
-                  <!-- 失败时显示错误摘要，成功/跳过显示耗时和文件数 -->
-                  <template x-if="sp.status === 'error' && sp.error">
-                    <span class="qs-product-err" :title="sp.error" x-text="sp.error"></span>
-                  </template>
-                  <template x-if="sp.status !== 'error' || !sp.error">
-                    <span class="qs-product-meta" x-text="formatProductMeta(sp.elapsed_seconds, sp.files_count)"></span>
-                  </template>
-                </li>
-              </template>
-              <!-- 等待中产品折叠头 -->
-              <template x-if="waitingProducts().length > 0">
-                <li class="qs-product-item" style="cursor:pointer; user-select:none;"
-                    @click="showWaiting = !showWaiting">
-                  <div class="qs-product-icon icon-wait" x-text="showWaiting ? '▾' : '▸'" style="color:#c4c8ce;"></div>
-                  <span class="qs-product-name muted"
-                    x-text="'还有 ' + waitingProducts().length + ' 个产品等待中'"></span>
-                </li>
-              </template>
-              <!-- 等待中产品展开列表 -->
-              <template x-for="name in waitingProducts()" :key="'wait-' + name">
-                <li class="qs-product-item" x-show="showWaiting">
-                  <div class="qs-product-icon icon-wait">&middot;</div>
-                  <span class="qs-product-name muted" x-text="name"></span>
-                  <span class="qs-product-meta" style="color:#d0d4da;">等待中</span>
-                </li>
-              </template>
-            </ul>
-          </div>
-          <button class="qs-btn qs-btn-disabled" style="width:100%;" disabled>同步中...</button>
-        </div>
-
-        <!-- done 状态 -->
-        <div x-show="syncStatus === 'done'">
-          <div class="qs-result-mark success">&#10003; 同步完成</div>
-          <template x-if="runSummary">
-            <div>
-              <div class="qs-summary">
-                <span class="green" x-text="'成功: ' + (runSummary.ok || 0)"></span>
-                <span class="red" x-text="'失败: ' + (runSummary.error || 0)"></span>
-                <span class="gray" x-text="'跳过: ' + (runSummary.skipped || 0)"></span>
-                <span x-text="'耗时: ' + formatDuration(runSummary.duration_seconds)"></span>
-                <!-- 阶段耗时：仅在 phase 字段存在时显示 -->
-                <template x-if="runSummary.phase_plan_seconds != null && runSummary.phase_sync_seconds != null">
-                  <span class="gray" x-text="'探测 ' + Math.round(runSummary.phase_plan_seconds) + 's + 同步 ' + Math.round(runSummary.phase_sync_seconds) + 's'"></span>
-                </template>
-              </div>
-              <!-- 产品结果列表（复用 syncProducts） -->
-              <div class="qs-card" style="padding:10px 14px;">
-                <ul class="qs-product-list">
-                  <template x-for="sp in syncProducts" :key="sp.name">
-                    <li class="qs-product-item">
-                      <div class="qs-product-icon"
-                        :class="{ 'icon-check': sp.status === 'ok', 'icon-cross': sp.status === 'error', 'icon-skip': sp.status === 'skipped' }"
-                        x-text="sp.status === 'ok' ? '✓' : (sp.status === 'error' ? '✗' : '–')">
-                      </div>
-                      <span class="qs-product-name"
-                        :class="{ 'fail': sp.status === 'error', 'muted': sp.status === 'skipped' }"
-                        x-text="sp.name"></span>
-                      <template x-if="sp.status === 'error' && sp.error">
-                        <span class="qs-product-err" :title="sp.error" x-text="sp.error"></span>
-                      </template>
-                      <template x-if="sp.status !== 'error' || !sp.error">
-                        <span class="qs-product-meta" x-text="formatProductMeta(sp.elapsed_seconds, sp.files_count)"></span>
-                      </template>
-                    </li>
-                  </template>
-                </ul>
-              </div>
-              <!-- 按钮区：有失败时显示重试失败产品 -->
-              <div class="qs-btn-group">
-                <template x-if="runSummary.failed_products && runSummary.failed_products.length > 0">
-                  <button class="qs-btn qs-btn-danger-outline" @click="retryFailed()">重试失败产品</button>
-                </template>
-                <button class="qs-btn qs-btn-outline" @click="resetSync()">再次同步</button>
-              </div>
-            </div>
-          </template>
-          <!-- 无 runSummary 时的兜底按钮 -->
-          <template x-if="!runSummary">
-            <div class="qs-btn-group">
-              <button class="qs-btn qs-btn-outline" @click="resetSync()">再次同步</button>
-            </div>
-          </template>
-        </div>
-
-        <!-- error 状态 -->
-        <div x-show="syncStatus === 'error'">
-          <div class="qs-result-mark fail">&#10007; 同步失败</div>
-          <!-- 错误信息卡片（红色边框） -->
-          <div class="qs-card qs-card-error">
-            <div style="font-size:13px; color:#c4382f; font-weight:500; margin-bottom:4px;" x-text="errorMessage"></div>
-          </div>
-          <!-- 部分产品有结果时显示摘要 -->
-          <template x-if="runSummary">
-            <div>
-              <div class="qs-summary">
-                <span class="green" x-text="'成功: ' + (runSummary.ok || 0)"></span>
-                <span class="red" x-text="'失败: ' + (runSummary.error || 0)"></span>
-                <span class="gray" x-text="'跳过: ' + (runSummary.skipped || 0)"></span>
-                <span x-text="'耗时: ' + formatDuration(runSummary.duration_seconds)"></span>
-              </div>
-              <template x-if="syncProducts.length > 0">
-                <div class="qs-card" style="padding:10px 14px;">
-                  <ul class="qs-product-list">
-                    <template x-for="sp in syncProducts" :key="sp.name">
-                      <li class="qs-product-item">
-                        <div class="qs-product-icon"
-                          :class="{ 'icon-check': sp.status === 'ok', 'icon-cross': sp.status === 'error', 'icon-skip': sp.status === 'skipped' }"
-                          x-text="sp.status === 'ok' ? '✓' : (sp.status === 'error' ? '✗' : '–')">
-                        </div>
-                        <span class="qs-product-name"
-                          :class="{ 'fail': sp.status === 'error', 'muted': sp.status === 'skipped' }"
-                          x-text="sp.name"></span>
-                        <template x-if="sp.status === 'error' && sp.error">
-                          <span class="qs-product-err" :title="sp.error" x-text="sp.error"></span>
-                        </template>
-                        <template x-if="sp.status !== 'error' || !sp.error">
-                          <span class="qs-product-meta" x-text="formatProductMeta(sp.elapsed_seconds, sp.files_count)"></span>
-                        </template>
-                      </li>
-                    </template>
-                  </ul>
-                </div>
-              </template>
-            </div>
-          </template>
-          <div class="qs-btn-group">
-            <button class="qs-btn qs-btn-primary" @click="resetSync()">重试</button>
-          </div>
-        </div>
-
-      </div>
-
-      <!-- ===== 历史页面 ===== -->
-      <div x-show="tab === 'history'">
-
-        <!-- 加载状态 -->
-        <div class="loading" x-show="historyLoading">加载中...</div>
-
-        <!-- 错误提示 -->
-        <div class="error-banner" x-show="!historyLoading && historyError" x-text="historyError"></div>
-
-        <!-- 列表视图 -->
-        <div x-show="!historyLoading && !historyDetail">
-          <table class="qs-table" x-show="historyList.length > 0">
-            <thead>
-              <tr>
-                <th>运行时间</th>
-                <th>耗时</th>
-                <th>成功</th>
-                <th>失败</th>
-                <th>跳过</th>
-                <th>失败产品</th>
-                <th></th>
-              </tr>
-            </thead>
+        <div class="sheet-body">
+          <table class="table">
+            <thead><tr><th>产品</th><th class="num">落后天数</th><th class="num">预计调用</th></tr></thead>
             <tbody>
-              <template x-for="run in historyList" :key="run.run_id">
-                <tr>
-                  <td x-text="formatLocalTime(run.started_at)"></td>
-                  <td x-text="formatDuration(run.duration_seconds)"></td>
-                  <td><span style="color:#16a34a; font-weight:500;" x-text="run.success_total"></span></td>
-                  <td><span style="color:#c4382f; font-weight:500;" x-text="run.failed_total"></span></td>
-                  <td style="color:#8b8f96;" x-text="run.skipped_total"></td>
-                  <!-- 失败产品标签列：最多显示 3 个，超出显示 +N -->
-                  <td>
-                    <template x-if="run.failed_products && run.failed_products.length > 0">
-                      <div class="fail-tags">
-                        <template x-for="(fp, idx) in run.failed_products.slice(0, 3)" :key="fp">
-                          <span class="fail-tag" x-text="fp"></span>
-                        </template>
-                        <template x-if="run.failed_products.length > 3">
-                          <span class="fail-tag" x-text="'+' + (run.failed_products.length - 3)"></span>
-                        </template>
-                      </div>
-                    </template>
-                  </td>
-                  <td><button class="btn-link" @click="viewDetail(run.report_file)">详情</button></td>
-                </tr>
+              <template x-for="p in (estimateData ? estimateData.products : [])" :key="'e-' + p.name">
+                <tr><td x-text="labelOf(p.name)"></td><td class="num" x-text="p.gap_days"></td><td class="num" x-text="p.estimated_calls"></td></tr>
               </template>
             </tbody>
+            <tfoot><tr><td>合计</td><td></td><td class="num" x-text="estimateData ? estimateData.total_calls : 0"></td></tr></tfoot>
           </table>
-          <div class="empty-state" x-show="historyList.length === 0 && !historyError">暂无运行记录</div>
         </div>
-
-        <!-- 详情视图（用 x-if 避免 historyDetail 为 null 时访问属性报错） -->
-        <template x-if="!historyLoading && historyDetail">
-          <div>
-            <button class="btn-back" @click="backToList()">&larr; 返回列表</button>
-
-            <div class="detail-header">
-              <span x-text="'运行时间: ' + formatLocalTime(historyDetail.started_at)"></span>
-              <span x-text="'耗时: ' + formatDuration(historyDetail.duration_seconds)"></span>
-            </div>
-
-            <!-- 摘要统计 -->
-            <div class="qs-summary" style="margin-bottom:14px;">
-              <span class="green" x-text="'成功: ' + historyDetail.success_total"></span>
-              <span class="red" x-text="'失败: ' + historyDetail.failed_total"></span>
-              <span class="gray" x-text="'跳过: ' + historyDetail.skipped_total"></span>
-            </div>
-
-            <!-- 产品列表（失败→跳过→成功排序，用 .qs-product-list 风格） -->
-            <div class="qs-card" style="padding:10px 14px;">
-              <ul class="qs-product-list">
-                <template x-for="p in sortedDetailProducts()" :key="p.product">
-                  <li class="qs-product-item">
-                    <div class="qs-product-icon"
-                      :class="{ 'icon-check': p.status === 'ok', 'icon-cross': p.status === 'error', 'icon-skip': p.status === 'skipped' }"
-                      x-text="p.status === 'ok' ? '✓' : (p.status === 'error' ? '✗' : '–')">
-                    </div>
-                    <span class="qs-product-name"
-                      :class="{ 'fail': p.status === 'error', 'muted': p.status === 'skipped' }"
-                      x-text="p.product"></span>
-                    <!-- 失败：显示错误；跳过/成功：显示耗时+文件数 -->
-                    <template x-if="p.status === 'error' && p.error">
-                      <span class="qs-product-err" :title="p.error" x-text="p.error"></span>
-                    </template>
-                    <template x-if="p.status !== 'error' || !p.error">
-                      <span class="qs-product-meta" x-text="formatProductMeta(p.elapsed_seconds, p.files_count)"></span>
-                    </template>
-                  </li>
-                </template>
-              </ul>
-            </div>
-          </div>
-        </template>
-
-      </div>
-
-    </main>
-
-    <!-- 检查更新确认弹窗（须在 x-data 作用域内） -->
-    <div class="modal-overlay" x-show="checkUpdateConfirmVisible" x-cloak>
-      <div class="modal-box">
-        <p>此操作会消耗 API 访问次数，是否继续？</p>
-        <div class="modal-actions">
-          <button class="qs-btn qs-btn-primary" @click="doCheckUpdates()">确认</button>
-          <button class="qs-btn qs-btn-outline" @click="checkUpdateConfirmVisible = false">取消</button>
+        <div class="sheet-actions">
+          <button class="button" @click="cancelSync()" :disabled="!estimateData">取消同步</button>
+          <button class="button primary" @click="confirmSync()" :disabled="!estimateData">继续同步</button>
         </div>
       </div>
     </div>
