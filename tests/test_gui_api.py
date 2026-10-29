@@ -547,6 +547,26 @@ class TestStartSyncAlreadyRunning(unittest.TestCase):
                     # 释放慢任务线程（daemon=True，即使未 join 也不阻塞进程退出）
                     hold.set()
 
+    def test_start_sync_rejected_during_health_check(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_file = Path(tmp_dir) / "user_config.json"
+            config_file.write_text("{}", encoding="utf-8")
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.load_user_config_or_raise", return_value=_make_mock_config(tmp_dir)), \
+                 patch(f"{_API_MOD}.load_catalog_or_raise", return_value=["product-a"]):
+
+                from quantclass_sync_internal.gui.api import SyncApi
+                api = SyncApi()
+                api._health_progress["checking"] = True
+
+                with patch.object(api, '_run_sync') as run_sync:
+                    result = api.start_sync()
+
+                self.assertFalse(result["started"])
+                self.assertIn("健康检查进行中", result["message"])
+                run_sync.assert_not_called()
+
 
 class TestStartSyncNoCredentials(unittest.TestCase):
     """start_sync 无凭证时，后台线程将 progress 置为 error。"""

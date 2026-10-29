@@ -94,7 +94,8 @@
           </button>
         </template>
         <template x-if="syncStatus !== 'syncing' && page !== 'sync'">
-          <button class="button primary" @click="startSync()" :disabled="loading && products.length === 0">
+          <button class="button primary" @click="startSync()" :disabled="(loading && products.length === 0) || healthState === 'checking'"
+                  :title="healthState === 'checking' ? '数据健康检查进行中，完成后才能同步' : ''">
             <span class="icon i-sync"></span>立即同步
           </button>
         </template>
@@ -175,18 +176,20 @@
                 </div>
               </template>
 
-              <div class="empty" x-show="groupedProducts().length === 0">
-                <span class="icon icon-xl" :class="segment === 'attention' && !searchText ? 'i-check' : 'i-search'"></span>
-                <div class="empty-title" x-text="segment === 'attention' && !searchText ? '没有需要关注的产品' : '没有匹配的产品'"></div>
-                <div x-show="searchText">换个关键词试试，支持中文名和产品 ID</div>
-              </div>
+              <template x-if="groupedProducts().length === 0 && emptyState()">
+                <div class="empty">
+                  <span class="icon icon-xl" :class="emptyState().icon"></span>
+                  <div class="empty-title" x-text="emptyState().title"></div>
+                  <div x-show="emptyState().sub" x-text="emptyState().sub"></div>
+                </div>
+              </template>
 
               <template x-if="segment === 'local' && missingProducts().length > 0">
                 <div>
                   <button class="disclosure" :class="{ open: showMissing }" @click="showMissing = !showMissing">
                     <span class="icon i-chevron"></span>未下载的产品<small x-text="missingProducts().length + ' 个'"></small>
                   </button>
-                  <div x-show="showMissing">
+                  <div x-show="showMissing || groupedProducts().length === 0">
                     <div class="group">
                       <template x-for="p in missingProducts()" :key="'missing-' + p.name">
                         <div class="row compact muted">
@@ -223,10 +226,11 @@
                        x-text="'将检查 ' + localProducts().length + ' 个已下载产品' + (attentionCount() > 0 ? '，其中 ' + attentionCount() + ' 个落后于最新数据' : '，目前都是最新的')"></div>
                 </div>
                 <div class="hero-actions">
-                  <button class="button primary large" @click="startSync()" :disabled="localProducts().length === 0">开始同步</button>
+                  <button class="button primary large" @click="startSync()" :disabled="localProducts().length === 0 || healthState === 'checking'">开始同步</button>
                 </div>
               </div>
-              <p class="footnote" style="margin-top:-12px">本地落后多天时会按交易日自动补齐缺口，每个产品每天会消耗 API 下载次数。</p>
+              <p class="footnote" style="margin-top:-12px"
+                 x-text="healthState === 'checking' ? '数据健康检查进行中，检查完成后才能开始同步。' : '本地落后多天时会按交易日自动补齐缺口，每个产品每天会消耗 API 下载次数。'"></p>
 
               <template x-if="lastRun">
                 <div>
@@ -324,9 +328,9 @@
                   </div>
                 </div>
                 <div class="hero-actions">
-                  <button class="button" x-show="runSummary && runSummary.failed_products && runSummary.failed_products.length > 0" @click="retryFailed()">重试失败产品</button>
+                  <button class="button" x-show="runSummary && runSummary.failed_products && runSummary.failed_products.length > 0" @click="retryFailed()" :disabled="healthState === 'checking'">重试失败产品</button>
                   <button class="button" x-show="syncStatus === 'error'" @click="resetSync()">返回</button>
-                  <button class="button primary" x-show="syncStatus === 'error'" @click="startSync()">重新同步</button>
+                  <button class="button primary" x-show="syncStatus === 'error'" @click="startSync()" :disabled="healthState === 'checking'">重新同步</button>
                   <button class="button primary" x-show="syncStatus === 'done'" @click="resetSync(); go('overview')">完成</button>
                 </div>
               </div>
@@ -484,7 +488,7 @@
                   <div class="hero-sub" x-text="healthMeta()"></div>
                 </div>
                 <div class="hero-actions">
-                  <button class="button" @click="startHealthCheck()" :disabled="syncStatus === 'syncing'">重新检查</button>
+                  <button class="button" @click="startHealthCheck()" :disabled="syncStatus === 'syncing' || repairing">重新检查</button>
                   <button class="button primary" x-show="repairableCount() > 0" @click="repairIssues()" :disabled="repairing"
                           x-text="repairing ? '修复中…' : '修复 ' + repairableCount() + ' 个问题'"></button>
                 </div>

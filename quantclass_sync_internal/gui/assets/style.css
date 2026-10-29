@@ -301,6 +301,8 @@ button { cursor: default; border: 0; background: none; }
   padding: 0 18px 0 26px;
 }
 .toolbar-title { flex: 1; min-width: 0; font-size: 17px; font-weight: 700; letter-spacing: -0.01em; white-space: nowrap; }
+/* 让按在标题文字上也算按在拖拽区域本身，才能拖动窗口 */
+.toolbar-title > * { pointer-events: none; }
 .toolbar-title small { margin-left: 8px; font-size: 12px; font-weight: 500; color: var(--label-2); letter-spacing: 0; }
 
 .search {
@@ -316,6 +318,7 @@ button { cursor: default; border: 0; background: none; }
 }
 .search:focus-within { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 40%, transparent); }
 .search input { flex: 1; min-width: 0; border: 0; background: none; color: var(--label); }
+.search input:focus-visible { outline: none; }
 .search input::placeholder { color: var(--label-3); }
 .search-clear { display: inline-flex; width: 16px; height: 16px; align-items: center; justify-content: center; border-radius: 50%; background: var(--label-3); color: var(--content); }
 .search-clear .icon { width: 9px; height: 9px; }

@@ -504,6 +504,9 @@ class SyncApi:
             # confirm_needed/postprocessing 状态表示同步已在进行中，也需拦截
             if self._progress.get("status") in ("syncing", "confirm_needed", "postprocessing"):
                 return {"started": False, "message": "同步正在进行中，请等待完成后再试。"}
+            # 检查期间写入文件会让扫描结果失真，之后的修复可能误改数据
+            if self._health_progress["checking"]:
+                return {"started": False, "message": "数据健康检查进行中，请等检查完成后再同步。"}
 
             # retry_failed 分支：从上次 run_summary 读取失败产品名
             if retry_failed:

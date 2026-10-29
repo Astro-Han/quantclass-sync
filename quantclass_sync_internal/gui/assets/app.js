@@ -267,6 +267,19 @@ document.addEventListener('alpine:init', () => {
                 .filter(g => g.items.length > 0);
         },
 
+        // 筛选结果为空时的提示；一个都没下载时总览标题已经说明，不再重复
+        emptyState() {
+            if (this.searchText.trim()) {
+                return { icon: 'i-search', title: '没有匹配的产品', sub: '换个关键词试试，支持中文名和产品 ID' };
+            }
+            if (this.segment === 'attention') return { icon: 'i-check', title: '没有需要关注的产品', sub: '' };
+            if (this.segment === 'fresh') {
+                return { icon: 'i-sync', title: '还没有已是最新的产品', sub: '同步完成后，数据追上最新日期的产品会出现在这里' };
+            }
+            if (this.segment === 'missing') return { icon: 'i-check', title: '所有产品都已下载', sub: '' };
+            return this.category ? { icon: 'i-download', title: '这个分类还没有已下载的产品', sub: '' } : null;
+        },
+
         missingProducts() {
             return this.products.filter(p => p.color === 'gray' && this.inCategory(p) && this.matchesSearch(p));
         },
@@ -591,8 +604,8 @@ document.addEventListener('alpine:init', () => {
         // 返回如 "1.2 秒 · 826 个文件" 或 "0.5 秒"
         formatProductMeta(elapsed, filesCount) {
             let parts = [];
-            if (elapsed != null) parts.push(Math.round(elapsed * 10) / 10 + ' 秒');
-            if (filesCount != null && filesCount > 0) parts.push(filesCount + ' 个文件');
+            if (elapsed != null) parts.push(elapsed < 60 ? Math.round(elapsed * 10) / 10 + ' 秒' : this.formatDuration(elapsed));
+            if (filesCount != null && filesCount > 0) parts.push(filesCount.toLocaleString() + ' 个文件');
             return parts.join(' · ');
         },
 
@@ -737,7 +750,12 @@ document.addEventListener('alpine:init', () => {
             this.repairResult = null;
             this.repairing = false;
             this.healthResult = null;
-            const res = await window.pywebview.api.start_health_check();
+            let res;
+            try {
+                res = await window.pywebview.api.start_health_check();
+            } catch (e) {
+                res = { ok: false, error: String(e) };
+            }
             if (!res.ok) { this.healthError = res.error; this.healthState = 'error'; return; }
             this.healthState = 'checking';
             this.healthProgress = {current: 0, total: 0, product: ''};
@@ -745,16 +763,22 @@ document.addEventListener('alpine:init', () => {
         },
         pollHealthProgress() {
             this.healthPollTimer = setTimeout(async () => {
-                const prog = await window.pywebview.api.get_health_progress();
-                this.healthProgress = prog;
-                if (prog.checking) { this.pollHealthProgress(); return; }
-                const result = await window.pywebview.api.get_health_result();
-                if (result && result.ok) {
-                    this.healthResult = result.health;
-                    this.healthState = 'done';
-                } else {
-                    this.healthError = result ? result.error : '检查失败';
-                    this.healthState = 'error';
+                try {
+                    const prog = await window.pywebview.api.get_health_progress();
+                    this.healthProgress = prog;
+                    if (prog.checking) { this.pollHealthProgress(); return; }
+                    const result = await window.pywebview.api.get_health_result();
+                    if (result && result.ok) {
+                        this.healthResult = result.health;
+                        this.healthState = 'done';
+                    } else {
+                        this.healthError = result ? result.error : '检查失败';
+                        this.healthState = 'error';
+                    }
+                } catch (e) {
+                    // 与同步轮询一致：桥接偶发异常时不改状态，继续下次轮询
+                    console.error('health poll failed:', e);
+                    this.pollHealthProgress();
                 }
             }, 1000);
         },
@@ -791,6 +815,9 @@ document.addEventListener('alpine:init', () => {
                 } else {
                     this.repairMessage = '修复失败：' + (res.error || '未知错误');
                 }
+            } catch (e) {
+                console.error('repairIssues failed:', e);
+                this.repairMessage = '修复失败：' + String(e);
             } finally {
                 this.repairing = false;
             }
@@ -809,7 +836,7 @@ document.addEventListener('alpine:init', () => {
         },
         healthMeta() {
             const s = this.healthResult.summary;
-            return '扫描 ' + s.scanned_products + ' 个产品、' + s.scanned_files + ' 个文件，用时 ' + this.formatDuration(s.elapsed_seconds);
+            return '扫描 ' + s.scanned_products + ' 个产品、' + Number(s.scanned_files).toLocaleString() + ' 个文件，用时 ' + this.formatDuration(s.elapsed_seconds);
         },
         categoryLabel(cat) {
             return {file_integrity:'文件完整性',content_integrity:'内容完整性',temporal_integrity:'时间完整性',coverage_integrity:'覆盖完整性',format_integrity:'格式完整性'}[cat] || cat;
