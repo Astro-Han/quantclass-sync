@@ -1,6 +1,10 @@
 # 每行一个产品英文名（product_id）
 coin-binance-swap-candle-csv-1h
 coin-binance-candle-csv-1h
+coin-okx-swap-candle-csv-1h
+coin-okx-candle-csv-1h
+coin-hl-spot-candle-csv-1h
+coin-hl-swap-candle-csv-1h
 stock-us-trading-data
 stock-call-auction-data
 stock-us-main-index-data
@@ -10,9 +14,12 @@ stock-chip-distribution
 stock-main-index-data
 stock-fin-pre-fore-data-xbx
 stock-1h-trading-data
+stock-1h-trading-data-pro
 stock-1h-index-data
 coin-chain-basic-data
 stock-etf-trading-data
+stock-etf-1h-trading-data
+stock-etf-5m-close-price
 stock-trading-data
 stock-trading-data-pro
 stock-money-flow-xbx
