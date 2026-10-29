@@ -5,4 +5,4 @@ rich>=13.0.0
 pandas>=2.0.0
 pyarrow>=14.0.0
 # GUI 依赖（CLI 用户可不安装，但推荐完整安装）
-pywebview>=5.0
+pywebview>=6.1

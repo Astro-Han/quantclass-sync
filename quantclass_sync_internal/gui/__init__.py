@@ -13,7 +13,15 @@ def _apply_macos_chrome(window) -> None:
     """macOS：网页铺满整个窗口，标题栏只保留红绿灯。"""
 
     import AppKit
+    import webview
     from PyObjCTools import AppHelper
+
+    # 旧版 pywebview 没有 before_show 事件，保留系统默认窗口
+    if not hasattr(getattr(window, "events", None), "before_show"):
+        return
+    # 标题栏区域的点击会落到网页上，窗口拖动交给 .pywebview-drag-region；
+    # 只认直接按在拖拽区域本身，避免点工具栏按钮时带动窗口
+    webview.settings["DRAG_REGION_DIRECT_TARGET_ONLY"] = True
 
     def style_window() -> None:
         ns_window = window.native
@@ -59,9 +67,6 @@ def launch_gui() -> None:
         min_size=(860, 560),
     )
     if sys.platform == "darwin":
-        # 标题栏区域的点击会落到网页上，窗口拖动交给 .pywebview-drag-region；
-        # 只认直接按在拖拽区域本身，避免点工具栏按钮时带动窗口
-        webview.settings["DRAG_REGION_DIRECT_TARGET_ONLY"] = True
         _apply_macos_chrome(window)
     # 启动 pywebview 主循环（阻塞直到窗口关闭）
     webview.start(debug=False)
