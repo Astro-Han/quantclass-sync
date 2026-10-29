@@ -44,7 +44,7 @@ from ..data_query import (
     repair_data_issues,
 )
 from ..http_client import get_latest_time
-from ..models import CommandContext, FatalRequestError, UserConfig, log_error, log_info, new_run_id
+from ..models import CommandContext, FatalRequestError, UserConfig, log_error, log_info, new_run_id, utc_now_iso
 from ..orchestrator import _build_headers, load_catalog_or_raise, run_update_with_settings
 from ..status_store import report_dir_path, update_api_latest_dates
 
@@ -416,13 +416,24 @@ class SyncApi:
             # basic 固定 10 次/天，premium 固定 100 次/天
             _limit_map = {"basic": 10, "premium": 100}
             _api_call_limit = _limit_map.get(course_type, 50)
-            config = UserConfig(
-                data_root=str(dr),
-                product_mode="local_scan",
-                default_products=[],
-                course_type=course_type,
-                api_call_limit=_api_call_limit,
-            )
+            try:
+                previous = load_user_config_or_raise(config_file)
+            except RuntimeError:
+                previous = None
+            if previous is None:
+                config = UserConfig(
+                    data_root=str(dr),
+                    product_mode="local_scan",
+                    default_products=[],
+                    course_type=course_type,
+                    api_call_limit=_api_call_limit,
+                )
+            else:
+                # 只改界面上有的字段，CLI 设置的产品清单和自定义额度保留
+                update = {"data_root": dr, "course_type": course_type, "updated_at": utc_now_iso()}
+                if course_type != previous.course_type:
+                    update["api_call_limit"] = _api_call_limit
+                config = previous.model_copy(update=update)
             save_setup_artifacts_atomic(
                 config_path=config_file,
                 config=config,

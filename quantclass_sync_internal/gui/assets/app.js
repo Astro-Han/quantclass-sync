@@ -939,6 +939,8 @@ document.addEventListener('alpine:init', () => {
         },
 
         cancelSetup() {
+            // 保存在验证前已落盘，验证期间离开会让界面显示旧目录
+            if (this.setupLoading) return;
             this.currentView = 'main';
         },
 

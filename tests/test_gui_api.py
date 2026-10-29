@@ -9,6 +9,7 @@
   - 前端字段名验证
 """
 
+import json
 import tempfile
 import time
 import unittest
@@ -328,6 +329,36 @@ class TestRunSetupKeepsSavedCredentials(unittest.TestCase):
         self.assertEqual(kwargs["api_key"], "old-key")
         self.assertEqual(kwargs["hid"], "new-hid")
         self.assertEqual(kwargs["config"].course_type, "premium")
+
+    def test_existing_config_fields_kept(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_dir = Path(tmp_dir) / "new-root"
+            data_dir.mkdir()
+            config_file = Path(tmp_dir) / "user_config.json"
+            config_file.write_text(json.dumps({
+                "data_root": str(Path(tmp_dir) / "old-root"),
+                "product_mode": "explicit_list",
+                "default_products": ["stock-trading-data"],
+                "course_type": "premium",
+                "api_call_limit": 37,
+            }), encoding="utf-8")
+            secrets_file = Path(tmp_dir) / "user_secrets.env"
+            secrets_file.write_text("QUANTCLASS_API_KEY=k\nQUANTCLASS_HID=h\n", encoding="utf-8")
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.DEFAULT_USER_SECRETS_FILE", secrets_file), \
+                 patch(f"{_API_MOD}.requests.get", return_value=mock_resp):
+                from quantclass_sync_internal.gui.api import SyncApi
+                result = SyncApi().run_setup(str(data_dir), "", "", course_type="premium")
+            saved = json.loads(config_file.read_text(encoding="utf-8"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(saved["data_root"], str(data_dir.resolve()))
+        self.assertEqual(saved["product_mode"], "explicit_list")
+        self.assertEqual(saved["default_products"], ["stock-trading-data"])
+        self.assertEqual(saved["api_call_limit"], 37)
 
     def test_blank_without_saved_rejected(self):
         result, mock_save = self._run("", "", "")

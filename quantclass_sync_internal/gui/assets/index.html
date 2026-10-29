@@ -605,7 +605,7 @@
           <p class="footnote">用于估算每日下载额度，下载次数较多时会先请你确认。</p>
 
           <div class="setup-actions">
-            <button type="button" class="button large" x-show="setupFromMain" @click="cancelSetup()">取消</button>
+            <button type="button" class="button large" x-show="setupFromMain" :disabled="setupLoading" @click="cancelSetup()">取消</button>
             <button type="submit" class="button primary large" :disabled="!setupValid() || setupLoading"
                     x-text="setupLoading ? '正在验证…' : (setupFromMain ? '保存' : '开始使用')"></button>
           </div>
