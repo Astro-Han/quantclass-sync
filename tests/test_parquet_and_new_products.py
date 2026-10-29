@@ -8,7 +8,9 @@ from quantclass_sync_internal.archive import extract_archive
 from quantclass_sync_internal.config import build_product_plan, discover_local_products
 from quantclass_sync_internal.constants import REASON_OK, STRATEGY_MERGE_KNOWN
 from quantclass_sync_internal.csv_engine import read_csv_payload
-from quantclass_sync_internal.file_sync import sync_known_product
+from quantclass_sync_internal.data_query import infer_local_date_from_csv
+from quantclass_sync_internal.file_sync import sortable_products, sync_known_product
+from quantclass_sync_internal.models import RULES
 
 
 NEW_PRODUCTS = [
@@ -144,6 +146,23 @@ class ParquetAndNewProductTests(unittest.TestCase):
         )
         discovered = discover_local_products(self.data, ["stock-1h-trading-data-pro"])
         self.assertEqual([("stock-1h-trading-data-pro", True)], [(d.name, d.valid) for d in discovered])
+
+    def test_parquet_product_without_timestamp_infers_local_date(self) -> None:
+        # 推断不到就会被当成首次同步，只下载最新一天，中间缺口不再回补
+        product_dir = self.data / "stock-1h-trading-data-pro"
+        product_dir.mkdir(parents=True)
+        _hour_frame(
+            "股票代码",
+            [("sz000001", "2026-10-19 15:00", 1.0), ("sz000001", "2026-10-20 15:00", 2.0)],
+        ).to_parquet(product_dir / "sz000001.parquet", index=False)
+        inferred = infer_local_date_from_csv(
+            self.data, "stock-1h-trading-data-pro", RULES["stock-1h-trading-data-pro"]
+        )
+        self.assertEqual("2026-10-20", inferred)
+
+    def test_parquet_products_not_offered_for_sort_repair(self) -> None:
+        self.assertNotIn("stock-1h-trading-data-pro", sortable_products())
+        self.assertNotIn("stock-etf-1h-trading-data", sortable_products())
 
 
 if __name__ == "__main__":

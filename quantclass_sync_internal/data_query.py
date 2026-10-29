@@ -11,11 +11,13 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+import pandas as pd
+
 from .config import atomic_temp_path
 from .constants import (
     ENCODING_CANDIDATES, KNOWN_DATASETS, TIMESTAMP_FILE_NAME,
     BUSINESS_DAY_ONLY_PRODUCTS, FINANCIAL_PRODUCTS, NOTICE_PRODUCTS,
-    INFRA_PRODUCTS, REASON_NO_VALID_OUTPUT,
+    INFRA_PRODUCTS, PARQUET_OUTPUT_PRODUCTS, REASON_NO_VALID_OUTPUT,
 )
 from .csv_engine import write_csv_payload
 from .models import CsvPayload, log_error, RULES
@@ -44,6 +46,8 @@ def infer_local_date_from_csv(data_root: Path, product: str, rule) -> Optional[s
         return None
 
     product_dir = data_root / product
+    if product in PARQUET_OUTPUT_PRODUCTS:
+        return _infer_local_date_from_parquet(product_dir, date_col)
     csv_files = _list_csv_files(product_dir)
     if not csv_files:
         return None
@@ -67,6 +71,28 @@ def infer_local_date_from_csv(data_root: Path, product: str, rule) -> Optional[s
                         max_date = d
         except Exception:
             continue
+    return max_date
+
+
+def _infer_local_date_from_parquet(product_dir: Path, date_col: str) -> Optional[str]:
+    """与 CSV 推断同一策略：按文件名倒序取最后 20 个文件，取日期列最大值。"""
+    if not product_dir.exists():
+        return None
+    files = sorted(
+        (f for f in product_dir.rglob("*.parquet") if not f.name.startswith(".")),
+        key=lambda f: f.name, reverse=True,
+    )
+    max_date = None
+    for f in files[:20]:
+        try:
+            values = pd.read_parquet(f, columns=[date_col])[date_col].dropna()
+        except Exception:
+            continue
+        if values.empty:
+            continue
+        d = normalize_data_date(str(values.max())[:10])
+        if d and (max_date is None or d > max_date):
+            max_date = d
     return max_date
 
 

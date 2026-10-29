@@ -602,9 +602,12 @@ def write_csv_payload_atomic(path: Path, payload: CsvPayload, rule: DatasetRule,
         write_csv_payload(tmp, payload, rule, dry_run=False)
 
 def sortable_products() -> List[str]:
-    """返回支持排序修复的产品列表（排除非目录型数据）。"""
+    """返回支持排序修复的产品列表（排除非目录型数据；parquet 产品每次合并都会重排，不需要修复）。"""
 
-    return sorted([name for name, rule in RULES.items() if rule.sort_cols and "." not in name])
+    return sorted([
+        name for name, rule in RULES.items()
+        if rule.sort_cols and "." not in name and name not in PARQUET_OUTPUT_PRODUCTS
+    ])
 
 def repair_sort_product_files(
     product: str,
