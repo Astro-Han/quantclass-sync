@@ -117,7 +117,9 @@ def resolve_report_path(ctx: CommandContext, command: str) -> Path:
 
     if ctx.report_file:
         return ctx.report_file.resolve()
-    return (report_dir_path(ctx.data_root) / f"run_report_{ctx.run_id}_{command}.json").resolve()
+    # 状态、历史和 GUI 都按 run_report_* 读取同步记录，演练报告不能混进去
+    prefix = "dry_run_report" if ctx.dry_run else "run_report"
+    return (report_dir_path(ctx.data_root) / f"{prefix}_{ctx.run_id}_{command}.json").resolve()
 
 
 def decide_exit_code(

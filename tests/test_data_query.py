@@ -1271,6 +1271,19 @@ class TestDryRunDoesNotWriteProductLastStatus(unittest.TestCase):
                 "dry_run=True 不应写入 product_last_status.json",
             )
 
+    def test_dry_run_report_not_listed_as_sync_record(self):
+        """演练报告换前缀，状态与历史按 run_report_* 读取时不会把它当成一次同步。"""
+        from quantclass_sync_internal.models import CommandContext
+        from quantclass_sync_internal.reporting import resolve_report_path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            dry = resolve_report_path(CommandContext(run_id="r1", data_root=root, dry_run=True), "update")
+            real = resolve_report_path(CommandContext(run_id="r2", data_root=root), "update")
+
+        self.assertFalse(dry.match("run_report_*.json"))
+        self.assertTrue(real.match("run_report_*.json"))
+
     def test_non_dry_run_writes_status(self):
         """dry_run=False 时，正常写入 product_last_status.json。"""
         from quantclass_sync_internal.reporting import (
