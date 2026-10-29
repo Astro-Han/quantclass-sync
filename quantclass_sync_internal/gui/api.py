@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from ..config import (
     ensure_data_root_ready,
+    load_catalog_labels,
     load_secrets_from_file,
     load_user_config_or_raise,
     resolve_credentials_for_update,
@@ -73,12 +74,19 @@ def _format_overview_products(
     *,
     api_latest_dates: Optional[Dict[str, str]] = None,
 ) -> list:
-    """把 overview 原始记录转换为前端字段。"""
+    """把 overview 原始记录转换为前端字段（含 catalog 中的中文名与分类）。"""
 
+    try:
+        labels = load_catalog_labels(DEFAULT_CATALOG_FILE.resolve())
+    except OSError:
+        labels = {}
     products = []
     for item in raw_products:
+        label, category = labels.get(item["name"], ("", ""))
         product = {
             "name": item["name"],
+            "label": label or item["name"],
+            "category": category,
             "color": item["status_color"],
             "local_date": item["local_date"],
             "behind_days": item["days_behind"],

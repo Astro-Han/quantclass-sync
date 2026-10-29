@@ -1,55 +1,55 @@
-# 每行一个产品英文名（product_id）
-coin-binance-swap-candle-csv-1h
-coin-binance-candle-csv-1h
-coin-okx-swap-candle-csv-1h
-coin-okx-candle-csv-1h
-coin-hl-spot-candle-csv-1h
-coin-hl-swap-candle-csv-1h
-stock-us-trading-data
-stock-call-auction-data
-stock-us-main-index-data
-stock-interest-rate
-stock-popular-concept-detail
-stock-chip-distribution
-stock-main-index-data
-stock-fin-pre-fore-data-xbx
-stock-1h-trading-data
-stock-1h-trading-data-pro
-stock-1h-index-data
-coin-chain-basic-data
-stock-etf-trading-data
-stock-etf-1h-trading-data
-stock-etf-5m-close-price
-stock-trading-data
-stock-trading-data-pro
-stock-money-flow-xbx
-stock-equity
-stock-xueqiu-hot-stock
-stock-cny-rate
-stock-hk-stock-data
-stock-fin-pre-data-sina
-stock-analyst-ranking
-stock-lhb-organ
-stock-basic-bond
-stock-activation-records
-stock-analyst-predicted
-stock-ind-element-equity
-coin-coinmarketcap
-stock-asset-classification
-stock-dividend-delivery
-stock-trading-date
-coin-cap
-stock-us-dividend-delivery-data
-stock-notices-title
-stock-5m-close-price
-stock-15m-close-price
-stock-money-flow
-stock-fin-data-xbx
-stock-oscillator-factors
-stock-technical-factors
-stock-anti-trend-factors
-stock-volume-price-factors
-stock-energy-factors
-stock-trend-factors
-stock-multi-factor-series
-period_offset
+# 每行一个产品：product_id | 中文名 | 分类（中文名、分类取自官网产品列表，可省略）
+coin-binance-swap-candle-csv-1h | 币安永续合约 1 小时数据 | 加密货币
+coin-binance-candle-csv-1h | 币安现货 1 小时数据 | 加密货币
+coin-okx-swap-candle-csv-1h | OKX 永续合约 1 小时数据 | 加密货币
+coin-okx-candle-csv-1h | OKX 现货 1 小时数据 | 加密货币
+coin-hl-spot-candle-csv-1h | Hyperliquid 现货 1 小时数据 | 加密货币
+coin-hl-swap-candle-csv-1h | Hyperliquid 合约 1 小时数据 | 加密货币
+stock-us-trading-data | 美股日线数据 | 美股
+stock-call-auction-data | 股票集合竞价日线数据 | A股行情
+stock-us-main-index-data | 美股主要指数日线数据 | 美股
+stock-interest-rate | 国债到期收益率 | 宏观
+stock-popular-concept-detail | 股票人气概念数据 | A股市场
+stock-chip-distribution | 筹码分布数据 | A股市场
+stock-main-index-data | 主要指数日线数据 | A股行情
+stock-fin-pre-fore-data-xbx | 邢不行财务预告数据 | 财务
+stock-1h-trading-data | 股票 1 小时 K 线（旧版） | A股行情
+stock-1h-trading-data-pro | 股票 1 小时 K 线 Pro | A股行情
+stock-1h-index-data | 指数 1 小时 K 线 | A股行情
+coin-chain-basic-data | 链上基本面数据（ETH，已停更） | 加密货币
+stock-etf-trading-data | ETF 基金日线数据 | A股行情
+stock-etf-1h-trading-data | ETF 1 小时交易数据 | A股行情
+stock-etf-5m-close-price | ETF 5 分钟收盘价 | A股行情
+stock-trading-data | 股票历史日线数据 | A股行情
+stock-trading-data-pro | 股票历史全息日线数据 | A股行情
+stock-money-flow-xbx | 邢不行资金流数据 | A股市场
+stock-equity | QuantClass 选股策略汇总 | A股市场
+stock-xueqiu-hot-stock | 热门股票数据 | A股市场
+stock-cny-rate | 人民币汇率 | 宏观
+stock-hk-stock-data | AH 港股数据 | A股市场
+stock-fin-pre-data-sina | 财务预处理数据 | 财务
+stock-analyst-ranking | 分析师评级数据 | A股市场
+stock-lhb-organ | 龙虎榜机构持仓数据 | A股市场
+stock-basic-bond | 可转债行情数据 | A股行情
+stock-activation-records | 机构调研数据 | A股市场
+stock-analyst-predicted | 机构预测数据 | A股市场
+stock-ind-element-equity | 指数成分股资金曲线 | A股市场
+coin-coinmarketcap | CoinMarketCap 基本面数据 | 加密货币
+stock-asset-classification | 大类资产 | A股市场
+stock-dividend-delivery | 个股分红数据 | A股市场
+stock-trading-date | 每日 A 股股票汇总 | A股行情
+coin-cap | 币安币对市值数据 | 加密货币
+stock-us-dividend-delivery-data | 美股分红数据 | 美股
+stock-notices-title | 股票公告标题汇总 | A股市场
+stock-5m-close-price | 股票 5 分钟收盘价 | A股行情
+stock-15m-close-price | 股票 15 分钟收盘价 | A股行情
+stock-money-flow | 资金流数据 | A股市场
+stock-fin-data-xbx | 邢不行财务数据 | 财务
+stock-oscillator-factors | 摆动指标因子 | 因子
+stock-technical-factors | 技术指标因子 | 因子
+stock-anti-trend-factors | 反趋向指标因子 | 因子
+stock-volume-price-factors | 量价指标因子 | 因子
+stock-energy-factors | 能量指标因子 | 因子
+stock-trend-factors | 趋向指标因子 | 因子
+stock-multi-factor-series | 多因子系列 | 因子
+period_offset | 交易日历

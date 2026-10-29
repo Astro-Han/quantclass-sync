@@ -273,7 +273,7 @@ def load_products_from_catalog(path: Path) -> List[str]:
     从 catalog.txt 读取产品列表。
 
     当前规范：
-    1) 每行一个产品英文名（product_id）
+    1) 每行一个产品：`product_id | 中文名 | 分类`，中文名和分类可省略
     2) 允许空行和 # 注释行
     """
 
@@ -283,7 +283,7 @@ def load_products_from_catalog(path: Path) -> List[str]:
     products: List[str] = []
     text = path.read_text(encoding="utf-8-sig", errors="ignore")
     for lineno, line in enumerate(text.splitlines(), start=1):
-        s = line.strip()
+        s = line.split("|", 1)[0].strip()
         if not s or s.startswith("#"):
             continue
         if not is_product_identifier(s):
@@ -297,6 +297,18 @@ def load_products_from_catalog(path: Path) -> List[str]:
     if not result:
         raise RuntimeError(f"产品清单为空：{path}；请至少配置一个产品英文名。")
     return result
+
+def load_catalog_labels(path: Path) -> Dict[str, Tuple[str, str]]:
+    """读取 catalog 中各产品的（中文名, 分类），未填写的列为空字符串。"""
+
+    labels: Dict[str, Tuple[str, str]] = {}
+    for line in path.read_text(encoding="utf-8-sig", errors="ignore").splitlines():
+        if line.strip().startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|")] + ["", ""]
+        if parts[0]:
+            labels[normalize_product_name(parts[0].lower())] = (parts[1], parts[2])
+    return labels
 
 def _dir_has_data_files(path: Path) -> bool:
     """

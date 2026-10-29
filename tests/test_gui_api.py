@@ -684,7 +684,9 @@ class TestOverviewFieldNames(unittest.TestCase):
         product = result["products"][0]
 
         # 验证所有预期字段存在
-        expected_product_fields = {"name", "color", "local_date", "behind_days", "last_result", "last_error"}
+        expected_product_fields = {
+            "name", "label", "category", "color", "local_date", "behind_days", "last_result", "last_error",
+        }
         self.assertEqual(set(product.keys()), expected_product_fields)
 
     def test_last_run_field_names(self):
