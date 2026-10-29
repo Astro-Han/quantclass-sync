@@ -8,7 +8,7 @@ from quantclass_sync_internal.config import build_product_plan
 from quantclass_sync_internal.constants import REASON_MERGE_ERROR, REASON_NO_DATA_FOR_DATE, REASON_NO_VALID_OUTPUT, REASON_OK, STRATEGY_MERGE_KNOWN, TIMESTAMP_FILE_NAME
 from quantclass_sync_internal.http_client import parse_latest_time_candidates
 from quantclass_sync_internal.models import CommandContext, EmptyDownloadLinkError, FatalRequestError, ProductPlan, ProductSyncError, RunReport, SyncStats
-from quantclass_sync_internal.orchestrator import _execute_plans, _resolve_requested_dates_for_plan
+from quantclass_sync_internal.orchestrator import _execute_plans, _resolve_requested_dates_for_plan, process_product
 from quantclass_sync_internal.reporting import _new_report
 from quantclass_sync_internal.status_store import _SOURCE_API_CHECK, connect_status_db
 
@@ -52,7 +52,7 @@ class UpdateCatchUpTests(unittest.TestCase):
         self._write_local_timestamp("2026-02-06")
         plan = self._plan()[0]
         report = self._report()
-        ctx = self._ctx(dry_run=True)
+        ctx = self._ctx()
 
         def fake_get_download_link(
             api_base: str,
@@ -84,11 +84,47 @@ class UpdateCatchUpTests(unittest.TestCase):
         self.assertFalse(skipped)
         self.assertEqual(["2026-02-10", "2026-02-11"], queue)
 
+    def test_dry_run_never_requests_download_link(self) -> None:
+        """获取下载链接会计入当日下载次数：演练的补缺口探测和单产品处理都不能请求。"""
+        self._write_local_timestamp("2026-02-06")
+        plan = self._plan()[0]
+        ctx = self._ctx(dry_run=True)
+
+        with patch("quantclass_sync_internal.orchestrator.get_latest_times", return_value=["2026-02-11"]), patch(
+            "quantclass_sync_internal.orchestrator.get_download_link",
+        ) as link_mock:
+            queue, skipped = _resolve_requested_dates_for_plan(
+                plan=plan,
+                command_ctx=ctx,
+                hid="hid",
+                headers={"api-key": "k"},
+                requested_date_time="",
+                force_update=False,
+                report=self._report(),
+                t_product_start=time.time(),
+                catch_up_to_latest=True,
+            )
+            result = process_product(
+                plan=plan,
+                date_time=queue[0],
+                api_base="https://api.quantclass.cn/api/data",
+                hid="hid",
+                headers={"api-key": "k"},
+                data_root=self.root,
+                work_dir=self.root / "work",
+                dry_run=True,
+            )
+
+        self.assertFalse(skipped)
+        self.assertEqual(["2026-02-09", "2026-02-10", "2026-02-11"], queue)
+        self.assertEqual((self.product, "2026-02-09", REASON_OK), (result[0], result[1], result[4]))
+        link_mock.assert_not_called()
+
     def test_resolve_catchup_dates_skips_probe_when_latest_has_multiple_dates(self) -> None:
         self._write_local_timestamp("2026-02-06")
         plan = self._plan()[0]
         report = self._report()
-        ctx = self._ctx(dry_run=True)
+        ctx = self._ctx()
 
         with patch(
             "quantclass_sync_internal.orchestrator.get_latest_times",
@@ -114,7 +150,7 @@ class UpdateCatchUpTests(unittest.TestCase):
         self._write_local_timestamp("2026-02-06")
         plan = self._plan()[0]
         report = self._report()
-        ctx = self._ctx(dry_run=True)
+        ctx = self._ctx()
 
         with patch("quantclass_sync_internal.orchestrator.get_latest_times", return_value=["2026-02-07", "2026-02-11"]), patch(
             "quantclass_sync_internal.orchestrator._probe_downloadable_dates",
@@ -147,7 +183,7 @@ class UpdateCatchUpTests(unittest.TestCase):
         self._write_local_timestamp("2026-02-06")
         plan = self._plan()[0]
         report = self._report()
-        ctx = self._ctx(dry_run=True)
+        ctx = self._ctx()
 
         with patch("quantclass_sync_internal.orchestrator.get_latest_times", return_value=["2026-02-11"]), patch(
             "quantclass_sync_internal.orchestrator._probe_downloadable_dates",
@@ -180,7 +216,7 @@ class UpdateCatchUpTests(unittest.TestCase):
         self._write_local_timestamp("2026-02-06")
         plan = self._plan()[0]
         report = self._report()
-        ctx = self._ctx(dry_run=True)
+        ctx = self._ctx()
 
         with patch(
             "quantclass_sync_internal.orchestrator.get_latest_times",
@@ -209,7 +245,7 @@ class UpdateCatchUpTests(unittest.TestCase):
         path.write_text("2026-02-06,2026-02-11 10:00:00\n", encoding="utf-8")
         plan = build_product_plan([product])[0]
         report = self._report()
-        ctx = self._ctx(dry_run=True)
+        ctx = self._ctx()
 
         with patch("quantclass_sync_internal.orchestrator.get_latest_times", return_value=["2026-02-11"]), patch(
             "quantclass_sync_internal.orchestrator._probe_downloadable_dates",
@@ -234,7 +270,7 @@ class UpdateCatchUpTests(unittest.TestCase):
     def test_non_catchup_latest_keeps_weekend_candidate(self) -> None:
         plan = self._plan()[0]
         report = self._report()
-        ctx = self._ctx(dry_run=True)
+        ctx = self._ctx()
         # 2026-02-07 是周六；非 catch-up 模式应保持 latest 原语义，不在这里做周末裁剪。
         with patch("quantclass_sync_internal.orchestrator.get_latest_times", return_value=["2026-02-07"]):
             queue, skipped = _resolve_requested_dates_for_plan(
@@ -261,7 +297,7 @@ class UpdateCatchUpTests(unittest.TestCase):
     def test_resolve_catchup_dates_gate_error_falls_back_to_latest(self) -> None:
         plan = self._plan()[0]
         report = self._report()
-        ctx = self._ctx(dry_run=True)
+        ctx = self._ctx()
 
         with patch("quantclass_sync_internal.orchestrator.get_latest_times", return_value=["2026-02-11"]), patch(
             "quantclass_sync_internal.orchestrator.read_local_timestamp_date",
@@ -286,7 +322,7 @@ class UpdateCatchUpTests(unittest.TestCase):
         self._write_local_timestamp("2025-01-01")
         plan = self._plan()[0]
         report = self._report()
-        ctx = self._ctx(dry_run=True)
+        ctx = self._ctx()
         latest_payload = ["2025-12-01", "2025-12-15", "2025-12-31"]
 
         with patch("quantclass_sync_internal.orchestrator.get_latest_times", return_value=latest_payload), patch(

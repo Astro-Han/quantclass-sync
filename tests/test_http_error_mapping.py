@@ -312,7 +312,7 @@ class HttpErrorMappingTests(unittest.TestCase):
                         headers={"api-key": "k"},
                         data_root=root / "data",
                         work_dir=root / ".cache",
-                        dry_run=True,
+                        dry_run=False,
                     )
 
             self.assertEqual(REASON_MERGE_ERROR, cm.exception.reason_code)

@@ -37,6 +37,7 @@ from .constants import (
     REASON_NO_DATA_FOR_DATE,
     REASON_NO_LOCAL_PRODUCTS,
     REASON_NO_VALID_OUTPUT,
+    REASON_OK,
     REASON_PREPROCESS_DRY_RUN,
     REASON_PREPROCESS_FAILED,
     REASON_PREPROCESS_FALLBACK_FULL_OK,
@@ -155,6 +156,10 @@ def process_product(
                 ),
                 reason_code=REASON_NETWORK_ERROR,
             ) from exc
+    if dry_run:
+        # 获取下载链接就会计入当日下载次数，演练只报告计划
+        log_info(f"[{product}] 演练模式：计划下载 {actual_time}，未实际下载。", event="SYNC_SKIP")
+        return product, actual_time, SyncStats(), "", REASON_OK
     # 第 2 步：下载文件并准备解压目录。
     download_path, extract_path = _download_and_prepare_extract(
         product=product,
@@ -655,15 +660,20 @@ def _resolve_requested_dates_for_plan(
             api_latest_date=api_latest_date,
             api_latest_candidates=api_latest_candidates,
         ):
-            # 列表缺失或不完整时，用逐日探测补齐。
-            probed_dates = _probe_downloadable_dates(
-                api_base=command_ctx.api_base.rstrip("/"),
-                product=product_name,
-                hid=hid,
-                headers=headers,
-                local_date=local_date,
-                latest_date=api_latest_date,
-            )
+            # 列表缺失或不完整时，用逐日探测补齐；探测要请求下载链接，演练改按预期日期估算。
+            if command_ctx.dry_run:
+                probed_dates = _expected_catchup_dates(
+                    local_date=local_date, latest_date=api_latest_date, product=product_name,
+                )
+            else:
+                probed_dates = _probe_downloadable_dates(
+                    api_base=command_ctx.api_base.rstrip("/"),
+                    product=product_name,
+                    hid=hid,
+                    headers=headers,
+                    local_date=local_date,
+                    latest_date=api_latest_date,
+                )
             catchup_dates = _normalize_date_queue(
                 list(catchup_dates) + list(probed_dates),
                 product=product_name,
