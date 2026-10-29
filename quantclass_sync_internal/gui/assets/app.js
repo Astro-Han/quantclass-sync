@@ -860,7 +860,8 @@ document.addEventListener('alpine:init', () => {
         // ===== Setup 向导方法 =====
 
         setupValid() {
-            return this.setupDataRoot.trim() && this.setupApiKey.trim() && this.setupHid.trim();
+            // 从主界面进入时凭证已保存，留空即沿用
+            return this.setupDataRoot.trim() && (this.setupFromMain || (this.setupApiKey.trim() && this.setupHid.trim()));
         },
 
         async submitSetup() {
@@ -946,6 +947,7 @@ document.addEventListener('alpine:init', () => {
             try {
                 const cfg = await window.pywebview.api.get_config();
                 this.setupDataRoot = (cfg.data_root || '');
+                this.setupCourseType = cfg.course_type || 'basic';
             } catch (e) {
                 this.setupDataRoot = '';
             }

@@ -134,7 +134,7 @@ class TestGetConfigSuccess(unittest.TestCase):
     def test_get_config_success(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_file = Path(tmp_dir) / "user_config.json"
-            config_file.write_text('{"data_root": "/some/path"}', encoding="utf-8")
+            config_file.write_text('{"data_root": "/some/path", "course_type": "premium"}', encoding="utf-8")
 
             secrets_file = Path(tmp_dir) / "user_secrets.env"
             secrets_file.write_text(
@@ -155,6 +155,7 @@ class TestGetConfigSuccess(unittest.TestCase):
         self.assertIsInstance(result["data_root"], str)
         self.assertTrue(len(result["data_root"]) > 0)
         self.assertEqual(result["product_count"], 2)
+        self.assertEqual(result["course_type"], "premium")
 
 
 class TestGetConfigNoConfig(unittest.TestCase):
@@ -293,6 +294,46 @@ class TestRunSetupSuccess(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertNotIn("warning", result)
             mock_save.assert_called_once()
+
+
+class TestRunSetupKeepsSavedCredentials(unittest.TestCase):
+    """run_setup: 凭证留空时沿用已保存的值，都没有时报错。"""
+
+    def _run(self, saved_secrets, api_key, hid):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            data_dir = Path(tmp_dir) / "data"
+            data_dir.mkdir()
+            config_file = Path(tmp_dir) / "user_config.json"
+            secrets_file = Path(tmp_dir) / "user_secrets.env"
+            if saved_secrets:
+                secrets_file.write_text(saved_secrets, encoding="utf-8")
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+
+            with patch(f"{_API_MOD}.DEFAULT_USER_CONFIG_FILE", config_file), \
+                 patch(f"{_API_MOD}.DEFAULT_USER_SECRETS_FILE", secrets_file), \
+                 patch(f"{_API_MOD}.save_setup_artifacts_atomic") as mock_save, \
+                 patch(f"{_API_MOD}.requests.get", return_value=mock_resp):
+                from quantclass_sync_internal.gui.api import SyncApi
+                result = SyncApi().run_setup(str(data_dir), api_key, hid, course_type="premium")
+            return result, mock_save
+
+    def test_blank_fields_reuse_saved(self):
+        result, mock_save = self._run(
+            "QUANTCLASS_API_KEY=old-key\nQUANTCLASS_HID=old-hid\n", "", "new-hid",
+        )
+        self.assertTrue(result["ok"])
+        kwargs = mock_save.call_args.kwargs
+        self.assertEqual(kwargs["api_key"], "old-key")
+        self.assertEqual(kwargs["hid"], "new-hid")
+        self.assertEqual(kwargs["config"].course_type, "premium")
+
+    def test_blank_without_saved_rejected(self):
+        result, mock_save = self._run("", "", "")
+        self.assertFalse(result["ok"])
+        self.assertIn("API Key", result["error"])
+        mock_save.assert_not_called()
 
 
 class TestRunSetupDirNotFound(unittest.TestCase):

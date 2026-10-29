@@ -365,6 +365,7 @@ class SyncApi:
             "product_count": product_count,
             # 仅 macOS 支持在 Finder 中打开目录
             "can_open_dir": sys.platform == "darwin",
+            "course_type": raw.get("course_type") or "basic",
         }
 
     def run_setup(self, data_root: str, api_key: str, hid: str,
@@ -403,6 +404,13 @@ class SyncApi:
         # 2. 保存配置（原子写入 config + secrets）
         config_file = DEFAULT_USER_CONFIG_FILE.resolve()
         secrets_file = DEFAULT_USER_SECRETS_FILE.resolve()
+
+        # 留空的凭证沿用已保存的值，改目录或课程类型时不必重填
+        if not api_key or not hid:
+            saved_key, saved_hid = load_secrets_from_file(secrets_file)
+            api_key, hid = api_key or saved_key, hid or saved_hid
+            if not api_key or not hid:
+                return {"ok": False, "error": "请填写 API Key 和 HID"}
 
         try:
             # basic 固定 10 次/天，premium 固定 100 次/天

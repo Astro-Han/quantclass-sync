@@ -584,14 +584,14 @@
           <div class="group" style="margin-top:18px">
             <div class="form-row">
               <label for="setup-key">API Key</label>
-              <input id="setup-key" type="password" x-model="setupApiKey" autocomplete="off" />
+              <input id="setup-key" type="password" x-model="setupApiKey" autocomplete="off" :placeholder="setupFromMain ? '已保存' : ''" />
             </div>
             <div class="form-row">
               <label for="setup-hid">HID</label>
-              <input id="setup-hid" type="password" x-model="setupHid" autocomplete="off" />
+              <input id="setup-hid" type="password" x-model="setupHid" autocomplete="off" :placeholder="setupFromMain ? '已保存' : ''" />
             </div>
           </div>
-          <p class="footnote">在 QuantClass 官网的个人中心可以找到 API Key 和 HID。</p>
+          <p class="footnote" x-text="setupFromMain ? '留空则沿用已保存的 API Key 和 HID；要更换时填入新的即可。' : '在 QuantClass 官网的个人中心可以找到 API Key 和 HID。'"></p>
 
           <div class="group" style="margin-top:18px">
             <div class="form-row">
