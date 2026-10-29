@@ -139,6 +139,8 @@ class SyncApi:
         self._health_progress: Dict[str, Any] = {
             "checking": False, "current": 0, "total": 0, "product": "", "result": None,
         }
+        # 同步、健康检查、修复都读写同一批数据文件，三者互斥
+        self._repairing = False
         # 同步确认事件（每次 _run_sync 重置，用于与前端双向通信）
         self._confirm_event: threading.Event = threading.Event()
         self._confirm_result: bool = False
@@ -502,6 +504,14 @@ class SyncApi:
         self._confirm_event.set()
         return {"ok": True}
 
+    def _sync_running_locked(self) -> bool:
+        """同步是否仍在进行。调用方须持有 _lock。"""
+        # cancel 后 status 先变 error，worker 线程可能还在写文件
+        thread = getattr(self, "_sync_thread", None)
+        if thread is not None and thread.is_alive():
+            return True
+        return self._progress.get("status") in ("syncing", "confirm_needed", "postprocessing")
+
     def start_sync(self, retry_failed: bool = False) -> Dict[str, Any]:
         """启动同步线程。
 
@@ -517,15 +527,13 @@ class SyncApi:
         retry_products = None
         # 读-判断-写合并在同一个锁块，防止双击连续启动
         with self._lock:
-            # 检查 worker 线程是否仍在运行（cancel 后 status 变 error，但线程可能未退出）
-            if hasattr(self, "_sync_thread") and self._sync_thread and self._sync_thread.is_alive():
-                return {"started": False, "message": "同步正在进行中，请等待完成后再试。"}
-            # confirm_needed/postprocessing 状态表示同步已在进行中，也需拦截
-            if self._progress.get("status") in ("syncing", "confirm_needed", "postprocessing"):
+            if self._sync_running_locked():
                 return {"started": False, "message": "同步正在进行中，请等待完成后再试。"}
             # 检查期间写入文件会让扫描结果失真，之后的修复可能误改数据
             if self._health_progress["checking"]:
                 return {"started": False, "message": "数据健康检查进行中，请等检查完成后再同步。"}
+            if self._repairing:
+                return {"started": False, "message": "数据修复进行中，请等修复完成后再同步。"}
 
             # retry_failed 分支：从上次 run_summary 读取失败产品名
             if retry_failed:
@@ -645,10 +653,12 @@ class SyncApi:
     def start_health_check(self) -> Dict[str, Any]:
         """启动后台健康检查线程。同步中（含等待确认）拒绝，重复启动拒绝。"""
         with self._lock:
-            if self._progress.get("status") in ("syncing", "confirm_needed", "postprocessing"):
+            if self._sync_running_locked():
                 return {"ok": False, "error": "同步进行中，请稍后再试"}
             if self._health_progress["checking"]:
                 return {"ok": False, "error": "检查已在进行中"}
+            if self._repairing:
+                return {"ok": False, "error": "修复进行中，请等修复完成后再检查"}
             self._health_progress = {
                 "checking": True, "current": 0, "total": 0, "product": "", "result": None,
             }
@@ -701,20 +711,28 @@ class SyncApi:
     def repair_health_issues(self) -> Dict[str, Any]:
         """修复可修复的数据问题。同步中（含等待确认/后处理）拒绝。"""
         with self._lock:
-            if self._progress.get("status") in ("syncing", "confirm_needed", "postprocessing"):
+            if self._sync_running_locked():
                 return {"ok": False, "error": "同步进行中，请稍后修复"}
+            if self._health_progress["checking"]:
+                return {"ok": False, "error": "检查进行中，请等检查完成后再修复"}
+            if self._repairing:
+                return {"ok": False, "error": "修复已在进行中"}
             result = self._health_progress.get("result")
-        if not result or not result.get("ok"):
-            return {"ok": False, "error": "无可用检查结果"}
-        issues = result["health"]["issues"]
-        repairable = [i for i in issues if i.get("repairable")]
-        if not repairable:
-            return {"ok": False, "error": "无可修复问题"}
-        _user_config, data_root, _catalog, err = self._resolve_config()
-        if err:
-            return {"ok": False, "error": err}
-        repair_result = repair_data_issues(Path(data_root), issues)
-        return {"ok": True, "repair": repair_result}
+            if not result or not result.get("ok"):
+                return {"ok": False, "error": "无可用检查结果"}
+            issues = result["health"]["issues"]
+            if not any(i.get("repairable") for i in issues):
+                return {"ok": False, "error": "无可修复问题"}
+            self._repairing = True
+        try:
+            _user_config, data_root, _catalog, err = self._resolve_config()
+            if err:
+                return {"ok": False, "error": err}
+            repair_result = repair_data_issues(Path(data_root), issues)
+            return {"ok": True, "repair": repair_result}
+        finally:
+            with self._lock:
+                self._repairing = False
 
     def check_updates(self) -> Dict[str, Any]:
         """查询 API 获取各产品最新日期，返回实时 overview。

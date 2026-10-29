@@ -94,8 +94,8 @@
           </button>
         </template>
         <template x-if="syncStatus !== 'syncing' && page !== 'sync'">
-          <button class="button primary" @click="startSync()" :disabled="(loading && products.length === 0) || healthState === 'checking'"
-                  :title="healthState === 'checking' ? '数据健康检查进行中，完成后才能同步' : ''">
+          <button class="button primary" @click="startSync()" :disabled="(loading && products.length === 0) || !!healthBusy()"
+                  :title="healthBusy() ? healthBusy() + '，完成后才能同步' : ''">
             <span class="icon i-sync"></span>立即同步
           </button>
         </template>
@@ -226,11 +226,11 @@
                        x-text="'将检查 ' + localProducts().length + ' 个已下载产品' + (attentionCount() > 0 ? '，其中 ' + attentionCount() + ' 个落后于最新数据' : '，目前都是最新的')"></div>
                 </div>
                 <div class="hero-actions">
-                  <button class="button primary large" @click="startSync()" :disabled="localProducts().length === 0 || healthState === 'checking'">开始同步</button>
+                  <button class="button primary large" @click="startSync()" :disabled="localProducts().length === 0 || !!healthBusy()">开始同步</button>
                 </div>
               </div>
               <p class="footnote" style="margin-top:-12px"
-                 x-text="healthState === 'checking' ? '数据健康检查进行中，检查完成后才能开始同步。' : '本地落后多天时会按交易日自动补齐缺口，每个产品每天会消耗 API 下载次数。'"></p>
+                 x-text="healthBusy() ? healthBusy() + '，完成后才能开始同步。' :'本地落后多天时会按交易日自动补齐缺口，每个产品每天会消耗 API 下载次数。'"></p>
 
               <template x-if="lastRun">
                 <div>
@@ -328,9 +328,9 @@
                   </div>
                 </div>
                 <div class="hero-actions">
-                  <button class="button" x-show="runSummary && runSummary.failed_products && runSummary.failed_products.length > 0" @click="retryFailed()" :disabled="healthState === 'checking'">重试失败产品</button>
+                  <button class="button" x-show="runSummary && runSummary.failed_products && runSummary.failed_products.length > 0" @click="retryFailed()" :disabled="!!healthBusy()">重试失败产品</button>
                   <button class="button" x-show="syncStatus === 'error'" @click="resetSync()">返回</button>
-                  <button class="button primary" x-show="syncStatus === 'error'" @click="startSync()" :disabled="healthState === 'checking'">重新同步</button>
+                  <button class="button primary" x-show="syncStatus === 'error'" @click="startSync()" :disabled="!!healthBusy()">重新同步</button>
                   <button class="button primary" x-show="syncStatus === 'done'" @click="resetSync(); go('overview')">完成</button>
                 </div>
               </div>
@@ -489,7 +489,7 @@
                 </div>
                 <div class="hero-actions">
                   <button class="button" @click="startHealthCheck()" :disabled="syncStatus === 'syncing' || repairing">重新检查</button>
-                  <button class="button primary" x-show="repairableCount() > 0" @click="repairIssues()" :disabled="repairing"
+                  <button class="button primary" x-show="repairableCount() > 0" @click="repairIssues()" :disabled="repairing || syncStatus === 'syncing'"
                           x-text="repairing ? '修复中…' : '修复 ' + repairableCount() + ' 个问题'"></button>
                 </div>
               </div>

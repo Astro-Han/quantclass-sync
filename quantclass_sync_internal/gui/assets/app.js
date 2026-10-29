@@ -280,6 +280,12 @@ document.addEventListener('alpine:init', () => {
             return this.category ? { icon: 'i-download', title: '这个分类还没有已下载的产品', sub: '' } : null;
         },
 
+        // 检查或修复进行中时不能同步（后端同样拒绝），返回原因；空串表示空闲
+        healthBusy() {
+            if (this.healthState === 'checking') return '数据健康检查进行中';
+            return this.repairing ? '数据修复进行中' : '';
+        },
+
         missingProducts() {
             return this.products.filter(p => p.color === 'gray' && this.inCategory(p) && this.matchesSearch(p));
         },

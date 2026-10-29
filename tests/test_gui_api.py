@@ -1130,6 +1130,55 @@ class TestRepairHealthIssues(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["repair"], mock_repair)
 
+    def _repairable_api(self):
+        from quantclass_sync_internal.gui.api import SyncApi
+        api = SyncApi()
+        api._health_progress["result"] = {
+            "ok": True, "health": {"issues": [{"type": "orphan_temp", "repairable": True}]},
+        }
+        return api
+
+    def test_rejected_while_cancelled_sync_thread_alive(self):
+        """取消后 status 已是 error，但同步线程仍在写文件时拒绝修复。"""
+        api = self._repairable_api()
+        api._progress["status"] = "error"
+        api._sync_thread = MagicMock(is_alive=MagicMock(return_value=True))
+        with patch(f"{_API_MOD}.repair_data_issues") as repair:
+            result = api.repair_health_issues()
+        self.assertFalse(result["ok"])
+        self.assertIn("同步进行中", result["error"])
+        repair.assert_not_called()
+
+    def test_rejected_during_health_check(self):
+        api = self._repairable_api()
+        api._health_progress["checking"] = True
+        with patch(f"{_API_MOD}.repair_data_issues") as repair:
+            result = api.repair_health_issues()
+        self.assertFalse(result["ok"])
+        repair.assert_not_called()
+
+    def test_sync_and_check_rejected_while_repairing(self):
+        """修复期间同步和检查都被拒绝；修复异常退出后标志复位。"""
+        api = self._repairable_api()
+        seen = {}
+
+        def repair(*_args):
+            with patch.object(api, "_run_sync"):
+                seen["sync"] = api.start_sync()
+            seen["check"] = api.start_health_check()
+            raise RuntimeError("boom")
+
+        with patch.object(api, "_resolve_config", return_value=(None, "/tmp/root", [], None)), \
+             patch(f"{_API_MOD}.repair_data_issues", side_effect=repair):
+            with self.assertRaises(RuntimeError):
+                api.repair_health_issues()
+
+        self.assertFalse(seen["sync"]["started"])
+        self.assertIn("修复进行中", seen["sync"]["message"])
+        self.assertFalse(seen["check"]["ok"])
+        self.assertIn("修复进行中", seen["check"]["error"])
+        self.assertFalse(api._repairing)
+
 
 class TestStartSyncRetryFailed(unittest.TestCase):
     """start_sync(retry_failed=True) 从上次 run_summary 提取失败产品并启动同步。"""
