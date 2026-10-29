@@ -287,7 +287,10 @@ document.addEventListener('alpine:init', () => {
         // 产品状态：图标、徽标文字和色调
         statusOf(p) {
             if (p.color === 'gray') return { cls: 'idle', icon: 'i-download', tone: '', text: '未下载' };
-            if (p.last_result === 'error') return { cls: 'bad', icon: 'i-exclaim', tone: 'tone-bad', text: '同步失败' };
+            if (p.last_result === 'error') {
+                const text = p.behind_days > 0 ? '同步失败 · 落后 ' + p.behind_days + ' 天' : '同步失败';
+                return { cls: 'bad', icon: 'i-exclaim', tone: 'tone-bad', text };
+            }
             if (p.color === 'green') return { cls: 'ok', icon: 'i-check', tone: 'tone-ok', text: '最新' };
             const lag = p.behind_days != null ? '落后 ' + p.behind_days + ' 天' : '落后';
             return p.color === 'red'

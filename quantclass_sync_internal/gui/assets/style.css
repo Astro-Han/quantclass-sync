@@ -43,6 +43,17 @@
   --tile-us: #af52de;
   --tile-crypto: #a2845e;
   --tile-all: #8e8e93;
+
+  --on-fill: #ffffff;
+  --on-fill-dim: rgba(255, 255, 255, 0.35);
+  --tile-edge: rgba(0, 0, 0, 0.08);
+  --shadow-soft: rgba(0, 0, 0, 0.06);
+  --shadow-strong: rgba(0, 0, 0, 0.12);
+  --scrim: rgba(0, 0, 0, 0.16);
+  --glyph-top: #3d9bff;
+  --glyph-bottom: #0066e0;
+  --glyph-glow: rgba(0, 102, 224, 0.3);
+  --glyph-rim: rgba(255, 255, 255, 0.3);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -152,9 +163,9 @@ button { cursor: default; border: 0; background: none; }
   width: 22px;
   height: 22px;
   border-radius: 6px;
-  color: #fff;
+  color: var(--on-fill);
   background: var(--tile, var(--tile-all));
-  box-shadow: inset 0 0 0 0.5px rgba(0, 0, 0, 0.08);
+  box-shadow: inset 0 0 0 0.5px var(--tile-edge);
 }
 .tile .icon { width: 14px; height: 14px; }
 .tile.tile-sm { width: 18px; height: 18px; border-radius: 5px; align-self: center; }
@@ -169,7 +180,7 @@ button { cursor: default; border: 0; background: none; }
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  color: #fff;
+  color: var(--on-fill);
 }
 .status .icon { width: 11px; height: 11px; }
 .status.ok { background: var(--green-glyph); }
@@ -198,7 +209,7 @@ button { cursor: default; border: 0; background: none; }
   padding: 50px 10px 10px;
   border-radius: 18px;
   background: var(--sidebar);
-  box-shadow: inset 0 0 0 0.5px var(--sidebar-edge), 0 1px 3px rgba(0, 0, 0, 0.06);
+  box-shadow: inset 0 0 0 0.5px var(--sidebar-edge), 0 1px 3px var(--shadow-soft);
   overflow: hidden;
 }
 
@@ -231,7 +242,7 @@ button { cursor: default; border: 0; background: none; }
   font-weight: 600;
   line-height: 18px;
   text-align: center;
-  color: #fff;
+  color: var(--on-fill);
   background: var(--orange-glyph);
 }
 .nav-badge.bad { background: var(--red-glyph); }
@@ -340,12 +351,12 @@ button { cursor: default; border: 0; background: none; }
 }
 .button:not(:disabled):hover { background: var(--control-hover); }
 .button:disabled { opacity: 0.45; }
-.button.primary { background: var(--accent); color: #fff; font-weight: 600; }
+.button.primary { background: var(--accent); color: var(--on-fill); font-weight: 600; }
 .button.primary:not(:disabled):hover { background: var(--accent-hover); }
 .button.danger { color: var(--red); }
 .button.large { height: 36px; padding: 0 20px; border-radius: 18px; font-size: 14px; }
 .button.progress { gap: 8px; }
-.button.progress .status.busy { width: 14px; height: 14px; border-color: rgba(255, 255, 255, 0.35); border-top-color: #fff; }
+.button.progress .status.busy { width: 14px; height: 14px; border-color: var(--on-fill-dim); border-top-color: var(--on-fill); }
 
 /* 滚到工具栏下的内容渐隐，而不是被硬切 */
 .page {
@@ -396,7 +407,7 @@ button { cursor: default; border: 0; background: none; }
   white-space: nowrap;
 }
 .segment small { margin-left: 4px; color: var(--label-2); font-size: 12px; }
-.segment.active { background: var(--control-active); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12), 0 0 0 0.5px rgba(0, 0, 0, 0.06); }
+.segment.active { background: var(--control-active); box-shadow: 0 1px 2px var(--shadow-strong), 0 0 0 0.5px var(--shadow-soft); }
 
 .filter-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 6px; }
 .chip {
@@ -579,9 +590,9 @@ button { cursor: default; border: 0; background: none; }
   width: 64px;
   height: 64px;
   border-radius: 16px;
-  color: #fff;
-  background: linear-gradient(180deg, #3d9bff, #0066e0);
-  box-shadow: 0 6px 16px rgba(0, 102, 224, 0.3), inset 0 0 0 0.5px rgba(255, 255, 255, 0.3);
+  color: var(--on-fill);
+  background: linear-gradient(180deg, var(--glyph-top), var(--glyph-bottom));
+  box-shadow: 0 6px 16px var(--glyph-glow), inset 0 0 0 0.5px var(--glyph-rim);
 }
 .app-glyph .icon { width: 34px; height: 34px; }
 .setup-title { font-size: 24px; font-weight: 700; letter-spacing: -0.02em; }
@@ -598,7 +609,7 @@ button { cursor: default; border: 0; background: none; }
   border: 0;
   border-radius: 7px;
   background: var(--content);
-  box-shadow: 0 0 0 0.5px var(--separator), 0 0.5px 1px rgba(0, 0, 0, 0.06);
+  box-shadow: 0 0 0 0.5px var(--separator), 0 0.5px 1px var(--shadow-soft);
   -webkit-user-select: text;
   user-select: text;
 }
@@ -616,7 +627,7 @@ button { cursor: default; border: 0; background: none; }
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(0, 0, 0, 0.16);
+  background: var(--scrim);
 }
 .overlay.sheet-overlay { align-items: flex-start; padding-top: 64px; }
 
