@@ -10,7 +10,7 @@ ASSETS_DIR = Path(__file__).parent / "assets"
 
 
 def _apply_macos_chrome(window) -> None:
-    """macOS：内容铺满标题栏、标题栏透明，毛玻璃层改用系统侧栏材质。"""
+    """macOS：网页铺满整个窗口，标题栏只保留红绿灯。"""
 
     import AppKit
     from PyObjCTools import AppHelper
@@ -24,16 +24,13 @@ def _apply_macos_chrome(window) -> None:
         ns_window.setToolbar_(AppKit.NSToolbar.alloc().initWithIdentifier_("main"))
         ns_window.setToolbarStyle_(AppKit.NSWindowToolbarStyleUnified)
         ns_window.setTitlebarSeparatorStyle_(AppKit.NSTitlebarSeparatorStyleNone)
-        # pywebview 的 transparent 模式会关掉窗口阴影
-        ns_window.setHasShadow_(True)
-
-    def use_sidebar_material() -> None:
-        for view in window.native.contentView().subviews():
-            if isinstance(view, AppKit.NSVisualEffectView):
-                view.setMaterial_(AppKit.NSVisualEffectMaterialSidebar)
+        # pywebview 给标题栏容器涂了窗口底色，会盖住网页里的工具栏
+        ns_window.contentView().superview().subviews().lastObject().setBackgroundColor_(AppKit.NSColor.clearColor())
+        # 页面渲染前先露出随系统深浅色变化的窗口底色，避免深色模式启动时白屏一闪
+        ns_window.setBackgroundColor_(AppKit.NSColor.windowBackgroundColor())
+        ns_window.contentView().setValue_forKey_(False, "drawsBackground")
 
     window.events.before_show += lambda: AppHelper.callAfter(style_window)
-    window.events.loaded += lambda: AppHelper.callAfter(use_sidebar_material)
 
 
 def launch_gui() -> None:
@@ -51,7 +48,6 @@ def launch_gui() -> None:
     from .api import SyncApi
 
     api = SyncApi()
-    is_macos = sys.platform == "darwin"
     # 创建窗口，挂载 SyncApi 实例供 JS 调用
     # 保留 window 引用：部分 pywebview 后端要求窗口对象在 start() 时仍存活
     window = webview.create_window(  # noqa: F841
@@ -61,10 +57,8 @@ def launch_gui() -> None:
         width=1080,
         height=700,
         min_size=(860, 560),
-        transparent=is_macos,
-        vibrancy=is_macos,
     )
-    if is_macos:
+    if sys.platform == "darwin":
         # 标题栏区域的点击会落到网页上，窗口拖动交给 .pywebview-drag-region；
         # 只认直接按在拖拽区域本身，避免点工具栏按钮时带动窗口
         webview.settings["DRAG_REGION_DIRECT_TARGET_ONLY"] = True

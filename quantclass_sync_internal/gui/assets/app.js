@@ -106,9 +106,6 @@ document.addEventListener('alpine:init', () => {
         // 先调 get_config() 判断视图：config_exists → main，否则 → setup
         init() {
             const doInit = async () => {
-                if (window.pywebview.platform === 'cocoa') {
-                    document.documentElement.classList.add('native');
-                }
                 try {
                     const cfg = await window.pywebview.api.get_config();
                     this.currentView = cfg.config_exists ? 'main' : 'setup';

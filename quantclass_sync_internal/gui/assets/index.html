@@ -168,7 +168,7 @@
                                x-text="expanded[p.name] ? p.last_error : errorSummary(p.last_error)"></div>
                         </div>
                         <div class="row-meta" x-show="p.local_date" x-text="'数据至 ' + formatDataDate(p.local_date)"></div>
-                        <span class="pill" :class="statusOf(p).tone || 'plain'" x-text="statusOf(p).text"></span>
+                        <span class="pill" :class="statusOf(p).tone" x-show="p.color !== 'gray'" x-text="statusOf(p).text"></span>
                       </div>
                     </template>
                   </div>
@@ -276,7 +276,6 @@
                   </div>
                 </div>
               </div>
-              <div class="bar sync-progress" x-show="total > 0"><div class="bar-fill" :style="'width:' + progressPercent() + '%'"></div></div>
 
               <div class="section-head" x-show="syncProducts.length > 0 || waitingProducts().length > 0"><span>产品</span></div>
               <div class="group" x-show="syncProducts.length > 0 || waitingProducts().length > 0">
@@ -473,7 +472,6 @@
                        x-text="healthProgress && healthProgress.total ? '第 ' + Math.min(healthProgress.current + 1, healthProgress.total) + ' / ' + healthProgress.total + ' 个产品' + (healthProgress.product ? ' · ' + labelOf(healthProgress.product) : '') : '准备中…'"></div>
                 </div>
               </div>
-              <div class="bar sync-progress"><div class="bar-fill" :style="'width:' + healthPercent() + '%'"></div></div>
             </div>
           </template>
 

@@ -8,10 +8,9 @@
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
   --mono: "SF Mono", ui-monospace, Menlo, monospace;
 
-  --window: #e8e8ed;
   --content: #ffffff;
-  --sidebar: rgba(246, 246, 250, 0.82);
-  --sidebar-edge: rgba(255, 255, 255, 0.7);
+  --sidebar: #f2f2f5;
+  --sidebar-edge: rgba(0, 0, 0, 0.06);
   --group: #f4f4f7;
   --control: rgba(0, 0, 0, 0.055);
   --control-hover: rgba(0, 0, 0, 0.085);
@@ -48,9 +47,8 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --window: #1c1c1e;
     --content: #1e1e20;
-    --sidebar: rgba(44, 44, 48, 0.72);
+    --sidebar: #29292c;
     --sidebar-edge: rgba(255, 255, 255, 0.08);
     --group: #2a2a2d;
     --control: rgba(255, 255, 255, 0.11);
@@ -87,7 +85,7 @@ html, body { height: 100%; }
 body {
   font: 13px/1.4 var(--font);
   color: var(--label);
-  background: var(--window);
+  background: var(--content);
   -webkit-font-smoothing: antialiased;
   font-variant-numeric: tabular-nums;
   overflow: hidden;
@@ -95,9 +93,6 @@ body {
   user-select: none;
   cursor: default;
 }
-
-/* 原生窗口：窗口底色交给系统毛玻璃 */
-html.native body { background: transparent; }
 
 button, input { font: inherit; color: inherit; }
 button { cursor: default; border: 0; background: none; }
@@ -191,6 +186,7 @@ button { cursor: default; border: 0; background: none; }
 .app {
   display: grid;
   grid-template-columns: 236px 1fr;
+  grid-template-rows: minmax(0, 1fr);
   height: 100vh;
 }
 
@@ -203,11 +199,8 @@ button { cursor: default; border: 0; background: none; }
   border-radius: 18px;
   background: var(--sidebar);
   box-shadow: inset 0 0 0 0.5px var(--sidebar-edge), 0 1px 3px rgba(0, 0, 0, 0.06);
-  -webkit-backdrop-filter: blur(30px) saturate(1.6);
-  backdrop-filter: blur(30px) saturate(1.6);
   overflow: hidden;
 }
-html.native .sidebar { background: color-mix(in srgb, var(--sidebar) 45%, transparent); }
 
 .sidebar-drag { position: absolute; inset: 0 0 auto 0; height: 50px; }
 
@@ -351,7 +344,14 @@ html.native .sidebar { background: color-mix(in srgb, var(--sidebar) 45%, transp
 .button.progress { gap: 8px; }
 .button.progress .status.busy { width: 14px; height: 14px; border-color: rgba(255, 255, 255, 0.35); border-top-color: #fff; }
 
-.page { flex: 1; min-height: 0; overflow-y: auto; }
+/* 滚到工具栏下的内容渐隐，而不是被硬切 */
+.page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 14px);
+  mask-image: linear-gradient(to bottom, transparent, #000 14px);
+}
 .page-inner { max-width: 900px; margin: 0 auto; padding: 6px 26px 40px; }
 
 /* ========== 通用组件 ========== */
@@ -446,7 +446,7 @@ html.native .sidebar { background: color-mix(in srgb, var(--sidebar) 45%, transp
 .row-title { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-sub { margin-top: 1px; font-size: 11px; color: var(--label-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-sub.mono { font-family: var(--mono); font-size: 10.5px; }
-.row-error { margin-top: 3px; font-size: 12px; color: var(--red); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-error { margin-top: 3px; font-size: 12px; color: var(--label-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-error.expanded { white-space: normal; word-break: break-all; }
 .row-meta { flex: none; color: var(--label-2); font-size: 12px; text-align: right; white-space: nowrap; }
 .row.muted .row-title { color: var(--label-2); font-weight: 400; }
@@ -512,9 +512,6 @@ html.native .sidebar { background: color-mix(in srgb, var(--sidebar) 45%, transp
 .loading { display: flex; justify-content: center; padding: 80px 0; }
 .loading .status.busy { width: 22px; height: 22px; }
 
-.bar { height: 6px; border-radius: 3px; background: var(--control); overflow: hidden; }
-.bar-fill { height: 100%; border-radius: 3px; background: var(--accent); transition: width 0.5s ease; }
-
 .stats { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--label-2); }
 .stats b { color: var(--label); font-weight: 600; }
 .stats .ok b { color: var(--green); }
@@ -529,12 +526,10 @@ html.native .sidebar { background: color-mix(in srgb, var(--sidebar) 45%, transp
 .ring .value { stroke: var(--accent); stroke-linecap: round; transition: stroke-dashoffset 0.5s ease; }
 .ring span { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; }
 
-.sync-progress { margin: -8px 0 6px; }
-
 /* ========== 历史页 ========== */
 
 .split { display: grid; grid-template-columns: 290px 1fr; height: 100%; }
-.split-list { overflow-y: auto; padding: 6px 12px 24px 26px; border-right: 1px solid var(--separator); }
+.split-list { overflow-y: auto; padding: 12px 12px 24px 26px; border-right: 1px solid var(--separator); }
 .split-detail { overflow-y: auto; min-width: 0; }
 .split-detail .page-inner { padding-top: 6px; }
 
@@ -571,7 +566,6 @@ html.native .sidebar { background: color-mix(in srgb, var(--sidebar) 45%, transp
   overflow-y: auto;
   background: var(--content);
 }
-html.native .setup { background: color-mix(in srgb, var(--content) 72%, transparent); }
 .setup-drag { position: fixed; inset: 0 0 auto 0; height: 44px; }
 .setup-card { width: 100%; max-width: 480px; }
 .setup-head { display: flex; flex-direction: column; align-items: center; gap: 10px; margin-bottom: 24px; text-align: center; }
@@ -632,7 +626,6 @@ html.native .setup { background: color-mix(in srgb, var(--content) 72%, transpar
   -webkit-backdrop-filter: blur(40px);
   backdrop-filter: blur(40px);
   text-align: center;
-  animation: pop 0.18s ease-out;
 }
 .alert .app-glyph { width: 52px; height: 52px; margin: 0 auto 12px; border-radius: 13px; }
 .alert .app-glyph .icon { width: 28px; height: 28px; }
@@ -649,7 +642,6 @@ html.native .setup { background: color-mix(in srgb, var(--content) 72%, transpar
   border-radius: 20px;
   background: var(--panel);
   box-shadow: var(--shadow-panel);
-  animation: drop 0.22s ease-out;
 }
 .sheet-head { padding: 20px 22px 6px; }
 .sheet-title { font-size: 15px; font-weight: 700; }
@@ -663,14 +655,12 @@ html.native .setup { background: color-mix(in srgb, var(--content) 72%, transpar
 .table .num { text-align: right; }
 .table tfoot td { font-weight: 700; }
 
-@keyframes pop { from { opacity: 0; transform: scale(0.94); } to { opacity: 1; transform: none; } }
-@keyframes drop { from { opacity: 0; transform: translateY(-12px); } to { opacity: 1; transform: none; } }
-
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
   .status.busy { animation: none; border-top-color: var(--accent); }
 }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 5px; background: var(--label-3) padding-box; }
+::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 5px; background: transparent padding-box; }
+:hover::-webkit-scrollbar-thumb { background-color: var(--label-3); }
 ::-webkit-scrollbar-track { background: transparent; }
