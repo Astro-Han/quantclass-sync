@@ -163,13 +163,13 @@ def extract_archive(path: Path, save_path: Path) -> None:
 
     支持两类输入：
     1) 压缩包：zip/tar/rar/7z
-    2) 直出文件：csv/ts（直接复制）
+    2) 直出文件：csv/ts/parquet（直接复制）
     """
 
     lower_name = path.name.lower()
     save_path.mkdir(parents=True, exist_ok=True)
 
-    if lower_name.endswith((".csv", ".ts")):
+    if lower_name.endswith((".csv", ".ts", ".parquet")):
         shutil.copy2(path, save_path / path.name)
         return
 

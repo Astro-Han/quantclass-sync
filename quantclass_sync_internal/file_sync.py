@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import re
 import shutil
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
+
+import pandas as pd
 
 from .config import atomic_temp_path
 
 from .constants import (
     AGGREGATE_SPLIT_COLS,
     DATE_NAME_PATTERN,
+    INCOMING_COLUMN_RENAMES,
     INDEX_PRODUCTS,
     KNOWN_DATASETS,
+    PARQUET_CSV_NOTE,
+    PARQUET_OUTPUT_PRODUCTS,
     REASON_MERGE_ERROR,
     REASON_MIRROR_FALLBACK,
     REASON_MIRROR_UNKNOWN,
@@ -25,6 +31,7 @@ from .constants import (
 )
 from .csv_engine import (
     _headers_equal,
+    _locked_target,
     is_rows_sorted,
     read_csv_payload,
     resolve_sort_indices,
@@ -89,9 +96,9 @@ def _worst_reason(current: str, incoming: str) -> str:
     return current
 
 def is_daily_aggregate_file(src_rel_path: Path) -> bool:
-    """判断是否为按天聚合文件（例如 2026-02-06.csv）。"""
+    """判断是否为按天聚合文件（例如 2026-02-06.csv / 2026-02-06.parquet）。"""
 
-    if src_rel_path.suffix.lower() != ".csv":
+    if src_rel_path.suffix.lower() not in {".csv", ".parquet"}:
         return False
     return bool(DATE_NAME_PATTERN.fullmatch(src_rel_path.stem))
 
@@ -202,7 +209,10 @@ def sync_daily_aggregate_file(src: Path, product: str, data_root: Path, dry_run:
     stats = SyncStats()
     reason_code = REASON_OK
     rule = RULES[product]
-    incoming = read_csv_payload(src, preferred_encoding=rule.encoding)
+    if src.suffix.lower() == ".parquet":
+        incoming = _read_parquet_payload(src, product, rule)
+    else:
+        incoming = read_csv_payload(src, preferred_encoding=rule.encoding)
     if not incoming.header:
         stats.skipped_files += 1
         return stats, reason_code
@@ -311,6 +321,76 @@ def sync_daily_aggregate_file(src: Path, product: str, data_root: Path, dry_run:
 
     return stats, reason_code
 
+def _read_parquet_payload(src: Path, product: str, rule: DatasetRule) -> CsvPayload:
+    """把 parquet 日文件转成 CsvPayload，复用 CSV 拆分合并链路。"""
+
+    df = pd.read_parquet(src).rename(columns=INCOMING_COLUMN_RENAMES.get(product, {}))
+    text = df.astype(str).mask(df.isna(), "")
+    return CsvPayload(
+        note=PARQUET_CSV_NOTE if rule.has_note else None,
+        header=[str(col) for col in df.columns],
+        rows=text.values.tolist(),
+        encoding=rule.encoding,
+    )
+
+def sync_daily_parquet_file(src: Path, product: str, data_root: Path, dry_run: bool) -> Tuple[SyncStats, str]:
+    """处理 parquet 日文件：按拆分字段切成 <代码>.parquet 并增量合并。"""
+
+    stats = SyncStats()
+    rule = RULES[product]
+    split_col = AGGREGATE_SPLIT_COLS[product]
+    incoming = pd.read_parquet(src)
+    if split_col not in incoming.columns:
+        stats.skipped_files += 1
+        log_info(f"[{product}] 未找到拆分字段，已跳过: {split_col}", event="SYNC_FAIL")
+        return stats, REASON_MERGE_ERROR
+
+    stats.skipped_empty_split += int(incoming[split_col].isna().sum())
+    groups = list(incoming.groupby(split_col, sort=False))
+    if not groups:
+        stats.skipped_files += 1
+        return stats, REASON_OK
+
+    log_info(
+        f"[{product}] 按天聚合文件拆分：file={src.name}, keys={len(groups)}",
+        event="SYNC_OK",
+        split_col=split_col,
+    )
+    for idx, (value, rows) in enumerate(groups, start=1):
+        split_value = normalize_split_value(str(value))
+        if not split_value:
+            stats.skipped_empty_split += len(rows)
+            continue
+        target = data_root / product / f"{split_value}.parquet"
+        result, added_rows = _sync_parquet_to_target(rows, target, rule, dry_run)
+        apply_file_result(stats, result=result, added_rows=added_rows)
+        _log_sync_progress(product, idx, len(groups), stats, label="拆分进度")
+
+    return stats, REASON_OK
+
+def _sync_parquet_to_target(incoming: pd.DataFrame, target: Path, rule: DatasetRule, dry_run: bool) -> Tuple[str, int]:
+    """单标的 parquet 增量合并：按主键去重（新数据覆盖旧数据）后按排序列排序。"""
+
+    lock_ctx = _locked_target(target.parent / f".{target.name}.lock") if not dry_run else nullcontext()
+    with lock_ctx:
+        existing = pd.read_parquet(target) if target.exists() else None
+        frames = [incoming] if existing is None else [existing, incoming]
+        merged = (
+            pd.concat(frames, ignore_index=True)
+            .drop_duplicates(subset=list(rule.key_cols), keep="last")
+            .sort_values(list(rule.sort_cols), kind="stable")
+            .reset_index(drop=True)
+        )
+        if existing is not None and merged.equals(existing):
+            return "unchanged", 0
+        if not dry_run:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with atomic_temp_path(target, tag="parquet") as tmp:
+                merged.to_parquet(tmp, index=False)
+        if existing is None:
+            return "created", len(merged)
+        return "updated", len(merged) - len(existing)
+
 def sync_raw_file(src: Path, target: Path, dry_run: bool) -> str:
     """
     镜像写入（按原文件路径复制，不做字段级合并）。
@@ -372,10 +452,10 @@ def apply_file_result(stats: SyncStats, result: str, added_rows: int = 0, sort_a
         stats.skipped_files += 1
 
 def iter_candidate_files(root: Path) -> Iterable[Path]:
-    """遍历 extract 目录中需要处理的文件（.csv/.ts）。"""
+    """遍历 extract 目录中需要处理的文件（.csv/.ts/.parquet）。"""
 
     for path in root.rglob("*"):
-        if path.is_file() and path.suffix.lower() in {".csv", ".ts"}:
+        if path.is_file() and path.suffix.lower() in {".csv", ".ts", ".parquet"}:
             yield path
 
 def sync_known_product(product: str, extract_path: Path, data_root: Path, dry_run: bool) -> Tuple[SyncStats, str]:
@@ -399,7 +479,8 @@ def sync_known_product(product: str, extract_path: Path, data_root: Path, dry_ru
 
         if product in AGGREGATE_SPLIT_COLS and is_daily_aggregate_file(normalized_rel_path):
             # 聚合日文件（一个文件含多标的）先拆分，再逐个同步。
-            agg, agg_reason = sync_daily_aggregate_file(src=src, product=product, data_root=data_root, dry_run=dry_run)
+            sync_fn = sync_daily_parquet_file if product in PARQUET_OUTPUT_PRODUCTS else sync_daily_aggregate_file
+            agg, agg_reason = sync_fn(src=src, product=product, data_root=data_root, dry_run=dry_run)
             stats.merge(agg)
             if agg_reason != REASON_OK:
                 reason_code = _worst_reason(reason_code, agg_reason)

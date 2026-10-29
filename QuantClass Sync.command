@@ -190,7 +190,7 @@ _ensure_requirements_file() {
 
 # 核心依赖检查统一走当前选中的解释器。
 _deps_ready() {
-    "$PYTHON" -c "from quantclass_sync_internal import cli; import webview; import pandas" 2>/dev/null
+    "$PYTHON" -c "from quantclass_sync_internal import cli; import webview; import pandas; import pyarrow" 2>/dev/null
 }
 
 # 不同环境给出不同提示，避免论坛用户去猜该执行哪条命令。

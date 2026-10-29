@@ -79,6 +79,10 @@ AGGREGATE_SPLIT_COLS: Dict[str, str] = {
     # 分时收盘价（按股票代码拆分）
     "stock-15m-close-price": "股票代码",
     "stock-5m-close-price": "股票代码",
+    "stock-etf-5m-close-price": "股票代码",
+    # 小时 K 线（parquet 日文件，按代码写回 parquet）
+    "stock-1h-trading-data-pro": "股票代码",
+    "stock-etf-1h-trading-data": "基金代码",
     # 非 A 股交易数据（按股票代码拆分）
     "stock-hk-stock-data": "股票代码",
     "stock-us-trading-data": "股票代码",
@@ -90,6 +94,9 @@ AGGREGATE_SPLIT_COLS: Dict[str, str] = {
     "stock-asset-classification": "index_code",
     # 币种行情（按 symbol 拆分）
     "coin-coinmarketcap": "symbol",
+    "coin-okx-candle-csv-1h": "symbol",
+    "coin-hl-spot-candle-csv-1h": "symbol",
+    "coin-hl-swap-candle-csv-1h": "symbol",
     # ETF（按基金代码拆分）
     "stock-etf-trading-data": "基金代码",
     # 策略（按策略名称拆分）
@@ -106,6 +113,17 @@ _INDIVIDUAL_MERGE_PRODUCTS = {
 }
 
 KNOWN_DATASETS = tuple(sorted(set(AGGREGATE_SPLIT_COLS) | _INDIVIDUAL_MERGE_PRODUCTS))
+
+# 拆分后写回 <代码>.parquet 的产品（官方框架按 parquet 读取）；其余拆分产品写 CSV
+PARQUET_OUTPUT_PRODUCTS = {"stock-1h-trading-data-pro", "stock-etf-1h-trading-data"}
+
+# 日文件列名与官方框架读取口径不一致时，入库前重命名
+INCOMING_COLUMN_RENAMES: Dict[str, Dict[str, str]] = {
+    "stock-etf-5m-close-price": {"基金代码": "股票代码"},
+}
+
+# parquet 日文件转 CSV 时补写的备注行（官方 CSV 首行为备注，框架读取时 skiprows=1）
+PARQUET_CSV_NOTE = "数据由邢不行整理，对数据字段有疑问的，可以直接微信私信邢不行，微信号：xbx6660"
 
 ENCODING_CANDIDATES = ("utf-8-sig", "gb18030", "utf-8", "gbk")
 

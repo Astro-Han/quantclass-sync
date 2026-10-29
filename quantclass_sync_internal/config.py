@@ -300,13 +300,13 @@ def load_products_from_catalog(path: Path) -> List[str]:
 
 def _dir_has_data_files(path: Path) -> bool:
     """
-    判断目录内是否存在数据文件（.csv/.ts）。
+    判断目录内是否存在数据文件（.csv/.ts/.parquet）。
 
     递归查找任意一个命中即返回，用 .suffix.lower() 保持大小写不敏感，
     避免把空目录误认为"已有产品"。
     """
 
-    _DATA_SUFFIXES = {".csv", ".ts"}
+    _DATA_SUFFIXES = {".csv", ".ts", ".parquet"}
     for candidate in path.rglob("*"):
         if candidate.is_file() and candidate.suffix.lower() in _DATA_SUFFIXES:
             return True
@@ -317,7 +317,7 @@ def discover_local_products(data_root: Path, catalog_products: Sequence[str]) ->
     扫描 data_root 一级目录，识别本地已有产品。
 
     定义：
-    - 目录下递归存在 .csv/.ts，才算"本地已有产品"。
+    - 目录下递归存在 .csv/.ts/.parquet，才算"本地已有产品"。
     - 是否有效（valid）由 catalog 产品集合判定。
     """
 

@@ -557,6 +557,50 @@ RULES: Dict[str, DatasetRule] = {
         key_cols=("股票代码", "交易日期"),
         sort_cols=("交易日期",),
     ),
+    "stock-etf-5m-close-price": DatasetRule(
+        name="stock-etf-5m-close-price",
+        encoding="gb18030",
+        has_note=True,
+        key_cols=("股票代码", "交易日期"),
+        sort_cols=("交易日期",),
+    ),
+    # 小时 K 线（parquet 日文件，按代码合并写回 parquet；encoding/has_note 不参与）
+    "stock-1h-trading-data-pro": DatasetRule(
+        name="stock-1h-trading-data-pro",
+        encoding="utf-8",
+        has_note=False,
+        key_cols=("股票代码", "k线结束时间"),
+        sort_cols=("k线结束时间",),
+    ),
+    "stock-etf-1h-trading-data": DatasetRule(
+        name="stock-etf-1h-trading-data",
+        encoding="utf-8",
+        has_note=False,
+        key_cols=("基金代码", "k线结束时间"),
+        sort_cols=("k线结束时间",),
+    ),
+    # OKX / Hyperliquid 1h K 线（日聚合 CSV，按 symbol 拆分）
+    "coin-okx-candle-csv-1h": DatasetRule(
+        name="coin-okx-candle-csv-1h",
+        encoding="utf-8",
+        has_note=False,
+        key_cols=("candle_begin_time", "symbol"),
+        sort_cols=("candle_begin_time",),
+    ),
+    "coin-hl-spot-candle-csv-1h": DatasetRule(
+        name="coin-hl-spot-candle-csv-1h",
+        encoding="utf-8",
+        has_note=False,
+        key_cols=("candle_begin_time", "symbol"),
+        sort_cols=("candle_begin_time",),
+    ),
+    "coin-hl-swap-candle-csv-1h": DatasetRule(
+        name="coin-hl-swap-candle-csv-1h",
+        encoding="utf-8",
+        has_note=False,
+        key_cols=("candle_begin_time", "symbol"),
+        sort_cols=("candle_begin_time",),
+    ),
     # 非 A 股交易数据（按股票代码拆分）
     "stock-hk-stock-data": DatasetRule(
         name="stock-hk-stock-data",
@@ -654,7 +698,13 @@ RULES: Dict[str, DatasetRule] = {
 
 # 拆分列配置与规则联动校验：避免 AGGREGATE_SPLIT_COLS 与 RULES 长期漂移。
 # 拆分列不在 key_cols[0] 的产品需在此注册索引
-_SPLIT_COL_KEY_INDEX = {"coin-cap": 1, "coin-coinmarketcap": 1}
+_SPLIT_COL_KEY_INDEX = {
+    "coin-cap": 1,
+    "coin-coinmarketcap": 1,
+    "coin-okx-candle-csv-1h": 1,
+    "coin-hl-spot-candle-csv-1h": 1,
+    "coin-hl-swap-candle-csv-1h": 1,
+}
 for _product_name, _split_col in AGGREGATE_SPLIT_COLS.items():
     _rule = RULES.get(_product_name)
     if _rule is None:
