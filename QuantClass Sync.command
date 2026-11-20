@@ -150,8 +150,8 @@ _try_activate_project_venv() {
 
 # 兼容当前仓库约定的共享 quant 工作区 .venv。
 _try_activate_workspace_venv() {
-    local workspace_venv_python="$HOME/workspace/quant/.venv/bin/python"
-    local workspace_venv_activate="$HOME/workspace/quant/.venv/bin/activate"
+    local workspace_venv_python="$HOME/workspace/invest/quant/.venv/bin/python"
+    local workspace_venv_activate="$HOME/workspace/invest/quant/.venv/bin/activate"
 
     if [ ! -x "$workspace_venv_python" ]; then
         _log_fallback "未找到共享 quant .venv，尝试系统 python3..."
@@ -267,7 +267,7 @@ if ! _try_activate_conda && ! _try_activate_project_venv && ! _try_activate_work
     echo "建议安装以下任一环境："
     echo "  1. conda，并在 user_config.json 中填写 conda_env"
     echo "  2. 项目根目录 .venv，可用 uv 创建：uv venv .venv"
-    echo "  3. 共享 quant .venv，路径为 ~/workspace/quant/.venv"
+    echo "  3. 共享 quant .venv，路径为 ~/workspace/invest/quant/.venv"
     echo "  4. 系统 python3，并确保命令行可访问"
     _pause_and_exit 1
 fi

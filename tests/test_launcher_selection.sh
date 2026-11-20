@@ -10,13 +10,13 @@ HARNESS_DIR="$TMP_ROOT/harness"
 FAKE_HOME="$TMP_ROOT/home"
 FAKE_BIN="$TMP_ROOT/bin"
 
-mkdir -p "$HARNESS_DIR" "$FAKE_HOME/workspace/quant/.venv/bin" "$FAKE_BIN"
+mkdir -p "$HARNESS_DIR" "$FAKE_HOME/workspace/invest/quant/.venv/bin" "$FAKE_BIN"
 
 cp "$PROJECT_DIR/QuantClass Sync.command" "$HARNESS_DIR/QuantClass Sync.command"
 cp "$PROJECT_DIR/requirements.txt" "$HARNESS_DIR/requirements.txt"
 chmod +x "$HARNESS_DIR/QuantClass Sync.command"
 
-cat > "$FAKE_HOME/workspace/quant/.venv/bin/python" <<'EOF'
+cat > "$FAKE_HOME/workspace/invest/quant/.venv/bin/python" <<'EOF'
 #!/bin/bash
 set -euo pipefail
 
@@ -35,7 +35,7 @@ fi
 echo "unexpected shared python invocation: $*" >&2
 exit 1
 EOF
-chmod +x "$FAKE_HOME/workspace/quant/.venv/bin/python"
+chmod +x "$FAKE_HOME/workspace/invest/quant/.venv/bin/python"
 
 cat > "$FAKE_BIN/python3" <<'EOF'
 #!/bin/bash
@@ -57,4 +57,4 @@ OUTPUT="$(
 )"
 
 echo "$OUTPUT" | grep -q "已选择环境类型: workspace_venv"
-echo "$OUTPUT" | grep -q "Python 路径: $FAKE_HOME/workspace/quant/.venv/bin/python"
+echo "$OUTPUT" | grep -q "Python 路径: $FAKE_HOME/workspace/invest/quant/.venv/bin/python"

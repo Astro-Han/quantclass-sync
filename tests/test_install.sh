@@ -223,7 +223,7 @@ print_e3_checklist() {
     echo "  E3.3  项目目录存在 .venv，且 conda 不可用或 conda_env 无效 -> 双击"
     echo "        验收: 启动日志显示走 .venv 分支，GUI 正常弹出"
     echo ""
-    echo "  E3.4  无 conda、无项目 .venv，但存在 ~/workspace/quant/.venv -> 双击"
+    echo "  E3.4  无 conda、无项目 .venv，但存在 ~/workspace/invest/quant/.venv -> 双击"
     echo "        验收: 启动日志显示走共享 quant .venv，GUI 正常弹出"
     echo ""
     echo "  E3.5  无 conda、无 .venv，仅系统 python3 -> 双击"
